@@ -1,4 +1,4 @@
-# NLP Project
+# ISE
 
 This project demonstrates a simple Retrieval-Augmented Generation (RAG) pipeline.
 
