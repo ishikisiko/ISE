@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 
 from main import build_search_client
-from search.search import BraveSearchClient, BrightDataSERPClient
+from search.search import (
+    BraveSearchClient,
+    BrightDataSERPClient,
+    FirecrawlSearchClient,
+    ParallelSearchClient,
+    TavilySearchClient,
+)
 from server import app
 
 
@@ -94,6 +100,90 @@ def test_brave_search_falls_back_to_secondary_and_records_usage(monkeypatch, tmp
     assert lines[1]["fallback_used"] is True
 
 
+def test_firecrawl_search_uses_v2_web_results(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse(
+            json_data={
+                "success": True,
+                "data": {
+                    "web": [
+                        {
+                            "title": "Firecrawl Result",
+                            "url": "https://example.com/firecrawl",
+                            "description": "Firecrawl snippet",
+                        }
+                    ]
+                },
+            }
+        )
+
+    monkeypatch.setattr("search.search.requests.post", fake_post)
+    hits = FirecrawlSearchClient(api_key="firecrawl-key").search("query")
+
+    assert captured["url"] == "https://api.firecrawl.dev/v2/search"
+    assert captured["headers"]["Authorization"] == "Bearer firecrawl-key"
+    assert captured["json"]["sources"] == ["web"]
+    assert [hit.title for hit in hits] == ["Firecrawl Result"]
+
+
+def test_tavily_search_maps_freshness_and_results(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse(
+            json_data={
+                "results": [
+                    {
+                        "title": "Tavily Result",
+                        "url": "https://example.com/tavily",
+                        "content": "Tavily snippet",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("search.search.requests.post", fake_post)
+    hits = TavilySearchClient(api_key="tavily-key").search("query", freshness="w1")
+
+    assert captured["url"] == "https://api.tavily.com/search"
+    assert captured["headers"]["Authorization"] == "Bearer tavily-key"
+    assert captured["json"]["time_range"] == "week"
+    assert [hit.snippet for hit in hits] == ["Tavily snippet"]
+
+
+def test_parallel_search_uses_beta_endpoint_and_excerpts(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse(
+            json_data={
+                "results": [
+                    {
+                        "title": "Parallel Result",
+                        "url": "https://example.com/parallel",
+                        "excerpts": ["First excerpt.", "Second excerpt."],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("search.search.requests.post", fake_post)
+    hits = ParallelSearchClient(api_key="parallel-key").search("query")
+
+    assert captured["url"] == "https://api.parallel.ai/v1beta/search"
+    assert captured["headers"]["x-api-key"] == "parallel-key"
+    assert captured["json"]["mode"] == "fast"
+    assert hits[0].snippet == "First excerpt. Second excerpt."
+
+
 def test_build_search_client_prefers_brave_metadata():
     config = {
         "braveSearch": {
@@ -107,6 +197,9 @@ def test_build_search_client_prefers_brave_metadata():
             "api_token": "bright-token",
             "zone": "serp_api1",
         },
+        "firecrawlSearch": {"api_key": "firecrawl-key"},
+        "tavilySearch": {"api_key": "tavily-key"},
+        "parallelSearch": {"api_key": "parallel-key"},
         "YOU_API_KEY": "you-key",
         "GOOGLE_API_KEY": "google-key",
         "GOOGLE_CX": "google-cx",
@@ -115,9 +208,10 @@ def test_build_search_client_prefers_brave_metadata():
     client = build_search_client(config)
 
     assert client is not None
-    assert getattr(client, "requested_sources") == ["brave", "brightdata", "you", "google"]
-    assert getattr(client, "active_sources") == ["brave", "brightdata", "you", "google"]
-    assert getattr(client, "configured_sources") == ["brave", "brightdata", "you", "google"]
+    expected = ["brave", "firecrawl", "tavily", "parallel", "brightdata", "you", "google"]
+    assert getattr(client, "requested_sources") == expected
+    assert getattr(client, "active_sources") == expected
+    assert getattr(client, "configured_sources") == expected
 
 
 def test_api_rejects_legacy_serp_source():

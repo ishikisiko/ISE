@@ -1,14 +1,14 @@
 {
     "displayResponseTimes": true,
-    "LLM_PROVIDER": "zai",
+    "LLM_PROVIDER": "opencode-go",
     "orchestrator_mode": "langchain",
     "postcheck": {
         "enabled": false,
         "log_verdicts": false,
         "judge": {
             "enabled": true,
-            "provider": "zai",
-            "model": "glm-4.5-air"
+            "provider": "opencode-go",
+            "model": "deepseek-v4-flash"
         },
         "react_fallback": {
             "enabled": false,
@@ -19,18 +19,18 @@
         "max_iterations": 5
     },
     "domainClassifier": {
-        "provider": "zai",
-        "model": "glm-4.5-air"
+        "provider": "opencode-go",
+        "model": "deepseek-v4-flash"
     },
     "routingAndKeywords": {
-        "provider": "zai",
-        "model": "glm-4.5-air"
+        "provider": "opencode-go",
+        "model": "deepseek-v4-flash"
     },
     "embeddings": {
         "provider": "openai_compatible",
-        "model": "doubao-embedding-vision",
-        "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
-        "api_key": "YOUR_ARK_EMBEDDING_API_KEY_HERE"
+        "model": "qwen3.7-text-embedding",
+        "base_url": "https://YOUR_ALIBABA_CLOUD_WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "api_key": "YOUR_DASHSCOPE_API_KEY_HERE"
     },
     "localRag": {
         "chunk_size": 1000,
@@ -52,12 +52,31 @@
         "base_url": "https://api.search.brave.com/res/v1/web/search",
         "timeout": 15,
         "rps": 1,
+        "secondary_rps": 1,
         "monthly_limit": 2000,
         "usage_log_path": "runtime/brave_search_usage.jsonl"
     },
+    "firecrawlSearch": {
+        "api_key": "YOUR_FIRECRAWL_API_KEY_HERE",
+        "base_url": "https://api.firecrawl.dev/v2/search",
+        "timeout": 30
+    },
+    "tavilySearch": {
+        "api_key": "YOUR_TAVILY_API_KEY_HERE",
+        "base_url": "https://api.tavily.com/search",
+        "timeout": 20,
+        "search_depth": "basic"
+    },
+    "parallelSearch": {
+        "api_key": "YOUR_PARALLEL_API_KEY_HERE",
+        "base_url": "https://api.parallel.ai/v1beta/search",
+        "timeout": 30,
+        "mode": "fast",
+        "max_chars_per_result": 1500
+    },
     "FINNHUB_API_KEY": "",
+    "SPORTSDB_API_KEY": "",
     "APISPORTS_KEY": "",
-    "RAPIDAPI_KEY": "",
     "youSearch": {
         "country": "US",
         "safesearch": "moderate",
@@ -71,9 +90,8 @@
     },
 
     "rerank": {
-        "enabled": true,
-        "api_key": "YOUR_DASHSCOPE_API_KEY_HERE",
-        "model": "qwen3-rerank",
+        "enabled": false,
+        "provider": "qwen",
         "min_score": 0.0,
         "max_per_domain": 1,
         "providers": {
@@ -93,22 +111,45 @@
         },
         "google": {
             "api_key": "YOUR_GOOGLE_API_KEY_HERE",
-            "model": "gemini-pro",
-            "base_url": "https://generativelanguage.googleapis.com/v1beta"
+            "model": "gemini-2.5-flash",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "available_models": [
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite"
+            ]
         },
         "hkgai": {
             "api_key": "YOUR_HKGAI_API_KEY_HERE",
             "model": "HKGAI-V1",
             "base_url": "https://oneapi.hkgai.net/v1"
         },
-        "zai": {
-            "api_key": "YOUR_ZAI_API_KEY_HERE",
-            "model": "glm-4.6",
-            "base_url": "https://open.bigmodel.cn/api/anthropic",
+        "opencode-go": {
+            "api_key": "YOUR_OPENCODE_GO_API_KEY_HERE",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_style": "openai",
             "available_models": [
-                "glm-4.6",
-                "glm-4.5-air"
-            ]
+                "glm-5.2",
+                "glm-5.1",
+                "kimi-k2.7-code",
+                "kimi-k2.6",
+                "mimo-v2.5",
+                "mimo-v2.5-pro",
+                "minimax-m3",
+                "minimax-m2.7",
+                "qwen3.7-max",
+                "qwen3.7-plus",
+                "qwen3.6-plus",
+                "deepseek-v4-pro",
+                "deepseek-v4-flash"
+            ],
+            "model_api_styles": {
+                "minimax-m3": "anthropic",
+                "minimax-m2.7": "anthropic",
+                "qwen3.7-max": "anthropic",
+                "qwen3.7-plus": "anthropic",
+                "qwen3.6-plus": "anthropic"
+            }
         },
         "openrouter": {
             "api_key": "YOUR_OPENROUTER_API_KEY_HERE",

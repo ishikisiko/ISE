@@ -160,6 +160,7 @@ Always answer in the same language as the user's question."""
                 finnhub_api_key=finnhub_api_key,
                 sportsdb_api_key=sportsdb_api_key,
                 apisports_api_key=apisports_api_key,
+                config=self.config,
             )
         
         # Search source metadata
@@ -1512,8 +1513,8 @@ def create_langchain_orchestrator(
     if classifier_cfg.get("enabled", True):
         provider = classifier_cfg.get("provider") or classifier_cfg.get("model")
         if provider:
-            from langchain.langchain_llm import create_chat_model
-            classifier_llm = create_chat_model(provider=provider, config=config)
+            from langchain.langchain_llm import create_role_chat_model
+            classifier_llm = create_role_chat_model(config, classifier_cfg)
     
     # Create routing LLM if configured
     routing_llm = None
@@ -1521,19 +1522,19 @@ def create_langchain_orchestrator(
     if routing_cfg.get("enabled", True):
         provider = routing_cfg.get("provider") or routing_cfg.get("model")
         if provider:
-            from langchain.langchain_llm import create_chat_model
-            routing_llm = create_chat_model(provider=provider, config=config)
+            from langchain.langchain_llm import create_role_chat_model
+            routing_llm = create_role_chat_model(config, routing_cfg)
 
     # Create post-check judge LLM if configured
     postcheck_llm = None
     postcheck_cfg = config.get("postcheck", {})
     judge_cfg = postcheck_cfg.get("judge", {})
-    if judge_cfg.get("enabled", True):
+    if postcheck_cfg.get("enabled", False) and judge_cfg.get("enabled", True):
         provider = judge_cfg.get("provider") or judge_cfg.get("model")
         if provider:
-            from langchain.langchain_llm import create_chat_model
+            from langchain.langchain_llm import create_role_chat_model
 
-            postcheck_llm = create_chat_model(provider=provider, config=config)
+            postcheck_llm = create_role_chat_model(config, judge_cfg)
     
     return LangChainOrchestrator(
         llm=llm,

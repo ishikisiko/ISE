@@ -7,6 +7,8 @@ from typing import Dict, Any, Optional, List
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from utils.config_validation import configured_value
+
 
 class SportsAPI:
     """
@@ -25,18 +27,20 @@ class SportsAPI:
     games = api.get_games('basketball_v1', league_id=12, season='2024-2025')
     """
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: Optional[str] = None):
         if config_path is None:
-            # Look for config.json in project root
-            config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
+            config_path = os.environ.get("NLP_CONFIG_PATH") or os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "config.json",
+            )
 
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = json.load(f)
 
         # 只需要官网 key
-        self.apisports_key = self.config.get("APISPORTS_KEY")
+        self.apisports_key = configured_value(self.config.get("APISPORTS_KEY"))
         if not self.apisports_key:
-            raise ValueError("APISPORTS_KEY missing in config.json (官网直连必须要 key)")
+            raise ValueError("APISPORTS_KEY missing in runtime configuration")
 
         # 官网直连通用 headers：x-apisports-key
         # docs for all sports show this header requirement

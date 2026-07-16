@@ -91,6 +91,275 @@ class SearchClient:
         raise NotImplementedError
 
 
+class _JsonPostSearchClient(SearchClient):
+    """Shared HTTP and normalization logic for JSON POST search APIs."""
+
+    max_results = 20
+
+    def __init__(self, api_key: str, *, base_url: str, timeout: int = 20) -> None:
+        super().__init__()
+        if not api_key:
+            raise ValueError(f"{self.display_name} API key is required.")
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.timeout = max(1, int(timeout))
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _build_payload(
+        self,
+        query: str,
+        limit: int,
+        *,
+        freshness: Optional[str],
+        date_restrict: Optional[str],
+    ) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def _result_entries(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def _entry_snippet(self, entry: Dict[str, Any]) -> str:
+        return str(entry.get("description") or entry.get("snippet") or "").strip()
+
+    def search(
+        self,
+        query: str,
+        num_results: int = 5,
+        *,
+        per_source_limit: Optional[int] = None,
+        freshness: Optional[str] = None,
+        date_restrict: Optional[str] = None,
+    ) -> List[SearchHit]:
+        self._reset_timings()
+        start = time.perf_counter()
+        error_message: Optional[str] = None
+        try:
+            limit = max(1, min(int(per_source_limit or num_results), self.max_results))
+            request_payload = self._build_payload(
+                query,
+                limit,
+                freshness=freshness,
+                date_restrict=date_restrict,
+            )
+            try:
+                response = requests.post(
+                    self.base_url,
+                    headers=self._headers(),
+                    json=request_payload,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except (requests.RequestException, ValueError) as exc:
+                error_message = str(exc)
+                raise RuntimeError(f"{self.display_name} search failed: {exc}") from exc
+
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"{self.display_name} returned an invalid JSON payload.")
+            if payload.get("success") is False:
+                message = payload.get("error") or payload.get("message") or "request failed"
+                raise RuntimeError(f"{self.display_name} search failed: {message}")
+
+            hits: List[SearchHit] = []
+            seen_urls: Set[str] = set()
+            for entry in self._result_entries(payload):
+                if not isinstance(entry, dict):
+                    continue
+                metadata = entry.get("metadata") or {}
+                url = str(
+                    entry.get("url")
+                    or (metadata.get("sourceURL") if isinstance(metadata, dict) else "")
+                    or ""
+                ).strip()
+                title = str(
+                    entry.get("title")
+                    or (metadata.get("title") if isinstance(metadata, dict) else "")
+                    or url
+                ).strip()
+                snippet = self._entry_snippet(entry) or title or url
+                if not url or url in seen_urls:
+                    continue
+                if not self._is_valid_search_result(title, url, snippet):
+                    continue
+                hits.append(SearchHit(title=title, url=url, snippet=snippet))
+                seen_urls.add(url)
+                if len(hits) >= limit:
+                    break
+            return hits
+        except Exception as exc:
+            if error_message is None:
+                error_message = str(exc)
+            raise
+        finally:
+            timing: Dict[str, Any] = {
+                "source": self.source_id,
+                "label": self.display_name,
+                "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+            }
+            if error_message:
+                timing["error"] = error_message
+            self._append_timing(timing)
+
+
+class FirecrawlSearchClient(_JsonPostSearchClient):
+    """Firecrawl v2 web search client."""
+
+    source_id = "firecrawl"
+    display_name = "Firecrawl"
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = "https://api.firecrawl.dev/v2/search",
+        timeout: int = 30,
+    ) -> None:
+        super().__init__(api_key, base_url=base_url, timeout=timeout)
+
+    def _build_payload(
+        self,
+        query: str,
+        limit: int,
+        *,
+        freshness: Optional[str],
+        date_restrict: Optional[str],
+    ) -> Dict[str, Any]:
+        _ = (freshness, date_restrict)
+        return {"query": query, "limit": limit, "sources": ["web"]}
+
+    def _result_entries(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        data = payload.get("data") or {}
+        entries = data.get("web") if isinstance(data, dict) else None
+        return entries if isinstance(entries, list) else []
+
+    def _entry_snippet(self, entry: Dict[str, Any]) -> str:
+        return str(
+            entry.get("description")
+            or entry.get("markdown")
+            or entry.get("snippet")
+            or ""
+        ).strip()
+
+
+class TavilySearchClient(_JsonPostSearchClient):
+    """Tavily web search client."""
+
+    source_id = "tavily"
+    display_name = "Tavily"
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = "https://api.tavily.com/search",
+        timeout: int = 20,
+        search_depth: str = "basic",
+    ) -> None:
+        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        allowed_depths = {"advanced", "basic", "fast", "ultra-fast"}
+        normalized_depth = str(search_depth or "basic").strip().lower()
+        self.search_depth = normalized_depth if normalized_depth in allowed_depths else "basic"
+
+    @staticmethod
+    def _time_range(value: Optional[str]) -> Optional[str]:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return None
+        if normalized in {"day", "week", "month", "year"}:
+            return normalized
+        return {"d": "day", "w": "week", "m": "month", "y": "year"}.get(normalized[0])
+
+    def _build_payload(
+        self,
+        query: str,
+        limit: int,
+        *,
+        freshness: Optional[str],
+        date_restrict: Optional[str],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "query": query,
+            "max_results": limit,
+            "search_depth": self.search_depth,
+            "include_answer": False,
+            "include_raw_content": False,
+            "include_images": False,
+        }
+        time_range = self._time_range(freshness or date_restrict)
+        if time_range:
+            payload["time_range"] = time_range
+        return payload
+
+    def _result_entries(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        entries = payload.get("results")
+        return entries if isinstance(entries, list) else []
+
+    def _entry_snippet(self, entry: Dict[str, Any]) -> str:
+        return str(
+            entry.get("content")
+            or entry.get("raw_content")
+            or entry.get("description")
+            or ""
+        ).strip()
+
+
+class ParallelSearchClient(_JsonPostSearchClient):
+    """Parallel Search beta API client."""
+
+    source_id = "parallel"
+    display_name = "Parallel"
+    max_results = 40
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = "https://api.parallel.ai/v1beta/search",
+        timeout: int = 30,
+        mode: str = "fast",
+        max_chars_per_result: int = 1500,
+    ) -> None:
+        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        normalized_mode = str(mode or "fast").strip().lower()
+        self.mode = normalized_mode if normalized_mode in {"fast", "one-shot", "agentic"} else "fast"
+        self.max_chars_per_result = max(200, int(max_chars_per_result))
+
+    def _headers(self) -> Dict[str, str]:
+        return {"x-api-key": self.api_key, "Content-Type": "application/json"}
+
+    def _build_payload(
+        self,
+        query: str,
+        limit: int,
+        *,
+        freshness: Optional[str],
+        date_restrict: Optional[str],
+    ) -> Dict[str, Any]:
+        _ = (freshness, date_restrict)
+        return {
+            "objective": query,
+            "search_queries": [query],
+            "mode": self.mode,
+            "max_results": limit,
+            "excerpts": {"max_chars_per_result": self.max_chars_per_result},
+        }
+
+    def _result_entries(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        entries = payload.get("results")
+        return entries if isinstance(entries, list) else []
+
+    def _entry_snippet(self, entry: Dict[str, Any]) -> str:
+        excerpts = entry.get("excerpts") or []
+        if isinstance(excerpts, list):
+            return " ".join(str(item).strip() for item in excerpts if str(item).strip())
+        return str(excerpts or entry.get("description") or "").strip()
+
+
 def _strip_html(raw_html: str) -> str:
     text = re.sub(r"<script.*?>.*?</script>", " ", raw_html, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<style.*?>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
@@ -314,6 +583,7 @@ class BraveSearchClient(SearchClient):
         base_url: str = "https://api.search.brave.com/res/v1/web/search",
         timeout: int = 15,
         rps: float = 1.0,
+        secondary_rps: Optional[float] = None,
         monthly_limit: int = 2000,
         primary_switch_limit: int = 1500,
         usage_log_path: str = "runtime/brave_search_usage.jsonl",
@@ -324,6 +594,10 @@ class BraveSearchClient(SearchClient):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.rps = max(0.1, float(rps))
+        self.secondary_rps = max(
+            0.1,
+            float(secondary_rps if secondary_rps is not None else self.rps),
+        )
         self.monthly_limit = max(1, int(monthly_limit))
         self.primary_switch_limit = max(1, int(primary_switch_limit))
         self.usage_recorder = BraveUsageRecorder(usage_log_path)
@@ -331,6 +605,7 @@ class BraveSearchClient(SearchClient):
         self.slots: Dict[str, str] = {"primary": primary_api_key}
         if secondary_api_key:
             self.slots["secondary"] = secondary_api_key
+        self._slot_rps = {"primary": self.rps, "secondary": self.secondary_rps}
         self._slot_locks = {slot: threading.Lock() for slot in self.slots}
         self._last_request_at = {slot: 0.0 for slot in self.slots}
         self._last_errors: List[Dict[str, str]] = []
@@ -375,7 +650,7 @@ class BraveSearchClient(SearchClient):
         return slots
 
     def _respect_rps(self, slot: str) -> None:
-        min_interval = 1.0 / self.rps
+        min_interval = 1.0 / self._slot_rps.get(slot, self.rps)
         lock = self._slot_locks[slot]
         with lock:
             elapsed = time.perf_counter() - self._last_request_at[slot]

@@ -114,7 +114,7 @@ class LangChainVectorStore:
     """FAISS-based vector store backed by LangChain primitives.
     
     This class provides a unified interface for document indexing and retrieval
-    using FAISS vector store with HuggingFace embeddings.
+    using a FAISS vector store with the configured embedding provider.
     """
 
     def __init__(
@@ -138,6 +138,11 @@ class LangChainVectorStore:
                 raise ValueError(
                     "Embedding provider 'openai_compatible' requires 'embeddings.api_key' "
                     "in config.json or EMBEDDING_API_KEY / OPENAI_API_KEY in the environment."
+                )
+            if not settings["base_url"]:
+                raise ValueError(
+                    "Embedding provider 'openai_compatible' requires a real 'embeddings.base_url' "
+                    "in config.json or EMBEDDING_BASE_URL in the environment."
                 )
             from langchain_openai import OpenAIEmbeddings
 

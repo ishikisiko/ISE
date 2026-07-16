@@ -3,10 +3,14 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional
 
+from utils.config_validation import configured_value
+
 
 DEFAULT_HUGGINGFACE_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-DEFAULT_OPENAI_COMPATIBLE_EMBEDDING_MODEL = "doubao-embedding-vision"
-DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3"
+DEFAULT_OPENAI_COMPATIBLE_EMBEDDING_MODEL = "qwen3.7-text-embedding"
+DEFAULT_OPENAI_COMPATIBLE_BASE_URL = (
+    "https://YOUR_ALIBABA_CLOUD_WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+)
 
 
 def resolve_embedding_settings(
@@ -37,22 +41,17 @@ def resolve_embedding_settings(
             else DEFAULT_HUGGINGFACE_EMBEDDING_MODEL
         )
 
-    base_url = str(
-        embeddings_cfg.get("base_url")
-        or os.environ.get("EMBEDDING_BASE_URL")
-        or (
-            DEFAULT_OPENAI_COMPATIBLE_BASE_URL
-            if provider == "openai_compatible"
-            else ""
-        )
-    ).strip()
+    base_url = configured_value(embeddings_cfg.get("base_url")) or configured_value(
+        os.environ.get("EMBEDDING_BASE_URL")
+    )
 
-    api_key = str(
+    api_key = configured_value(
         embeddings_cfg.get("api_key")
-        or os.environ.get("EMBEDDING_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or ""
-    ).strip()
+    ) or configured_value(
+        os.environ.get("EMBEDDING_API_KEY")
+    ) or configured_value(
+        os.environ.get("OPENAI_API_KEY")
+    )
 
     timeout = embeddings_cfg.get("timeout")
     try:

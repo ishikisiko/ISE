@@ -20,6 +20,7 @@ from pydantic import Field
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from search.search import SearchHit
+from utils.config_validation import configured_value
 
 
 class Qwen3DocumentCompressor(BaseDocumentCompressor):
@@ -289,7 +290,8 @@ def create_qwen3_compressor(
     
     if api_key is None:
         api_key = qwen_config.get("api_key", "")
-    
+    api_key = configured_value(api_key)
+
     if not api_key:
         raise ValueError("DashScope API key is required for Qwen3 reranking.")
     
@@ -330,6 +332,8 @@ def create_search_reranker(
             config = {}
     
     rerank_config = config.get("rerank", {})
+    if rerank_config.get("enabled") is False:
+        return None
     provider = config.get("RERANK_PROVIDER") or rerank_config.get("provider")
     
     if not provider:

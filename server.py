@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from main import build_search_client, build_reranker
 from utils.chunking import resolve_chunk_settings
+from utils.config_validation import configured_value
 from utils.temperature_config import get_temperature_for_task
 from langchain.langchain_llm import create_chat_model
 from langchain.langchain_orchestrator import create_langchain_orchestrator, LangChainOrchestrator
@@ -92,11 +93,7 @@ def build_pipeline(
 
     def provider_has_valid_key(name: str) -> bool:
         cfg = providers_cfg.get(name) or {}
-        key = (cfg.get("api_key") or "").strip()
-        if not key:
-            return False
-        upper_key = key.upper()
-        return not any(token in upper_key for token in ("YOUR_", "REPLACE", "TODO"))
+        return bool(configured_value(cfg.get("api_key")))
 
     def match_provider_by_model(model_id: str) -> Optional[str]:
         # First try to match exact model name
@@ -124,6 +121,7 @@ def build_pipeline(
                 return matched
 
         preferred_order = [
+            "opencode-go",
             "minimax",
             "zai",
             "glm",
@@ -190,18 +188,27 @@ def build_pipeline(
     normalized_sources = _normalize_search_sources(search_sources)
     configured_sources: List[str] = []
     brave_cfg = config.get("braveSearch") or {}
-    if (brave_cfg.get("primary_api_key") or "").strip():
+    if configured_value(brave_cfg.get("primary_api_key")):
         configured_sources.append("brave")
+    firecrawl_cfg = config.get("firecrawlSearch") or {}
+    if configured_value(firecrawl_cfg.get("api_key")):
+        configured_sources.append("firecrawl")
+    tavily_cfg = config.get("tavilySearch") or {}
+    if configured_value(tavily_cfg.get("api_key")):
+        configured_sources.append("tavily")
+    parallel_cfg = config.get("parallelSearch") or {}
+    if configured_value(parallel_cfg.get("api_key")):
+        configured_sources.append("parallel")
     bright_cfg = config.get("brightDataSearch") or {}
-    if (bright_cfg.get("api_token") or "").strip() and (bright_cfg.get("zone") or "").strip():
+    if configured_value(bright_cfg.get("api_token")) and (bright_cfg.get("zone") or "").strip():
         configured_sources.append("brightdata")
     you_cfg = config.get("youSearch") or {}
-    you_key = (you_cfg.get("api_key") or config.get("YOU_API_KEY") or "").strip()
+    you_key = configured_value(you_cfg.get("api_key") or config.get("YOU_API_KEY"))
     if you_key:
         configured_sources.append("you")
     google_cfg = config.get("googleSearch") or {}
-    google_key = (google_cfg.get("api_key") or config.get("GOOGLE_API_KEY") or "").strip()
-    google_cx = (google_cfg.get("cx") or config.get("GOOGLE_CX") or "").strip()
+    google_key = configured_value(google_cfg.get("api_key") or config.get("GOOGLE_API_KEY"))
+    google_cx = configured_value(google_cfg.get("cx") or config.get("GOOGLE_CX"))
     if google_key and google_cx:
         configured_sources.append("google")
 
@@ -229,14 +236,14 @@ def build_pipeline(
     reranker: Optional[Any] = None
     try:
         from langchain.langchain_rerank import create_qwen3_compressor
-        _, rerank_config = build_reranker(config)
+        configured_reranker, rerank_config = build_reranker(config)
         qwen_cfg = (rerank_config.get("providers") or {}).get("qwen") or rerank_config.get("qwen") or {}
-        if qwen_cfg.get("api_key"):
+        if configured_reranker is not None:
             reranker = create_qwen3_compressor(
                 api_key=qwen_cfg.get("api_key"),
                 model=qwen_cfg.get("model", "qwen3-rerank"),
                 base_url=qwen_cfg.get("base_url"),
-                timeout=qwen_cfg.get("timeout", 15),
+                request_timeout=qwen_cfg.get("timeout", 15),
             )
     except Exception as exc:
         print(f"[server] LangChain reranker disabled: {exc}")
@@ -301,6 +308,8 @@ def get_available_models():
         
         # Get all models from providers (including available_models)
         for provider_name, provider_config in config.get("providers", {}).items():
+            if not configured_value(provider_config.get("api_key")):
+                continue
             # Add the default model
             default_model = provider_config.get("model")
             if default_model and default_model not in seen_ids:
@@ -372,7 +381,15 @@ def answer() -> Any:
         raw_sources = payload["search_sources"]
         if not isinstance(raw_sources, list):
             return jsonify({"error": "'search_sources' must be an array."}), 400
-        allowed_sources = {"brave", "brightdata", "you", "google"}
+        allowed_sources = {
+            "brave",
+            "firecrawl",
+            "tavily",
+            "parallel",
+            "brightdata",
+            "you",
+            "google",
+        }
         normalized_sources: List[str] = []
         seen = set()
         for item in raw_sources:

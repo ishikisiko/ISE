@@ -351,14 +351,15 @@ document.addEventListener("DOMContentLoaded", () => {
     async function loadAvailableModels() {
         // Provider display names and sort order
         const providerMeta = {
-            zai: { label: "Zai", order: 1 },
-            glm: { label: "GLM", order: 2 },
-            openai: { label: "OpenAI", order: 3 },
-            anthropic: { label: "Anthropic", order: 4 },
-            google: { label: "Google", order: 5 },
-            minimax: { label: "Minimax", order: 6 },
-            hkgai: { label: "HKGAI", order: 7 },
-            openrouter: { label: "OpenRouter", order: 8 },
+            "opencode-go": { label: "OpenCode Go", order: 1 },
+            zai: { label: "Zai", order: 2 },
+            glm: { label: "GLM", order: 3 },
+            openai: { label: "OpenAI", order: 4 },
+            anthropic: { label: "Anthropic", order: 5 },
+            google: { label: "Google", order: 6 },
+            minimax: { label: "Minimax", order: 7 },
+            hkgai: { label: "HKGAI", order: 8 },
+            openrouter: { label: "OpenRouter", order: 9 },
         };
 
         function normalizeProvider(name) {
@@ -406,7 +407,7 @@ document.addEventListener("DOMContentLoaded", () => {
             modelSelect.innerHTML = "";
             const defaultOption = document.createElement("option");
             defaultOption.value = "";
-            defaultOption.textContent = "默认模型 (Zai - glm-4.6)";
+            defaultOption.textContent = "默认模型 (OpenCode Go - deepseek-v4-flash)";
             modelSelect.appendChild(defaultOption);
 
             // Sort providers by defined order, then alphabetical fallback
@@ -437,10 +438,15 @@ document.addEventListener("DOMContentLoaded", () => {
             modelSelect.innerHTML = "";
             const defaultOption = document.createElement("option");
             defaultOption.value = "";
-            defaultOption.textContent = "默认模型 (MiniMax - MiniMax-M2.7-highspeed)";
+            defaultOption.textContent = "默认模型 (OpenCode Go - deepseek-v4-flash)";
             modelSelect.appendChild(defaultOption);
 
             const fallback = {
+                "OpenCode Go": [
+                    { id: "deepseek-v4-flash", label: "OpenCode Go — deepseek-v4-flash" },
+                    { id: "glm-5.2", label: "OpenCode Go — glm-5.2" },
+                    { id: "glm-5.1", label: "OpenCode Go — glm-5.1" },
+                ],
                 MiniMax: [
                     { id: "minimax", label: "MiniMax — MiniMax-M2.7-highspeed (provider default)" },
                 ],
@@ -469,7 +475,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 ],
             };
 
-            for (const groupName of ["MiniMax", "Zai", "GLM", "OpenAI", "Anthropic", "Google", "HKGAI", "OpenRouter"]) {
+            for (const groupName of ["OpenCode Go", "MiniMax", "Zai", "GLM", "OpenAI", "Anthropic", "Google", "HKGAI", "OpenRouter"]) {
                 const optgroup = document.createElement("optgroup");
                 optgroup.label = groupName;
                 for (const item of fallback[groupName]) {

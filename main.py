@@ -7,19 +7,23 @@ from typing import Optional, Tuple, Dict, Any, List, Union, Set
 # Add project directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from llm.api import LLMClient, HKGAIClient
+from llm.api import LLMClient, HKGAIClient, resolve_model_api_style
 from search.search import (
     CombinedSearchClient,
     BraveSearchClient,
     BrightDataSERPClient,
+    FirecrawlSearchClient,
     GoogleSearchClient,
+    ParallelSearchClient,
     PrioritySearchClient,
     SearchClient,
+    TavilySearchClient,
     YouSearchClient,
 )
 from search.rerank import BaseReranker, Qwen3Reranker
 from orchestrators.smart_orchestrator import SmartSearchOrchestrator
 from utils.chunking import resolve_chunk_settings
+from utils.config_validation import configured_value
 from utils.temperature_config import get_temperature_for_task
 
 # Import LangChain components for optional use
@@ -77,7 +81,15 @@ def build_search_client(
 ) -> Optional[SearchClient]:
     """Build a search client from config supporting Brave, Bright Data, You.com, and Google."""
 
-    allowed_sources = {"brave", "brightdata", "you", "google"}
+    allowed_sources = {
+        "brave",
+        "firecrawl",
+        "tavily",
+        "parallel",
+        "brightdata",
+        "you",
+        "google",
+    }
     requested_order: Optional[List[str]] = None
     requested_lookup: Optional[Set[str]] = None
     if sources is not None:
@@ -125,6 +137,9 @@ def build_search_client(
 
     configured_flags: Dict[str, bool] = {
         "brave": False,
+        "firecrawl": False,
+        "tavily": False,
+        "parallel": False,
         "brightdata": False,
         "you": False,
         "google": False,
@@ -134,8 +149,8 @@ def build_search_client(
     brave_client: Optional[SearchClient] = None
 
     brave_cfg = config_or_key.get("braveSearch") or {}
-    brave_primary_key = (brave_cfg.get("primary_api_key") or "").strip()
-    brave_secondary_key = (brave_cfg.get("secondary_api_key") or "").strip()
+    brave_primary_key = configured_value(brave_cfg.get("primary_api_key"))
+    brave_secondary_key = configured_value(brave_cfg.get("secondary_api_key"))
     if brave_primary_key:
         configured_flags["brave"] = True
         if wants("brave"):
@@ -146,6 +161,9 @@ def build_search_client(
                     base_url=(brave_cfg.get("base_url") or "https://api.search.brave.com/res/v1/web/search"),
                     timeout=int(brave_cfg.get("timeout", 15)),
                     rps=float(brave_cfg.get("rps", 1)),
+                    secondary_rps=float(
+                        brave_cfg.get("secondary_rps", brave_cfg.get("rps", 1))
+                    ),
                     monthly_limit=int(brave_cfg.get("monthly_limit", 2000)),
                     primary_switch_limit=int(brave_cfg.get("primary_switch_limit", 1500)),
                     usage_log_path=str(brave_cfg.get("usage_log_path") or "runtime/brave_search_usage.jsonl"),
@@ -155,8 +173,73 @@ def build_search_client(
     elif requested_lookup is not None and "brave" in requested_lookup:
         missing_requested.append("brave")
 
+    firecrawl_cfg = config_or_key.get("firecrawlSearch") or {}
+    firecrawl_key = configured_value(firecrawl_cfg.get("api_key"))
+    if firecrawl_key:
+        configured_flags["firecrawl"] = True
+        if wants("firecrawl"):
+            try:
+                fallback_clients.append(
+                    FirecrawlSearchClient(
+                        api_key=firecrawl_key,
+                        base_url=(
+                            firecrawl_cfg.get("base_url")
+                            or "https://api.firecrawl.dev/v2/search"
+                        ),
+                        timeout=int(firecrawl_cfg.get("timeout", 30)),
+                    )
+                )
+            except Exception as exc:
+                print(f"[search] Firecrawl disabled: {exc}")
+    elif requested_lookup is not None and "firecrawl" in requested_lookup:
+        missing_requested.append("firecrawl")
+
+    tavily_cfg = config_or_key.get("tavilySearch") or {}
+    tavily_key = configured_value(tavily_cfg.get("api_key"))
+    if tavily_key:
+        configured_flags["tavily"] = True
+        if wants("tavily"):
+            try:
+                fallback_clients.append(
+                    TavilySearchClient(
+                        api_key=tavily_key,
+                        base_url=(tavily_cfg.get("base_url") or "https://api.tavily.com/search"),
+                        timeout=int(tavily_cfg.get("timeout", 20)),
+                        search_depth=str(tavily_cfg.get("search_depth") or "basic"),
+                    )
+                )
+            except Exception as exc:
+                print(f"[search] Tavily disabled: {exc}")
+    elif requested_lookup is not None and "tavily" in requested_lookup:
+        missing_requested.append("tavily")
+
+    parallel_cfg = config_or_key.get("parallelSearch") or {}
+    parallel_key = configured_value(parallel_cfg.get("api_key"))
+    if parallel_key:
+        configured_flags["parallel"] = True
+        if wants("parallel"):
+            try:
+                fallback_clients.append(
+                    ParallelSearchClient(
+                        api_key=parallel_key,
+                        base_url=(
+                            parallel_cfg.get("base_url")
+                            or "https://api.parallel.ai/v1beta/search"
+                        ),
+                        timeout=int(parallel_cfg.get("timeout", 30)),
+                        mode=str(parallel_cfg.get("mode") or "fast"),
+                        max_chars_per_result=int(
+                            parallel_cfg.get("max_chars_per_result", 1500)
+                        ),
+                    )
+                )
+            except Exception as exc:
+                print(f"[search] Parallel disabled: {exc}")
+    elif requested_lookup is not None and "parallel" in requested_lookup:
+        missing_requested.append("parallel")
+
     bright_cfg = config_or_key.get("brightDataSearch") or {}
-    bright_api_token = (bright_cfg.get("api_token") or "").strip()
+    bright_api_token = configured_value(bright_cfg.get("api_token"))
     bright_zone = (bright_cfg.get("zone") or "").strip()
     if bright_api_token and bright_zone:
         configured_flags["brightdata"] = True
@@ -180,7 +263,7 @@ def build_search_client(
         missing_requested.append("brightdata")
 
     you_cfg = config_or_key.get("youSearch") or {}
-    you_key = (you_cfg.get("api_key") or config_or_key.get("YOU_API_KEY") or "").strip()
+    you_key = configured_value(you_cfg.get("api_key") or config_or_key.get("YOU_API_KEY"))
     if you_key:
         configured_flags["you"] = True
         if wants("you"):
@@ -228,8 +311,8 @@ def build_search_client(
 
     # Google Custom Search JSON API
     google_cfg = config_or_key.get("googleSearch") or {}
-    google_key = (google_cfg.get("api_key") or config_or_key.get("GOOGLE_API_KEY") or "").strip()
-    google_cx = (google_cfg.get("cx") or config_or_key.get("GOOGLE_CX") or "").strip()
+    google_key = configured_value(google_cfg.get("api_key") or config_or_key.get("GOOGLE_API_KEY"))
+    google_cx = configured_value(google_cfg.get("cx") or config_or_key.get("GOOGLE_CX"))
     if google_key and google_cx:
         configured_flags["google"] = True
         if wants("google"):
@@ -330,7 +413,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--provider",
         type=str,
-        help="Override the LLM provider or model (openai, anthropic, google, glm, zai, hkgai, openrouter, minimax, or specific model like minimax/minimax-m2:free).",
+        help="Override the LLM provider or model (opencode-go, openai, anthropic, google, glm, zai, hkgai, openrouter, minimax, or a configured model ID).",
     )
     parser.add_argument(
         "--model",
@@ -398,7 +481,7 @@ def build_llm_client(
             model_id = provider_or_model
     else:
         # Check if it's a known provider name
-        supported_providers = ["openai", "anthropic", "google", "glm", "zai", "hkgai", "openrouter", "minimax"]
+        supported_providers = ["opencode-go", "openai", "anthropic", "google", "glm", "zai", "hkgai", "openrouter", "minimax"]
         if provider_or_model in supported_providers:
             # It's a provider name
             provider = provider_or_model
@@ -426,7 +509,7 @@ def build_llm_client(
                 model_id = None
     
     # Validate provider
-    supported_providers = ["openai", "anthropic", "google", "glm", "zai", "hkgai", "openrouter", "minimax"]
+    supported_providers = ["opencode-go", "openai", "anthropic", "google", "glm", "zai", "hkgai", "openrouter", "minimax"]
     if provider not in supported_providers:
         raise ValueError(f"Unsupported provider '{provider}'. Supported providers: {', '.join(supported_providers)}")
     
@@ -479,7 +562,7 @@ def build_llm_client(
     display_thinking = thinking_config.get("display_in_response", False) if isinstance(thinking_config, dict) else False
     
     return LLMClient(
-        api_key=provider_config.get("api_key"),
+        api_key=configured_value(provider_config.get("api_key")),
         model_id=final_model_id,
         base_url=provider_config.get("base_url"),
         request_timeout=provider_timeout,
@@ -488,6 +571,7 @@ def build_llm_client(
         backoff_factor=provider_backoff_factor,
         thinking_enabled=thinking_enabled,
         display_thinking=display_thinking,
+        api_style=resolve_model_api_style(provider_config, final_model_id),
         model_base_urls=provider_config.get("model_base_urls")
     )
 
@@ -602,6 +686,8 @@ def build_reranker(config: dict) -> Tuple[Optional[BaseReranker], Dict[str, Any]
     """Instantiate a reranker based on configuration."""
 
     rerank_config = config.get("rerank") or {}
+    if rerank_config.get("enabled") is False:
+        return None, rerank_config
     provider = config.get("RERANK_PROVIDER") or rerank_config.get("provider")
     if not provider:
         return None, rerank_config
@@ -614,7 +700,7 @@ def build_reranker(config: dict) -> Tuple[Optional[BaseReranker], Dict[str, Any]
             or rerank_config.get("qwen")
             or {}
         )
-        api_key = provider_settings.get("api_key")
+        api_key = configured_value(provider_settings.get("api_key"))
         if not api_key:
             raise ValueError("DashScope API key is required for Qwen3 reranking.")
 
@@ -673,19 +759,28 @@ def main() -> None:
     missing_sources: List[str] = []
     configured_sources: List[str] = []
     brave_cfg_cli = config.get("braveSearch") or {}
-    if (brave_cfg_cli.get("primary_api_key") or "").strip():
+    if configured_value(brave_cfg_cli.get("primary_api_key")):
         configured_sources.append("brave")
+    firecrawl_cfg_cli = config.get("firecrawlSearch") or {}
+    if configured_value(firecrawl_cfg_cli.get("api_key")):
+        configured_sources.append("firecrawl")
+    tavily_cfg_cli = config.get("tavilySearch") or {}
+    if configured_value(tavily_cfg_cli.get("api_key")):
+        configured_sources.append("tavily")
+    parallel_cfg_cli = config.get("parallelSearch") or {}
+    if configured_value(parallel_cfg_cli.get("api_key")):
+        configured_sources.append("parallel")
     bright_cfg_cli = config.get("brightDataSearch") or {}
-    if (bright_cfg_cli.get("api_token") or "").strip() and (bright_cfg_cli.get("zone") or "").strip():
+    if configured_value(bright_cfg_cli.get("api_token")) and (bright_cfg_cli.get("zone") or "").strip():
         configured_sources.append("brightdata")
     you_cfg_cli = config.get("youSearch") or {}
-    if (you_cfg_cli.get("api_key") or config.get("YOU_API_KEY") or "").strip():
+    if configured_value(you_cfg_cli.get("api_key") or config.get("YOU_API_KEY")):
         configured_sources.append("you")
     google_cfg_cli = config.get("googleSearch") or {}
-    google_key_cli = (google_cfg_cli.get("api_key") or config.get("GOOGLE_API_KEY") or "").strip()
-    google_cx_cli = (google_cfg_cli.get("cx") or config.get("GOOGLE_CX") or "").strip()
-    sportsdb_key_cli = (config.get("SPORTSDB_API_KEY") or "").strip()
-    apisports_key_cli = (config.get("APISPORTS_KEY") or "").strip()
+    google_key_cli = configured_value(google_cfg_cli.get("api_key") or config.get("GOOGLE_API_KEY"))
+    google_cx_cli = configured_value(google_cfg_cli.get("cx") or config.get("GOOGLE_CX"))
+    sportsdb_key_cli = configured_value(config.get("SPORTSDB_API_KEY"))
+    apisports_key_cli = configured_value(config.get("APISPORTS_KEY"))
     
     if google_key_cli and google_cx_cli:
         configured_sources.append("google")

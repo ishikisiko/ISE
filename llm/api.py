@@ -8,6 +8,32 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError, Timeout, RequestException
 from urllib3.util.retry import Retry
 
+from llm.google_api import (
+    build_google_endpoint,
+    build_google_payload,
+    extract_google_content,
+)
+
+
+VALID_API_STYLES = {"auto", "openai", "anthropic"}
+
+
+def resolve_model_api_style(
+    provider_config: Dict[str, Any],
+    model_id: str,
+) -> str:
+    """Resolve the wire protocol for a provider/model combination."""
+    model_styles = provider_config.get("model_api_styles") or {}
+    if not isinstance(model_styles, dict):
+        raise ValueError("model_api_styles must be an object mapping model IDs to API styles.")
+
+    api_style = model_styles.get(model_id, provider_config.get("api_style", "auto"))
+    normalized = str(api_style or "auto").strip().lower()
+    if normalized not in VALID_API_STYLES:
+        supported = ", ".join(sorted(VALID_API_STYLES))
+        raise ValueError(f"Unsupported API style '{api_style}'. Supported styles: {supported}")
+    return normalized
+
 
 class LLMClient:
     """Universal client for various LLM API endpoints with enhanced error handling."""
@@ -23,6 +49,7 @@ class LLMClient:
         backoff_factor: float = 1.0,
         thinking_enabled: bool = False,
         display_thinking: bool = False,
+        api_style: str = "auto",
         model_base_urls: Optional[Dict[str, str]] = None
     ) -> None:
         self.api_key = api_key
@@ -32,6 +59,12 @@ class LLMClient:
         self.backoff_factor = backoff_factor
         self.thinking_enabled = thinking_enabled
         self.display_thinking = display_thinking
+        self.api_style = str(api_style or "auto").strip().lower()
+        if self.api_style not in VALID_API_STYLES:
+            supported = ", ".join(sorted(VALID_API_STYLES))
+            raise ValueError(
+                f"Unsupported API style '{api_style}'. Supported styles: {supported}"
+            )
         self.model_base_urls = model_base_urls or {}
         
         # Use model-specific base URL if available for this model
@@ -41,12 +74,14 @@ class LLMClient:
             self.base_url = base_url.rstrip("/")
         self.request_timeout = request_timeout
         # Detect Anthropic-compatible endpoint (Minimax & other IB provider endpoints)
-        self.anthropic_compatible = False
-        try:
-            if isinstance(self.base_url, str) and "/anthropic" in self.base_url:
-                self.anthropic_compatible = True
-        except Exception:
+        if self.api_style == "anthropic":
+            self.anthropic_compatible = True
+        elif self.api_style == "openai":
             self.anthropic_compatible = False
+        else:
+            self.anthropic_compatible = (
+                provider == "anthropic" or "/anthropic" in self.base_url
+            )
         
         if not self.api_key:
             raise ValueError(f"{provider.upper()}_API_KEY must be provided.")
@@ -68,7 +103,7 @@ class LLMClient:
             self.headers["x-api-key"] = self.api_key
             self.headers["anthropic-version"] = "2023-06-01"
         elif provider == "google":
-            self.headers["Authorization"] = f"Bearer {self.api_key}"
+            self.headers["x-goog-api-key"] = self.api_key
         elif provider in ("glm", "zai") and not self.anthropic_compatible:
             self.headers["Authorization"] = f"Bearer {self.api_key}"
         elif provider == "openrouter":
@@ -99,6 +134,49 @@ class LLMClient:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
+    @staticmethod
+    def _convert_to_anthropic_messages(
+        messages: List[Dict[str, Any]],
+    ) -> tuple[Optional[str], List[Dict[str, Any]]]:
+        """Extract the system prompt and convert content to Anthropic blocks."""
+        system_message = None
+        converted = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            if role == "system":
+                if isinstance(content, str):
+                    system_message = content
+                continue
+
+            if isinstance(content, str):
+                blocks = [{"type": "text", "text": content}]
+            elif isinstance(content, list):
+                blocks = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        blocks.append({"type": "text", "text": str(item)})
+                        continue
+                    if item.get("type") != "image_url":
+                        blocks.append(item)
+                        continue
+                    image_url = item.get("image_url") or {}
+                    url = image_url.get("url", "")
+                    parts = url.split(";base64,", 1) if url.startswith("data:") else []
+                    if len(parts) == 2:
+                        blocks.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": parts[0].replace("data:", ""),
+                                "data": parts[1],
+                            },
+                        })
+            else:
+                blocks = [{"type": "text", "text": str(content)}]
+            converted.append({"role": role, "content": blocks})
+        return system_message, converted
+
     def chat(
         self,
         system_prompt: str,
@@ -110,7 +188,9 @@ class LLMClient:
     ) -> Dict[str, Any]:
         """Chat method for OpenAI-compatible APIs with enhanced error handling."""
         endpoint = f"{self.base_url}/chat/completions"
-        if self.anthropic_compatible:
+        if self.provider == "google":
+            endpoint = build_google_endpoint(self.base_url, self.model_id)
+        elif self.anthropic_compatible:
             endpoint = f"{self.base_url}/messages"
         
         # Build messages array
@@ -144,12 +224,19 @@ class LLMClient:
              # The system prompt should contain information about images and any vision metadata
              messages.append({"role": "user", "content": user_prompt})
 
-        payload = {
-            "model": self.model_id,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
+        if self.provider == "google":
+            payload = build_google_payload(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        else:
+            payload = {
+                "model": self.model_id,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
 
         # GLM/Zai-specific adjustments
         if self.provider in ("glm", "zai") and not self.anthropic_compatible:
@@ -157,68 +244,10 @@ class LLMClient:
 
         # For Anthropic-compatible endpoints, convert messages to the expected block format
         if self.anthropic_compatible:
-            # Extract system message and convert user/assistant messages
-            system_msg = None
-            anthro_msgs = []
-            for m in messages:
-                role = m.get("role") if isinstance(m, dict) else "user"
-                text_content = m.get("content") if isinstance(m, dict) else m
-                
-                # Handle system message separately
-                if role == "system":
-                    if isinstance(text_content, str):
-                        system_msg = text_content
-                    continue
-                
-                # Convert content to block format
-                if isinstance(text_content, str):
-                    content_blocks = [{"type": "text", "text": text_content}]
-                elif isinstance(text_content, list):
-                    # Convert OpenAI-style image_url to Anthropic-style image format
-                    content_blocks = []
-                    for item in text_content:
-                        if isinstance(item, dict):
-                            if item.get("type") == "text":
-                                content_blocks.append(item)
-                            elif item.get("type") == "image_url":
-                                # Convert from OpenAI format to Anthropic format
-                                image_url = item.get("image_url", {})
-                                url = image_url.get("url", "")
-                                if url.startswith("data:"):
-                                    # Extract media type and base64 data
-                                    parts = url.split(";base64,")
-                                    if len(parts) == 2:
-                                        media_type = parts[0].replace("data:", "")
-                                        base64_data = parts[1]
-                                        content_blocks.append({
-                                            "type": "image",
-                                            "source": {
-                                                "type": "base64",
-                                                "media_type": media_type,
-                                                "data": base64_data
-                                            }
-                                        })
-                                else:
-                                    # Fallback for non-base64 URLs (shouldn't happen but handle gracefully)
-                                    content_blocks.append(item)
-                            else:
-                                content_blocks.append(item)
-                        else:
-                            content_blocks.append({"type": "text", "text": str(item)})
-                else:
-                    content_blocks = [{"type": "text", "text": str(text_content)}]
-                
-                anthro_msgs.append({"role": role, "content": content_blocks})
-            
+            system_msg, anthro_msgs = self._convert_to_anthropic_messages(messages)
             payload["messages"] = anthro_msgs
-            # Add system as a separate field
             if system_msg:
                 payload["system"] = system_msg
-            # Remove messages from payload since we're using the Anthropic format
-            if "messages" in payload and not anthro_msgs:
-                del payload["messages"]
-            
-            # Add thinking parameter for MiniMax if enabled
             if self.thinking_enabled:
                 payload["thinking"] = {"type": "enabled", "budget_tokens": 10000}
 
@@ -314,6 +343,8 @@ class LLMClient:
         content = ""
         thinking_content = ""
         try:
+            if self.provider == "google":
+                content = extract_google_content(data)
             # Anthropic-style response handling
             if self.anthropic_compatible:
                 # Try to find content blocks
@@ -413,7 +444,9 @@ class LLMClient:
     ) -> Dict[str, Any]:
         """Chat method for OpenAI-compatible APIs with enhanced error handling."""
         endpoint = f"{self.base_url}/chat/completions"
-        if self.anthropic_compatible:
+        if self.provider == "google":
+            endpoint = build_google_endpoint(self.base_url, self.model_id, stream=True)
+        elif self.anthropic_compatible:
             endpoint = f"{self.base_url}/messages"
         
         # Build messages array
@@ -422,13 +455,28 @@ class LLMClient:
             messages.extend(extra_messages)
         messages.append({"role": "user", "content": user_prompt})
 
-        payload = {
-            "model": self.model_id,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": True,
-        }
+        if self.provider == "google":
+            payload = build_google_payload(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        else:
+            payload = {
+                "model": self.model_id,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": True,
+            }
+
+        if self.anthropic_compatible:
+            system_msg, anthro_msgs = self._convert_to_anthropic_messages(messages)
+            payload["messages"] = anthro_msgs
+            if system_msg:
+                payload["system"] = system_msg
+            if self.thinking_enabled:
+                payload["thinking"] = {"type": "enabled", "budget_tokens": 10000}
 
         last_error = None
         
@@ -508,6 +556,11 @@ class LLMClient:
                             break
                         try:
                             chunk = json.loads(json_str)
+                            if self.provider == "google":
+                                content = extract_google_content(chunk, strip=False)
+                                if content:
+                                    yield content
+                                continue
                             if self.anthropic_compatible:
                                 # Minimax/Athropic style streaming: look for content deltas
                                 # chunk may have 'content', 'type', or nested message

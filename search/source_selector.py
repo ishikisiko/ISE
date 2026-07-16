@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - optional dependency
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from llm.api import LLMClient
+from utils.config_validation import configured_value
 from utils.timing_utils import TimingRecorder
 
 class IntelligentSourceSelector:
@@ -207,15 +208,38 @@ class IntelligentSourceSelector:
         }
         self.llm_client = llm_client
         self.use_llm = use_llm if use_llm is not None else llm_client is not None
-        self.google_api_key = (google_api_key or os.getenv("GOOGLE_API_KEY") or "").strip()
+        google_config = self.config.get("googleSearch") or {}
+        self.google_api_key = configured_value(
+            google_api_key
+            or google_config.get("api_key")
+            or self.config.get("GOOGLE_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+        )
+        self.google_cx = configured_value(
+            google_config.get("cx")
+            or self.config.get("GOOGLE_CX")
+            or os.getenv("GOOGLE_CX")
+        )
         self.google_weather_base_url = google_weather_base_url.rstrip("/")
         self.google_routes_base_url = google_routes_base_url.rstrip("/")
         self.google_geocode_url = google_geocode_url
         self.request_timeout = max(3, int(request_timeout))
-        self.finnhub_api_key = (finnhub_api_key or os.getenv("FINNHUB_API_KEY") or "").strip()
+        self.finnhub_api_key = configured_value(
+            finnhub_api_key
+            or self.config.get("FINNHUB_API_KEY")
+            or os.getenv("FINNHUB_API_KEY")
+        )
         
-        self.sportsdb_api_key = (sportsdb_api_key or os.getenv("SPORTSDB_API_KEY") or "123").strip()
-        self.apisports_api_key = (apisports_api_key or os.getenv("APISPORTS_KEY") or "").strip()
+        self.sportsdb_api_key = configured_value(
+            sportsdb_api_key
+            or self.config.get("SPORTSDB_API_KEY")
+            or os.getenv("SPORTSDB_API_KEY")
+        ) or "123"
+        self.apisports_api_key = configured_value(
+            apisports_api_key
+            or self.config.get("APISPORTS_KEY")
+            or os.getenv("APISPORTS_KEY")
+        )
     
     def classify_domain(self, query: str, timing_recorder: Optional[TimingRecorder] = None) -> str:
         """分类查询的领域"""
@@ -1054,7 +1078,7 @@ class IntelligentSourceSelector:
                 symbols.update(llm_symbols)
         
         # 5. If still no symbols, try Google Search fallback
-        if not symbols and self.google_api_key:
+        if not symbols and self.google_api_key and self.google_cx:
             search_symbols = self._extract_symbols_with_search(query)
             if search_symbols:
                 symbols.update(search_symbols)
@@ -1123,7 +1147,7 @@ class IntelligentSourceSelector:
     
     def _extract_symbols_with_search(self, query: str) -> List[str]:
         """Use Google Search to find stock symbols for companies mentioned in query."""
-        if not self.google_api_key:
+        if not self.google_api_key or not self.google_cx:
             return []
         
         # Extract potential company names from query
@@ -1151,7 +1175,7 @@ class IntelligentSourceSelector:
     
     def _search_stock_symbol(self, company_name: str) -> Optional[str]:
         """Search for a company's stock symbol using Google Search."""
-        if not self.google_api_key:
+        if not self.google_api_key or not self.google_cx:
             return None
         
         # Construct search query
@@ -1161,7 +1185,7 @@ class IntelligentSourceSelector:
             # Use Google Custom Search API
             params = {
                 "key": self.google_api_key,
-                "cx": os.getenv("GOOGLE_CX", ""),  # Custom Search Engine ID
+                "cx": self.google_cx,
                 "q": search_query,
                 "num": 3,
             }

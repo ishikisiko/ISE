@@ -18,12 +18,16 @@ from search.search import (
     CombinedSearchClient,
     BraveSearchClient,
     BrightDataSERPClient,
+    FirecrawlSearchClient,
     GoogleSearchClient,
+    ParallelSearchClient,
     PrioritySearchClient,
     SearchClient,
     SearchHit,
+    TavilySearchClient,
     YouSearchClient,
 )
+from utils.config_validation import configured_value
 
 
 class WebSearchInput(BaseModel):
@@ -36,7 +40,7 @@ class WebSearchInput(BaseModel):
 class WebSearchTool(BaseTool):
     """LangChain tool wrapper for web search.
     
-    Wraps any SearchClient implementation (Brave, Bright Data, You.com, Google, Combined)
+    Wraps any configured SearchClient implementation
     as a LangChain tool that can be used with agents.
     """
     
@@ -185,8 +189,8 @@ def create_search_tool_from_config(config: Dict[str, Any]) -> Optional[WebSearch
     brave_client: Optional[SearchClient] = None
 
     brave_cfg = config.get("braveSearch") or {}
-    brave_primary_key = (brave_cfg.get("primary_api_key") or "").strip()
-    brave_secondary_key = (brave_cfg.get("secondary_api_key") or "").strip()
+    brave_primary_key = configured_value(brave_cfg.get("primary_api_key"))
+    brave_secondary_key = configured_value(brave_cfg.get("secondary_api_key"))
     if brave_primary_key:
         try:
             brave_client = BraveSearchClient(
@@ -195,14 +199,70 @@ def create_search_tool_from_config(config: Dict[str, Any]) -> Optional[WebSearch
                 base_url=(brave_cfg.get("base_url") or "https://api.search.brave.com/res/v1/web/search"),
                 timeout=int(brave_cfg.get("timeout", 15)),
                 rps=float(brave_cfg.get("rps", 1)),
+                secondary_rps=float(
+                    brave_cfg.get("secondary_rps", brave_cfg.get("rps", 1))
+                ),
                 monthly_limit=int(brave_cfg.get("monthly_limit", 2000)),
                 usage_log_path=str(brave_cfg.get("usage_log_path") or "runtime/brave_search_usage.jsonl"),
             )
         except Exception as exc:
             print(f"[search tool] Brave Search disabled: {exc}")
 
+    firecrawl_cfg = config.get("firecrawlSearch") or {}
+    firecrawl_key = configured_value(firecrawl_cfg.get("api_key"))
+    if firecrawl_key:
+        try:
+            fallback_clients.append(
+                FirecrawlSearchClient(
+                    api_key=firecrawl_key,
+                    base_url=(
+                        firecrawl_cfg.get("base_url")
+                        or "https://api.firecrawl.dev/v2/search"
+                    ),
+                    timeout=int(firecrawl_cfg.get("timeout", 30)),
+                )
+            )
+        except Exception as exc:
+            print(f"[search tool] Firecrawl disabled: {exc}")
+
+    tavily_cfg = config.get("tavilySearch") or {}
+    tavily_key = configured_value(tavily_cfg.get("api_key"))
+    if tavily_key:
+        try:
+            fallback_clients.append(
+                TavilySearchClient(
+                    api_key=tavily_key,
+                    base_url=(tavily_cfg.get("base_url") or "https://api.tavily.com/search"),
+                    timeout=int(tavily_cfg.get("timeout", 20)),
+                    search_depth=str(tavily_cfg.get("search_depth") or "basic"),
+                )
+            )
+        except Exception as exc:
+            print(f"[search tool] Tavily disabled: {exc}")
+
+    parallel_cfg = config.get("parallelSearch") or {}
+    parallel_key = configured_value(parallel_cfg.get("api_key"))
+    if parallel_key:
+        try:
+            fallback_clients.append(
+                ParallelSearchClient(
+                    api_key=parallel_key,
+                    base_url=(
+                        parallel_cfg.get("base_url")
+                        or "https://api.parallel.ai/v1beta/search"
+                    ),
+                    timeout=int(parallel_cfg.get("timeout", 30)),
+                    mode=str(parallel_cfg.get("mode") or "fast"),
+                    max_chars_per_result=int(
+                        parallel_cfg.get("max_chars_per_result", 1500)
+                    ),
+                )
+            )
+        except Exception as exc:
+            print(f"[search tool] Parallel disabled: {exc}")
+
     bright_cfg = config.get("brightDataSearch") or {}
-    bright_token = (bright_cfg.get("api_token") or "").strip()
+    bright_token = configured_value(bright_cfg.get("api_token"))
     bright_zone = (bright_cfg.get("zone") or "").strip()
     if bright_token and bright_zone:
         try:
@@ -223,7 +283,7 @@ def create_search_tool_from_config(config: Dict[str, Any]) -> Optional[WebSearch
     
     # You.com
     you_cfg = config.get("youSearch") or {}
-    you_key = (you_cfg.get("api_key") or config.get("YOU_API_KEY") or "").strip()
+    you_key = configured_value(you_cfg.get("api_key") or config.get("YOU_API_KEY"))
     if you_key:
         try:
             you_kwargs: Dict[str, Any] = {}
@@ -237,8 +297,8 @@ def create_search_tool_from_config(config: Dict[str, Any]) -> Optional[WebSearch
     
     # Google Custom Search
     google_cfg = config.get("googleSearch") or {}
-    google_key = (google_cfg.get("api_key") or config.get("GOOGLE_API_KEY") or "").strip()
-    google_cx = (google_cfg.get("cx") or config.get("GOOGLE_CX") or "").strip()
+    google_key = configured_value(google_cfg.get("api_key") or config.get("GOOGLE_API_KEY"))
+    google_cx = configured_value(google_cfg.get("cx") or config.get("GOOGLE_CX"))
     if google_key and google_cx:
         try:
             google_kwargs: Dict[str, Any] = {}

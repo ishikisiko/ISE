@@ -2,12 +2,15 @@
 from .search import (
     BraveSearchClient,
     BrightDataSERPClient,
+    FirecrawlSearchClient,
     SearchClient,
     SearchHit,
     YouSearchClient,
     GoogleSearchClient,
+    ParallelSearchClient,
     CombinedSearchClient,
     PrioritySearchClient,
+    TavilySearchClient,
     FallbackSearchClient,
 )
 from .rerank import BaseReranker, Qwen3Reranker, RerankedHit
@@ -27,6 +30,9 @@ __all__ = [
     "SearchHit",
     "BrightDataSERPClient",
     "BraveSearchClient",
+    "FirecrawlSearchClient",
+    "TavilySearchClient",
+    "ParallelSearchClient",
     "YouSearchClient",
     "GoogleSearchClient",
     "PrioritySearchClient",
