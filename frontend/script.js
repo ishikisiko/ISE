@@ -1,540 +1,122 @@
-const formatter = {
-    snippet(text, limit = 220) {
-        if (!text) return "预览内容为空";
-        const clean = text.replace(/\s+/g, " ").trim();
-        if (clean.length <= limit) return clean;
-        return `${clean.slice(0, limit - 1)}…`;
-    },
-};
+/* ISE · 智能检索引擎 — 前端逻辑
+ * 原生 ES2015，无构建步骤。通过 SSE 实时渲染 Agent 工作流步骤。
+ */
+"use strict";
 
 document.addEventListener("DOMContentLoaded", () => {
-    const chatLog = document.getElementById("chat-log");
-    const form = document.getElementById("query-form");
-    // const textarea = document.getElementById("query"); // Replaced by CodeMirror
-    const modelSelect = document.getElementById("model");
-    const searchToggle = document.getElementById("search-toggle");
-    const searchSourceDropdown = document.getElementById("search-source-dropdown");
-    const searchSourceButton = document.getElementById("search-source-button");
-    const searchSourceMenu = document.getElementById("search-source-menu");
-    const statusMessage = document.getElementById("status-message");
-    const sendButton = form.querySelector(".send-btn");
-    const forceSearchWrapper = document.getElementById("force-search-wrapper");
-    const forceSearchButton = document.getElementById("force-search-button");
-    const uploadButton = document.getElementById("upload-button");
+    // ------------------------------------------------------------------
+    // DOM 引用
+    // ------------------------------------------------------------------
+    const thread = document.getElementById("thread");
+    const composer = document.getElementById("composer");
+    const queryInput = document.getElementById("query");
+    const sendBtn = document.getElementById("send-btn");
+    const attachBtn = document.getElementById("attach-btn");
     const fileInput = document.getElementById("file-input");
-    const fileList = document.getElementById("file-list");
-    const imagePreviewList = document.getElementById("image-preview-list");
-    const totalLimitInput = document.getElementById("search-total-limit");
-    const perSourceLimitInput = document.getElementById("search-per-source-limit");
-    const referenceLimitInput = document.getElementById("search-reference-limit");
-    const searchSourceCheckboxes = searchSourceMenu
-        ? Array.from(searchSourceMenu.querySelectorAll('input[type="checkbox"]'))
-        : [];
+    const chipRow = document.getElementById("chip-row");
+    const searchPill = document.getElementById("search-pill");
+    const modelSelect = document.getElementById("model");
+    const settingsBtn = document.getElementById("settings-btn");
+    const settingsPanel = document.getElementById("settings-panel");
+    const statusLine = document.getElementById("status-line");
+    const topbarModel = document.getElementById("topbar-model");
+    const forceSearchInput = document.getElementById("force-search");
+    const limitTotal = document.getElementById("limit-total");
+    const limitPerSource = document.getElementById("limit-per-source");
+    const limitReference = document.getElementById("limit-reference");
+    const sourceCheckboxes = Array.from(
+        document.querySelectorAll('#source-chips input[type="checkbox"]')
+    );
+    const timingCheckboxes = Array.from(
+        document.querySelectorAll('#timing-chips input[type="checkbox"]')
+    );
 
-    const timingToggle = document.getElementById("timing-toggle");
-    const timingDropdown = document.getElementById("timing-dropdown");
-    const timingButton = document.getElementById("timing-button");
-    const timingMenu = document.getElementById("timing-menu");
-    const timingCheckboxes = timingMenu
-        ? Array.from(timingMenu.querySelectorAll('input[type="checkbox"]'))
-        : [];
+    // ------------------------------------------------------------------
+    // 设置持久化
+    // ------------------------------------------------------------------
+    const SETTINGS_KEY = "ise.settings.v1";
+    const DEFAULT_SETTINGS = {
+        search: true,
+        sources: ["brave", "firecrawl", "tavily", "parallel", "brightdata", "you", "google"],
+        forceSearch: false,
+        limits: { total: 5, perSource: 5, reference: 5 },
+        timing: ["total", "search", "llm", "tools"],
+        model: "",
+    };
 
-    // Initialize CodeMirror
-    const editor = CodeMirror(document.getElementById("query-editor"), {
-        mode: "markdown",
-        lineNumbers: false,
-        lineWrapping: true,
-        viewportMargin: Infinity,
-        placeholder: "发送您的问题，例如：介绍一下检索增强生成的优势",
-        extraKeys: {
-            "Ctrl-Enter": function(cm) {
-                form.dispatchEvent(new Event("submit", { cancelable: true }));
-            },
-            "Cmd-Enter": function(cm) {
-                form.dispatchEvent(new Event("submit", { cancelable: true }));
-            }
+    function loadSettings() {
+        try {
+            const raw = localStorage.getItem(SETTINGS_KEY);
+            if (!raw) return { ...DEFAULT_SETTINGS };
+            const parsed = JSON.parse(raw);
+            return {
+                ...DEFAULT_SETTINGS,
+                ...parsed,
+                limits: { ...DEFAULT_SETTINGS.limits, ...(parsed.limits || {}) },
+            };
+        } catch {
+            return { ...DEFAULT_SETTINGS };
         }
-    });
+    }
 
-    // Sync CodeMirror changes to hidden textarea (optional, but good for form semantics)
-    editor.on("change", (cm) => {
-        const val = cm.getValue();
-        const textarea = document.getElementById("query");
-        if (textarea) textarea.value = val;
-    });
+    function saveSettings() {
+        try {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+        } catch {
+            /* localStorage 不可用时静默 */
+        }
+    }
+
+    const settings = loadSettings();
 
     const state = {
         loading: false,
-        searchSources: new Set(),
-        timingOptions: new Set(['total', 'search', 'llm', 'tools']), // 默认全部显示
-        forceSearch: false,
         images: [],
+        turnCount: 0,
     };
 
-    let collapsibleSectionId = 0;
-    let loadingInterval = null;
-
-    function startLoadingAnimation(messageEl, isSearchEnabled) {
-        const bubble = messageEl.querySelector(".bubble");
-        // Remove the CSS-based loader class if it exists, as we are using custom HTML
-        messageEl.classList.remove("pending"); 
-        
-        // Initial Skeleton HTML
-        bubble.innerHTML = `
-            <div class="skeleton-loader">
-                <div class="skeleton-status">正在分析您的提问...</div>
-                <div class="skeleton-lines">
-                    <div class="skeleton-line" style="width: 92%"></div>
-                    <div class="skeleton-line" style="width: 75%"></div>
-                    <div class="skeleton-line" style="width: 88%"></div>
-                </div>
-            </div>
-        `;
-        
-        const statusEl = bubble.querySelector(".skeleton-status");
-        const steps = isSearchEnabled 
-            ? [
-                { time: 1500, text: "正在联网搜索相关信息..." },
-                { time: 4500, text: "正在阅读并理解搜索结果..." },
-                { time: 8000, text: "正在整合信息并生成回答..." },
-                { time: 15000, text: "内容较多，请耐心等待..." }
-              ]
-            : [
-                { time: 1000, text: "正在检索本地知识库..." },
-                { time: 3000, text: "正在生成回答..." },
-                { time: 8000, text: "正在组织语言..." }
-              ];
-              
-        const startTime = Date.now();
-        
-        if (loadingInterval) clearInterval(loadingInterval);
-        
-        loadingInterval = setInterval(() => {
-            const elapsed = Date.now() - startTime;
-            let currentText = null;
-            // Find the latest step that matches the elapsed time
-            for (const step of steps) {
-                if (elapsed >= step.time) {
-                    currentText = step.text;
-                }
-            }
-            
-            if (currentText && statusEl && statusEl.textContent !== currentText) {
-                statusEl.textContent = currentText;
-            }
-        }, 500);
+    // ------------------------------------------------------------------
+    // 基础工具
+    // ------------------------------------------------------------------
+    function el(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined && text !== null) node.textContent = String(text);
+        return node;
     }
 
-    function stopLoadingAnimation() {
-        if (loadingInterval) {
-            clearInterval(loadingInterval);
-            loadingInterval = null;
-        }
+    function setStatus(text, isError = false) {
+        statusLine.textContent = text || "";
+        statusLine.classList.toggle("is-error", Boolean(isError));
     }
 
-    function refreshSearchSourceButtonLabel() {
-        if (!searchSourceButton) return;
-        const count = state.searchSources.size;
-        searchSourceButton.textContent = count === searchSourceCheckboxes.length
-            ? "搜索源"
-            : `搜索源 (${count})`;
+    function fmtMs(ms) {
+        if (ms === null || ms === undefined || Number.isNaN(Number(ms))) return "";
+        const value = Number(ms);
+        if (value < 1) return "<1 ms";
+        if (value < 1000) return `${Math.round(value)} ms`;
+        return `${(value / 1000).toFixed(1)} s`;
     }
 
-    function closeSearchSourceMenu() {
-        if (!searchSourceDropdown) return;
-        searchSourceDropdown.classList.remove("open");
-        if (searchSourceButton) {
-            searchSourceButton.setAttribute("aria-expanded", "false");
-        }
+    function snippet(text, limit = 220) {
+        if (!text) return "";
+        const clean = String(text).replace(/\s+/g, " ").trim();
+        return clean.length <= limit ? clean : `${clean.slice(0, limit - 1)}…`;
     }
 
-    function openSearchSourceMenu() {
-        if (!searchSourceDropdown) return;
-        searchSourceDropdown.classList.add("open");
-        if (searchSourceButton) {
-            searchSourceButton.setAttribute("aria-expanded", "true");
-        }
-    }
-
-    function toggleSearchSourceMenu() {
-        if (!searchSourceDropdown) return;
-        if (searchSourceDropdown.classList.contains("open")) {
-            closeSearchSourceMenu();
-        } else {
-            openSearchSourceMenu();
-        }
-    }
-
-    function updateSearchSourceVisibility() {
-        const shouldShow = searchToggle.checked;
-        if (searchSourceDropdown) {
-            searchSourceDropdown.classList.toggle("hidden", !shouldShow);
-            if (!shouldShow) {
-                closeSearchSourceMenu();
-            }
-        }
-        setSearchLimitInputsEnabled(shouldShow);
-        updateForceSearchVisibility();
-    }
-
-    function setForceSearchState(enabled) {
-        state.forceSearch = Boolean(enabled);
-        if (forceSearchButton) {
-            forceSearchButton.setAttribute("aria-pressed", state.forceSearch ? "true" : "false");
-            forceSearchButton.classList.toggle("active", state.forceSearch);
-        }
-    }
-
-    function updateForceSearchVisibility() {
-        if (!forceSearchWrapper) return;
-        const shouldShow = searchToggle.checked;
-        forceSearchWrapper.classList.toggle("hidden", !shouldShow);
-        if (!shouldShow && state.forceSearch) {
-            setForceSearchState(false);
-        }
-    }
-
-    function initializeSearchSources() {
-        if (!searchSourceCheckboxes.length) return;
-        state.searchSources.clear();
-        for (const checkbox of searchSourceCheckboxes) {
-            if (checkbox.checked) {
-                state.searchSources.add(checkbox.value);
-            }
-        }
-        refreshSearchSourceButtonLabel();
-    }
-
-    function handleSearchSourceChange(event) {
-        const checkbox = event.target;
-        if (!checkbox || !checkbox.value) return;
-        const value = checkbox.value;
-
-        if (checkbox.checked) {
-            state.searchSources.add(value);
-        } else {
-            const hasValue = state.searchSources.has(value);
-            if (hasValue && state.searchSources.size === 1) {
-                checkbox.checked = true;
-                statusMessage.textContent = "至少选择一个搜索源";
-                return;
-            }
-            state.searchSources.delete(value);
-        }
-        refreshSearchSourceButtonLabel();
-    }
-
-    function setSearchLimitInputsEnabled(enabled) {
-        if (totalLimitInput) {
-            totalLimitInput.disabled = !enabled;
-        }
-        if (perSourceLimitInput) {
-            perSourceLimitInput.disabled = !enabled;
-        }
-        if (referenceLimitInput) {
-            referenceLimitInput.disabled = !enabled;
-        }
-    }
-
-    function refreshTimingButtonLabel() {
-        if (!timingButton) return;
-        const count = state.timingOptions.size;
-        timingButton.textContent = count === timingCheckboxes.length
-            ? "时间详情"
-            : `时间详情 (${count})`;
-    }
-
-    function closeTimingMenu() {
-        if (!timingDropdown) return;
-        timingDropdown.classList.remove("open");
-        if (timingButton) {
-            timingButton.setAttribute("aria-expanded", "false");
-        }
-    }
-
-    function openTimingMenu() {
-        if (!timingDropdown) return;
-        timingDropdown.classList.add("open");
-        if (timingButton) {
-            timingButton.setAttribute("aria-expanded", "true");
-        }
-    }
-
-    function toggleTimingMenu() {
-        if (!timingDropdown) return;
-        if (timingDropdown.classList.contains("open")) {
-            closeTimingMenu();
-        } else {
-            openTimingMenu();
-        }
-    }
-
-    function updateTimingVisibility() {
-        const shouldShow = timingToggle.checked;
-        if (timingDropdown) {
-            timingDropdown.classList.toggle("hidden", !shouldShow);
-            if (!shouldShow) {
-                closeTimingMenu();
-            }
-        }
-    }
-
-    function initializeTimingOptions() {
-        if (!timingCheckboxes.length) return;
-        state.timingOptions.clear();
-        for (const checkbox of timingCheckboxes) {
-            if (checkbox.checked) {
-                state.timingOptions.add(checkbox.value);
-            }
-        }
-        refreshTimingButtonLabel();
-    }
-
-    function handleTimingChange(event) {
-        const checkbox = event.target;
-        if (!checkbox || !checkbox.value) return;
-        const value = checkbox.value;
-
-        if (checkbox.checked) {
-            state.timingOptions.add(value);
-        } else {
-            const hasValue = state.timingOptions.has(value);
-            if (hasValue && state.timingOptions.size === 1) {
-                checkbox.checked = true;
-                statusMessage.textContent = "至少选择一个时间选项";
-                return;
-            }
-            state.timingOptions.delete(value);
-        }
-        refreshTimingButtonLabel();
-    }
-
-    function normalizeSearchLimits() {
-        let total = 1;
-        if (totalLimitInput) {
-            total = parseInt(totalLimitInput.value, 10);
-            if (!Number.isFinite(total) || total < 1) {
-                total = 1;
-            }
-            if (total > 30) {
-                total = 30;
-            }
-            totalLimitInput.value = String(total);
-        }
-
-        if (perSourceLimitInput) {
-            let perSource = parseInt(perSourceLimitInput.value, 10);
-            if (!Number.isFinite(perSource) || perSource < 1) {
-                perSource = 1;
-            }
-            if (perSource > 20) {
-                perSource = 20;
-            }
-            if (perSource > total) {
-                perSource = total;
-            }
-            perSourceLimitInput.value = String(perSource);
-        }
-
-        if (referenceLimitInput) {
-            let referenceLimit = parseInt(referenceLimitInput.value, 10);
-            if (!Number.isFinite(referenceLimit) || referenceLimit < 1) {
-                referenceLimit = 1;
-            }
-            if (referenceLimit > 20) {
-                referenceLimit = 20;
-            }
-            referenceLimitInput.value = String(referenceLimit);
-        }
-    }
-
-    async function loadAvailableModels() {
-        // Provider display names and sort order
-        const providerMeta = {
-            "opencode-go": { label: "OpenCode Go", order: 1 },
-            zai: { label: "Zai", order: 2 },
-            glm: { label: "GLM", order: 3 },
-            openai: { label: "OpenAI", order: 4 },
-            anthropic: { label: "Anthropic", order: 5 },
-            google: { label: "Google", order: 6 },
-            minimax: { label: "Minimax", order: 7 },
-            hkgai: { label: "HKGAI", order: 8 },
-            openrouter: { label: "OpenRouter", order: 9 },
-        };
-
-        function normalizeProvider(name) {
-            const key = (name || "").toString().trim().toLowerCase();
-            return providerMeta[key] ? key : (key || "openrouter");
-        }
-
-        function buildLabel(providerKey, id) {
-            const meta = providerMeta[providerKey] || { label: providerKey };
-            return `${meta.label} — ${id}`;
-        }
-
+    function domainOf(url) {
         try {
-            const response = await fetch("/api/models");
-            if (!response.ok) throw new Error("Failed to fetch models");
-
-            const data = await response.json();
-            const rawModels = Array.isArray(data.models) ? data.models : [];
-
-            // Deduplicate by id, prefer non-OpenRouter provider when duplicates occur
-            const byId = new Map();
-            for (const m of rawModels) {
-                const id = (m && m.id) ? String(m.id) : null;
-                if (!id) continue;
-                const providerKey = normalizeProvider(m.provider);
-                const existing = byId.get(id);
-                if (!existing) {
-                    byId.set(id, { id, provider: providerKey });
-                } else {
-                    // Prefer non-openrouter over openrouter for the same id
-                    if (existing.provider === "openrouter" && providerKey !== "openrouter") {
-                        byId.set(id, { id, provider: providerKey });
-                    }
-                }
-            }
-
-            // Group by provider and sort
-            const groups = new Map();
-            for (const { id, provider } of byId.values()) {
-                if (!groups.has(provider)) groups.set(provider, []);
-                groups.get(provider).push({ id, label: buildLabel(provider, id) });
-            }
-
-            // Clear existing options and build optgroups
-            modelSelect.innerHTML = "";
-            const defaultOption = document.createElement("option");
-            defaultOption.value = "";
-            defaultOption.textContent = "默认模型 (OpenCode Go - deepseek-v4-flash)";
-            modelSelect.appendChild(defaultOption);
-
-            // Sort providers by defined order, then alphabetical fallback
-            const sortedProviders = Array.from(groups.keys()).sort((a, b) => {
-                const oa = providerMeta[a]?.order ?? 99;
-                const ob = providerMeta[b]?.order ?? 99;
-                if (oa !== ob) return oa - ob;
-                return (providerMeta[a]?.label || a).localeCompare(providerMeta[b]?.label || b, "zh-Hans-CN");
-            });
-
-            for (const p of sortedProviders) {
-                const optgroup = document.createElement("optgroup");
-                optgroup.label = providerMeta[p]?.label || p;
-                const items = groups.get(p).sort((x, y) => x.label.localeCompare(y.label, "zh-Hans-CN"));
-                for (const item of items) {
-                    const option = document.createElement("option");
-                    option.value = item.id;
-                    option.textContent = item.label;
-                    optgroup.appendChild(option);
-                }
-                modelSelect.appendChild(optgroup);
-            }
-
-            console.log(`Loaded ${byId.size} unique models across ${sortedProviders.length} providers`);
-        } catch (error) {
-            console.error("Failed to load models:", error);
-            // Fallback: minimal, already grouped suggestions
-            modelSelect.innerHTML = "";
-            const defaultOption = document.createElement("option");
-            defaultOption.value = "";
-            defaultOption.textContent = "默认模型 (OpenCode Go - deepseek-v4-flash)";
-            modelSelect.appendChild(defaultOption);
-
-            const fallback = {
-                "OpenCode Go": [
-                    { id: "deepseek-v4-flash", label: "OpenCode Go — deepseek-v4-flash" },
-                    { id: "glm-5.2", label: "OpenCode Go — glm-5.2" },
-                    { id: "glm-5.1", label: "OpenCode Go — glm-5.1" },
-                ],
-                MiniMax: [
-                    { id: "minimax", label: "MiniMax — MiniMax-M2.7-highspeed (provider default)" },
-                ],
-                Zai: [
-                    { id: "glm-4.6", label: "Zai — glm-4.6" },
-                    { id: "glm-4.5-air", label: "Zai — glm-4.5-air" },
-                ],
-                GLM: [
-                    { id: "glm", label: "GLM — glm-4.6 (provider default)" },
-                ],
-                OpenRouter: [
-                    { id: "minimax/minimax-m2:free", label: "OpenRouter — minimax/minimax-m2:free" },
-                    { id: "deepseek/deepseek-r1-0528:free", label: "OpenRouter — deepseek/deepseek-r1-0528:free" },
-                ],
-                OpenAI: [
-                    { id: "openai", label: "OpenAI — gpt-3.5-turbo (provider default)" },
-                ],
-                Anthropic: [
-                    { id: "anthropic", label: "Anthropic — Claude (provider default)" },
-                ],
-                Google: [
-                    { id: "google", label: "Google — gemini-pro (provider default)" },
-                ],
-                HKGAI: [
-                    { id: "hkgai", label: "HKGAI — HKGAI-V1 (provider default)" },
-                ],
-            };
-
-            for (const groupName of ["OpenCode Go", "MiniMax", "Zai", "GLM", "OpenAI", "Anthropic", "Google", "HKGAI", "OpenRouter"]) {
-                const optgroup = document.createElement("optgroup");
-                optgroup.label = groupName;
-                for (const item of fallback[groupName]) {
-                    const option = document.createElement("option");
-                    option.value = item.id;
-                    option.textContent = item.label;
-                    optgroup.appendChild(option);
-                }
-                modelSelect.appendChild(optgroup);
-            }
+            return new URL(url).hostname.replace(/^www\./, "");
+        } catch {
+            return "";
         }
     }
 
-    function ensurePlaceholder() {
-        if (chatLog.children.length > 0) return;
-        chatLog.classList.add("empty");
-        const placeholder = document.createElement("div");
-        placeholder.className = "placeholder";
-        placeholder.textContent = "开始一次对话，支持联网搜索与本地文档检索增强。";
-        chatLog.appendChild(placeholder);
-    }
-
-    function removePlaceholder() {
-        if (!chatLog.classList.contains("empty")) return;
-        chatLog.classList.remove("empty");
-        const placeholder = chatLog.querySelector(".placeholder");
-        if (placeholder) {
-            placeholder.remove();
-        }
-    }
-
-    function scrollToBottom() {
-        requestAnimationFrame(() => {
-            chatLog.scrollTo({
-                top: chatLog.scrollHeight,
-                behavior: "smooth",
-            });
-        });
-    }
-
-    function appendMessage(role, content) {
-        removePlaceholder();
-        const message = document.createElement("article");
-        message.className = `message ${role}`;
-
-        const bubble = document.createElement("div");
-        bubble.className = "bubble";
-        bubble.textContent = content;
-
-        message.appendChild(bubble);
-        chatLog.appendChild(message);
-        scrollToBottom();
-
-        return message;
-    }
-
-    // --- Minimal Markdown rendering (safe subset) ---
+    // ------------------------------------------------------------------
+    // 迷你 Markdown 渲染（安全子集：先转义再替换）
+    // ------------------------------------------------------------------
     function escapeHTML(str) {
-        return (str || "")
+        return String(str || "")
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;");
@@ -542,986 +124,1035 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function renderMarkdown(md) {
         if (!md) return "";
-        // 1. Escape HTML first to prevent XSS and ensure correct rendering order
-        let src = escapeHTML(String(md));
+        let src = escapeHTML(md);
 
-        // 2. Handle fenced code blocks: ```lang\ncode```
-        // Regex captures optional language identifier and the code content
         src = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
-            const language = lang ? lang.toLowerCase() : 'none';
-            // code is already escaped
-            return `<pre><code class="language-${language}">${code}</code></pre>`;
+            const language = lang ? lang.toLowerCase() : "none";
+            return `<pre><code class="language-${language}">${code.replace(/\n$/, "")}</code></pre>`;
         });
-
-        // 3. Inline code
-        src = src.replace(/`([^`]+)`/g, (m, code) => `<code>${code}</code>`);
-
-        // 4. Bold and italic
+        src = src.replace(/`([^`\n]+)`/g, (m, code) => `<code>${code}</code>`);
         src = src.replace(/\*\*([^*]+)\*\*/g, (m, t) => `<strong>${t}</strong>`);
-        src = src.replace(/(^|\s)\*([^*]+)\*(?=\s|$)/g, (m, pre, t) => `${pre}<em>${t}</em>`);
-
-        // 5. Links [text](url)
+        src = src.replace(/(^|\s)\*([^*\n]+)\*(?=\s|$|[,.;:!?])/g, (m, pre, t) => `${pre}<em>${t}</em>`);
         src = src.replace(/\[([^\]]+)\]\(((?:https?:\/\/)[^\s)]+)\)/g, (m, text, url) =>
             `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`
         );
+        src = src.replace(/^######\s+(.+)$/gm, "<h3>$1</h3>");
+        src = src.replace(/^#####\s+(.+)$/gm, "<h3>$1</h3>");
+        src = src.replace(/^####\s+(.+)$/gm, "<h3>$1</h3>");
+        src = src.replace(/^###\s+(.+)$/gm, "<h3>$1</h3>");
+        src = src.replace(/^##\s+(.+)$/gm, "<h3>$1</h3>");
+        src = src.replace(/^#\s+(.+)$/gm, "<h3>$1</h3>");
+        src = src.replace(/^---+$/gm, "<hr>");
+        src = src.replace(/^&gt;\s?(.*)$/gm, "<blockquote>$1</blockquote>");
 
-        // 6. Headings (#, ##, ###)
-        src = src.replace(/^###\s+(.+)$/gm, (m, t) => `<h3>${t}</h3>`);
-        src = src.replace(/^##\s+(.+)$/gm, (m, t) => `<h3>${t}</h3>`);
-        src = src.replace(/^#\s+(.+)$/gm, (m, t) => `<h3>${t}</h3>`);
-
-        // 7. Unordered list
-        src = src.replace(/^(?:\s*[-*]\s.+(?:\n|$))+?/gm, (block) => {
-            // Remove the leading marker and wrap in li
-            // Note: block is already escaped, so markers are - or *
-            const items = block.trim().split(/\n/).map(l => l.replace(/^\s*[-*]\s+/, "").trim());
-            const lis = items.map(it => `<li>${it}</li>`).join("");
-            return `<ul>${lis}</ul>`;
+        src = src.replace(/((?:^\d+[.、]\s.+(?:\n|$))+)/gm, (block) => {
+            const items = block.trim().split(/\n/)
+                .map((line) => line.replace(/^\d+[.、]\s+/, "").trim())
+                .filter(Boolean);
+            return `<ol>${items.map((it) => `<li>${it}</li>`).join("")}</ol>`;
+        });
+        src = src.replace(/((?:^\s*[-*•]\s.+(?:\n|$))+)/gm, (block) => {
+            const items = block.trim().split(/\n/)
+                .map((line) => line.replace(/^\s*[-*•]\s+/, "").trim())
+                .filter(Boolean);
+            return `<ul>${items.map((it) => `<li>${it}</li>`).join("")}</ul>`;
         });
 
-        // 8. Paragraphs
-        // Split by double newlines, but ignore if it's already an HTML block we created
-        const parts = src.split(/\n{2,}/).map(p => {
-            if (/^\s*<(?:h3|ul|pre)/.test(p)) return p;
-            const withBr = p.replace(/\n/g, "<br>");
-            return `<p>${withBr}</p>`;
+        const parts = src.split(/\n{2,}/).map((p) => {
+            if (/^\s*<(h3|ul|ol|pre|hr|blockquote)/.test(p)) return p;
+            return `<p>${p.replace(/\n/g, "<br>")}</p>`;
         });
-
         return parts.join("");
     }
 
-    function createBadge(text) {
-        const badge = document.createElement("span");
-        badge.className = "control-flag";
-        badge.textContent = text;
-        return badge;
+    function highlightIn(container) {
+        if (window.Prism && typeof window.Prism.highlightAllUnder === "function") {
+            window.Prism.highlightAllUnder(container);
+        }
     }
 
-    function createCollapsibleSection(title, contentNode, options = {}) {
-        const section = document.createElement("div");
-        section.className = "message-extras collapsible-section";
-        if (options.sectionClass) {
-            section.classList.add(options.sectionClass);
-        }
+    // ------------------------------------------------------------------
+    // 空态与建议问题
+    // ------------------------------------------------------------------
+    const SUGGESTIONS = [
+        "检索增强生成（RAG）相比微调有什么优势？",
+        "香港未来三天的天气怎么样？",
+        "英伟达最新的股价和市值是多少？",
+        "上传一份文档，然后让我总结要点",
+    ];
 
-        const header = document.createElement("div");
-        header.className = "collapsible-header";
-
-        const heading = document.createElement("h4");
-        heading.textContent = title;
-        header.appendChild(heading);
-
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "collapse-toggle";
-        button.textContent = options.expandLabel || "展开全部";
-        button.setAttribute("aria-expanded", "false");
-        header.appendChild(button);
-
-        const body = document.createElement("div");
-        body.className = "collapsible-body";
-        if (options.bodyClass) {
-            body.classList.add(options.bodyClass);
-        }
-        const bodyId = options.bodyId || `collapsible-${++collapsibleSectionId}`;
-        body.id = bodyId;
-        body.setAttribute("role", options.bodyRole || "region");
-        body.setAttribute("aria-hidden", "true");
-        button.setAttribute("aria-controls", bodyId);
-        body.appendChild(contentNode);
-
-        section.appendChild(header);
-        section.appendChild(body);
-        section.classList.add("collapsed");
-
-        button.addEventListener("click", () => {
-            const isCollapsed = section.classList.toggle("collapsed");
-            const expanded = !isCollapsed;
-            button.setAttribute("aria-expanded", expanded ? "true" : "false");
-            button.textContent = expanded
-                ? options.collapseLabel || "收起"
-                : options.expandLabel || "展开全部";
-            body.setAttribute("aria-hidden", expanded ? "false" : "true");
-            section.dispatchEvent(new CustomEvent("collapsible-toggle", {
-                bubbles: true,
-                detail: { expanded, section },
-            }));
-        });
-
-        return section;
-    }
-
-    function buildTimingExtras(timings, control, searchQuery, retrievedDocs) {
-        const safeTimings = (timings && typeof timings === "object") ? timings : {};
-        const searchSources = Array.isArray(safeTimings.search_sources) ? safeTimings.search_sources : [];
-        const llmCalls = Array.isArray(safeTimings.llm_calls) ? safeTimings.llm_calls : [];
-        const toolCalls = Array.isArray(safeTimings.tool_calls) ? safeTimings.tool_calls : [];
-        const hasTotal = typeof safeTimings.total_ms === "number";
-        
-        // Check for keywords
-        const keywords = (control && Array.isArray(control.keywords)) ? control.keywords : [];
-        const hasKeywords = keywords.length > 0;
-        const hasSearchQuery = !!searchQuery;
-
-        // Build badges (control flags)
-        const controlFlags = document.createElement("div");
-        controlFlags.className = "control-flags";
-
-        if (control.search_allowed === false) {
-            controlFlags.appendChild(createBadge("联网：关闭"));
-        } else if (control.search_performed) {
-            controlFlags.appendChild(createBadge("联网搜索：已触发"));
-        } else if (control.search_allowed) {
-            controlFlags.appendChild(createBadge("联网搜索：未触发"));
-        }
-
-        if (control.force_search_enabled) {
-            controlFlags.appendChild(createBadge("强制搜索"));
-        }
-
-        if (control.local_docs_present) {
-            controlFlags.appendChild(createBadge("本地文档：可用"));
-        } else if (Array.isArray(retrievedDocs) && retrievedDocs.length === 0) {
-            controlFlags.appendChild(createBadge("本地文档：为空"));
-        }
-
-        if (control.hybrid_mode) {
-            controlFlags.appendChild(createBadge("混合检索"));
-        }
-
-        if (typeof control.search_total_limit === "number") {
-            controlFlags.appendChild(createBadge(`汇总上限：${control.search_total_limit}`));
-        }
-
-        if (typeof control.search_per_source_limit === "number") {
-            controlFlags.appendChild(createBadge(`单源上限：${control.search_per_source_limit}`));
-        }
-
-        if (typeof control.search_reference_limit === "number") {
-            controlFlags.appendChild(createBadge(`参考链接：${control.search_reference_limit}`));
-        }
-        
-        // Add Domain Intelligence Badge
-        if (safeTimings && typeof safeTimings['领域智能类型'] === 'string') {
-            controlFlags.appendChild(createBadge(`领域智能类型：${safeTimings['领域智能类型']}`));
-        }
-
-        const hasBadges = controlFlags.children.length > 0;
-
-        if (!hasTotal && searchSources.length === 0 && llmCalls.length === 0 && !hasKeywords && !hasSearchQuery && !hasBadges) {
-            return null;
-        }
-
-        const contentWrapper = document.createElement("div");
-        
-        // Add Search Query
-        if (hasSearchQuery) {
-            const queryDiv = document.createElement("div");
-            queryDiv.style.marginBottom = "12px";
-            queryDiv.style.paddingBottom = "12px";
-            queryDiv.style.borderBottom = "1px solid var(--border)";
-            
-            const label = document.createElement("div");
-            label.textContent = "搜索语";
-            label.style.fontSize = "0.85rem";
-            label.style.fontWeight = "600";
-            label.style.color = "var(--muted)";
-            label.style.marginBottom = "6px";
-            
-            const text = document.createElement("div");
-            text.textContent = searchQuery;
-            text.style.fontSize = "0.9rem";
-            text.style.color = "var(--text)";
-            text.style.lineHeight = "1.5";
-            
-            queryDiv.appendChild(label);
-            queryDiv.appendChild(text);
-            contentWrapper.appendChild(queryDiv);
-        }
-
-        // Add Keywords and Badges
-        if (hasKeywords || hasBadges) {
-            const keywordsDiv = document.createElement("div");
-            keywordsDiv.style.marginBottom = "12px";
-            keywordsDiv.style.paddingBottom = "12px";
-            keywordsDiv.style.borderBottom = "1px solid var(--border)";
-            
-            const label = document.createElement("div");
-            label.textContent = "搜索关键词与参数";
-            label.style.fontSize = "0.85rem";
-            label.style.fontWeight = "600";
-            label.style.color = "var(--muted)";
-            label.style.marginBottom = "6px";
-            
-            keywordsDiv.appendChild(label);
-
-            if (hasKeywords) {
-                const text = document.createElement("div");
-                text.textContent = keywords.join("，");
-                text.style.fontSize = "0.9rem";
-                text.style.color = "var(--text)";
-                text.style.lineHeight = "1.5";
-                text.style.marginBottom = hasBadges ? "8px" : "0";
-                keywordsDiv.appendChild(text);
-            }
-
-            if (hasBadges) {
-                keywordsDiv.appendChild(controlFlags);
-            }
-            
-            contentWrapper.appendChild(keywordsDiv);
-        }
-
-        // 根据用户选择显示不同的时间信息
-        if (hasTotal && state.timingOptions.has('total')) {
-            const totalRow = document.createElement("div");
-            totalRow.className = "timing-total";
-            totalRow.textContent = `总体: ${safeTimings.total_ms.toFixed(2)} ms`;
-            contentWrapper.appendChild(totalRow);
-        }
-
-        // 添加 Google Vision API 调用标识
-        const googleVisionCalled = toolCalls.some(call => call.tool === 'google_vision');
-        if (googleVisionCalled && state.timingOptions.has('tools')) {
-            const visionBadge = document.createElement("div");
-            visionBadge.className = "vision-badge";
-            visionBadge.style.marginBottom = "12px";
-            visionBadge.style.padding = "6px 12px";
-            visionBadge.style.backgroundColor = "#4285f4";
-            visionBadge.style.color = "white";
-            visionBadge.style.borderRadius = "4px";
-            visionBadge.style.fontSize = "0.85rem";
-            visionBadge.style.fontWeight = "500";
-            visionBadge.style.display = "inline-block";
-            
-            const visionIcon = document.createElement("span");
-            visionIcon.textContent = "👁️ ";
-            visionIcon.style.marginRight = "6px";
-            
-            const visionText = document.createElement("span");
-            visionText.textContent = "Google Vision API 已调用";
-            
-            visionBadge.appendChild(visionIcon);
-            visionBadge.appendChild(visionText);
-            contentWrapper.appendChild(visionBadge);
-        }
-
-        // 创建一个容器用于水平排列搜索源和LLM调用
-        const sectionsContainer = document.createElement("div");
-        sectionsContainer.className = "timing-sections-container";
-
-        const renderSection = (title, entries, option) => {
-            if (!entries.length || !state.timingOptions.has(option)) return null;
-            const section = document.createElement("div");
-            section.className = "timing-section";
-            const sectionTitle = document.createElement("strong");
-            sectionTitle.textContent = title;
-            section.appendChild(sectionTitle);
-
-            const list = document.createElement("div");
-            list.className = "timing-list";
-
-            entries.forEach((entry) => {
-                const row = document.createElement("div");
-                row.className = "timing-row";
-
-                const label = document.createElement("span");
-                label.className = "label";
-                label.textContent = entry.label || entry.source || "未知";
-                if (entry.error) {
-                    label.textContent += `（错误：${entry.error}）`;
-                }
-
-                const value = document.createElement("span");
-                value.className = "value";
-                const duration = Number(entry.duration_ms);
-                value.textContent = Number.isFinite(duration) ? `${duration.toFixed(2)} ms` : "--";
-
-                row.appendChild(label);
-                row.appendChild(value);
-                list.appendChild(row);
-            });
-
-            section.appendChild(list);
-            return section;
-        };
-
-        // 渲染搜索源和LLM调用部分
-        const searchSection = renderSection("搜索源", searchSources, 'search');
-        const normalizedLLM = llmCalls.map((entry) => {
-            const provider = entry.provider || "";
-            const model = entry.model || "";
-            const suffix = provider && model ? `${provider}/${model}` : provider || model;
-            return {
-                ...entry,
-                label: suffix ? `${entry.label || "LLM"}（${suffix}）` : entry.label || "LLM",
-            };
-        });
-        const llmSection = renderSection("LLM 调用", normalizedLLM, 'llm');
-
-        // 渲染工具调用部分（包括Google Vision API）
-        const toolSection = renderSection("工具调用", toolCalls, 'tools');
-
-        // 将搜索源、LLM调用和工具调用添加到水平容器中
-        if (searchSection || llmSection || toolSection) {
-            contentWrapper.appendChild(sectionsContainer);
-            if (searchSection) sectionsContainer.appendChild(searchSection);
-            if (llmSection) sectionsContainer.appendChild(llmSection);
-            if (toolSection) sectionsContainer.appendChild(toolSection);
-        }
-
-        return createCollapsibleSection(
-            "响应时间详情", 
-            contentWrapper, 
-            { 
-                sectionClass: "timing-extras",
-                collapsed: true
-            }
+    function renderEmpty() {
+        if (state.turnCount > 0) return;
+        thread.innerHTML = "";
+        const empty = el("div", "empty");
+        empty.appendChild(el("h1", "empty-title", "有什么可以帮你？"));
+        empty.appendChild(
+            el("p", "empty-sub", "联网检索、本地文档与领域数据融合，逐步展示推理过程。")
         );
+        const grid = el("div", "suggestions");
+        for (const text of SUGGESTIONS) {
+            const card = el("button", "suggestion", text);
+            card.type = "button";
+            card.addEventListener("click", () => {
+                queryInput.value = text;
+                autosize();
+                queryInput.focus();
+            });
+            grid.appendChild(card);
+        }
+        empty.appendChild(grid);
+        thread.appendChild(empty);
     }
 
-    function buildExtras(data) {
-        const fragments = [];
-
-        // 1. 首先添加搜索结果和本地文档
-        if (Array.isArray(data.search_hits) && data.search_hits.length > 0) {
-            const list = document.createElement("ol");
-            list.className = "source-list";
-            data.search_hits.forEach((hit, index) => {
-                const item = document.createElement("li");
-                const title = hit.title || `结果 ${index + 1}`;
-                const url = hit.url || "";
-                if (url) {
-                    const link = document.createElement("a");
-                    link.href = url;
-                    link.target = "_blank";
-                    link.rel = "noopener noreferrer";
-                    link.textContent = title;
-                    item.appendChild(link);
-                } else {
-                    const span = document.createElement("span");
-                    span.textContent = title;
-                    item.appendChild(span);
-                }
-                if (hit.snippet) {
-                    const snippet = document.createElement("div");
-                    snippet.textContent = formatter.snippet(hit.snippet, 200);
-                    snippet.style.marginTop = "4px";
-                    item.appendChild(snippet);
-                }
-                list.appendChild(item);
-            });
-
-            const section = createCollapsibleSection(
-                `WEB SOURCES (${data.search_hits.length})`,
-                list,
-                { bodyClass: "source-scroll" }
-            );
-            fragments.push(section);
-        }
-
-        if (Array.isArray(data.retrieved_docs) && data.retrieved_docs.length > 0) {
-            const wrapper = document.createElement("div");
-            wrapper.className = "message-extras";
-
-            const heading = document.createElement("h4");
-            heading.textContent = "Local Docs";
-            wrapper.appendChild(heading);
-
-            const list = document.createElement("ul");
-            list.className = "doc-list";
-            data.retrieved_docs.forEach((doc, index) => {
-                const item = document.createElement("li");
-                const source = doc.source || `文档片段 ${index + 1}`;
-                const strong = document.createElement("strong");
-                strong.textContent = source;
-                item.appendChild(strong);
-
-                const snippet = document.createElement("span");
-                snippet.textContent = formatter.snippet(doc.content, 240);
-                item.appendChild(snippet);
-
-                list.appendChild(item);
-            });
-
-            wrapper.appendChild(list);
-            fragments.push(wrapper);
-        }
-
-        // 2. 然后添加关键词模块 (已移入响应时间详情)
-        const control = data.control || {};
-
-        // 3. 最后添加响应时间模块
-        // 确保即使没有时间数据，只要有关键词或搜索语，也显示该模块
-        const timingExtras = buildTimingExtras(data.response_times, control, data.search_query, data.retrieved_docs);
-        if (timingExtras) {
-            fragments.push(timingExtras);
-        }
-
-        // 4. 添加错误和警告信息
-        const metaFragments = [];
-        if (data.llm_error) {
-            const errorBox = document.createElement("div");
-            errorBox.className = "alert-text";
-            errorBox.textContent = data.llm_error;
-            metaFragments.push(errorBox);
-        }
-        if (data.llm_warning) {
-            const warningBox = document.createElement("div");
-            warningBox.className = "warning-text";
-            warningBox.textContent = data.llm_warning;
-            metaFragments.push(warningBox);
-        }
-        if (data.search_error) {
-            const warningBox = document.createElement("div");
-            warningBox.className = "warning-text";
-            warningBox.textContent = data.search_error;
-            metaFragments.push(warningBox);
-        }
-        if (data.search_warnings) {
-            const warnings = Array.isArray(data.search_warnings) ? data.search_warnings : [data.search_warnings];
-            warnings.filter(Boolean).forEach((message) => {
-                const warningBox = document.createElement("div");
-                warningBox.className = "warning-text";
-                warningBox.textContent = message;
-                metaFragments.push(warningBox);
-            });
-        }
-
-        if (metaFragments.length > 0) {
-            const wrapper = document.createElement("div");
-            wrapper.className = "message-extras";
-            metaFragments.forEach(node => wrapper.appendChild(node));
-            fragments.push(wrapper);
-        }
-
-        if (fragments.length === 0) {
-            return null;
-        }
-
-        const container = document.createDocumentFragment();
-        fragments.forEach(fragment => container.appendChild(fragment));
-        return container;
+    function clearEmpty() {
+        const empty = thread.querySelector(".empty");
+        if (empty) empty.remove();
     }
 
-    function setAssistantMessage(messageEl, data) {
-        stopLoadingAnimation();
-        messageEl.classList.remove("pending");
-        const bubble = messageEl.querySelector(".bubble");
-        
-        // Debug: log the data structure
-        console.log("setAssistantMessage data:", data);
-        
-        // Clear the bubble content
-        bubble.innerHTML = '';
-        bubble.style.display = 'flex';
-        bubble.style.flexDirection = 'column';
-        bubble.style.gap = '16px';
+    // ------------------------------------------------------------------
+    // 工作流视图
+    // ------------------------------------------------------------------
+    function createWorkflow() {
+        const root = el("div", "workflow");
 
-        const answer = (data && data.answer) ? String(data.answer).trim() : "";
-        if (!answer) {
-            console.warn("No answer in response data:", data);
-        }
-        
-        // Create a container for the main answer content
-        const contentContainer = document.createElement('div');
-        contentContainer.className = 'response-content';
-        contentContainer.innerHTML = renderMarkdown(answer || "未能生成答案");
-        bubble.appendChild(contentContainer);
+        const summary = el("button", "wf-summary");
+        summary.type = "button";
+        summary.setAttribute("aria-expanded", "true");
+        const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        chevron.setAttribute("viewBox", "0 0 24 24");
+        chevron.setAttribute("width", "12");
+        chevron.setAttribute("height", "12");
+        chevron.setAttribute("fill", "none");
+        chevron.setAttribute("stroke", "currentColor");
+        chevron.setAttribute("stroke-width", "2.4");
+        chevron.setAttribute("stroke-linecap", "round");
+        chevron.setAttribute("stroke-linejoin", "round");
+        chevron.innerHTML = '<path d="M6 9l6 6 6-6"/>';
+        const summaryText = el("span", "wf-summary-text", "正在执行工作流");
+        const summaryTime = el("span", "wf-summary-time", "");
+        summary.append(chevron, summaryText, summaryTime);
 
-        // Create a container for sources and timing info to be displayed after the answer
-        const extras = buildExtras(data);
+        const list = el("ol", "wf-list");
+        root.append(summary, list);
 
-        // Add a separator if both content and extras exist
-        if (extras && answer) {
-            const separator = document.createElement('hr');
-            separator.style.border = 'none';
-            separator.style.borderTop = '1px solid var(--border)';
-            separator.style.margin = '12px 0';
-            bubble.appendChild(separator);
-        }
+        const steps = new Map();
+        let ticker = null;
+        let activeId = null;
+        let startedAt = performance.now();
+        let finished = false;
 
-        // Add extras (sources, keywords, timing info) after the main content
-        if (extras) {
-            bubble.appendChild(extras);
-        }
-
-        // Trigger Prism highlight
-        if (window.Prism) {
-            Prism.highlightAllUnder(bubble);
-        }
-
-        // Remove any old extras that might be outside the bubble
-        const oldExtras = messageEl.querySelectorAll(".message-extras");
-        oldExtras.forEach(node => {
-            if (node.parentElement === messageEl) {
-                messageEl.removeChild(node);
+        function tick() {
+            const elapsed = performance.now() - startedAt;
+            summaryTime.textContent = fmtMs(elapsed);
+            if (activeId && steps.has(activeId)) {
+                const step = steps.get(activeId);
+                step.timeEl.textContent = fmtMs(performance.now() - step.startTs);
             }
+        }
+
+        function ensureTicker() {
+            if (ticker === null) {
+                ticker = window.setInterval(tick, 100);
+            }
+        }
+
+        function stopTicker() {
+            if (ticker !== null) {
+                window.clearInterval(ticker);
+                ticker = null;
+            }
+        }
+
+        summary.addEventListener("click", () => {
+            const collapsed = root.classList.toggle("is-collapsed");
+            summary.setAttribute("aria-expanded", collapsed ? "false" : "true");
         });
 
-        scrollToBottom();
+        return {
+            el: root,
+
+            apply(step) {
+                if (!step || !step.id) return;
+                let node = steps.get(step.id);
+                if (!node) {
+                    const item = el("li", "wf-step");
+                    const dot = el("span", "wf-dot");
+                    dot.setAttribute("aria-hidden", "true");
+                    const body = el("div", "wf-body");
+                    const head = el("div", "wf-head");
+                    const title = el("span", "wf-title", step.title || step.id);
+                    const time = el("span", "wf-time", "");
+                    head.append(title, time);
+                    const detail = el("p", "wf-detail");
+                    detail.hidden = true;
+                    const items = el("ul", "wf-items");
+                    items.hidden = true;
+                    body.append(head, detail, items);
+                    item.append(dot, body);
+                    node = { root: item, titleEl: title, timeEl: time, detailEl: detail, itemsEl: items, startTs: 0 };
+                    steps.set(step.id, node);
+                    list.appendChild(item);
+                }
+
+                if (step.title) node.titleEl.textContent = step.title;
+
+                node.root.classList.remove("is-active", "is-done", "is-error", "is-skipped");
+                const status = step.status || "done";
+                node.root.classList.add(`is-${status}`);
+
+                if (status === "active") {
+                    if (activeId && steps.has(activeId) && activeId !== step.id) {
+                        const prev = steps.get(activeId);
+                        prev.root.classList.remove("is-active");
+                        prev.root.classList.add("is-done");
+                    }
+                    activeId = step.id;
+                    node.startTs = performance.now();
+                    node.timeEl.textContent = "";
+                    ensureTicker();
+                } else {
+                    if (activeId === step.id) activeId = null;
+                    node.timeEl.textContent = fmtMs(step.duration_ms);
+                }
+
+                if (step.detail) {
+                    node.detailEl.textContent = step.detail;
+                    node.detailEl.hidden = false;
+                }
+
+                if (Array.isArray(step.items) && step.items.length) {
+                    node.itemsEl.innerHTML = "";
+                    for (const entry of step.items) {
+                        const row = el("li");
+                        row.append(
+                            el("span", "wf-item-label", entry.label || ""),
+                            el("span", "wf-item-value", entry.value || "")
+                        );
+                        node.itemsEl.appendChild(row);
+                    }
+                    node.itemsEl.hidden = false;
+                }
+            },
+
+            finalize(totalMs) {
+                if (finished) return;
+                finished = true;
+                stopTicker();
+                activeId = null;
+                const doneCount = Array.from(steps.values()).filter((n) =>
+                    n.root.classList.contains("is-done")
+                ).length;
+                const total = totalMs !== undefined && totalMs !== null
+                    ? Number(totalMs)
+                    : performance.now() - startedAt;
+                summaryText.textContent = `已完成 ${doneCount} 步 · ${fmtMs(total)}`;
+                summaryTime.textContent = "";
+                root.classList.add("is-collapsed");
+                summary.setAttribute("aria-expanded", "false");
+            },
+
+            fail() {
+                stopTicker();
+                if (activeId && steps.has(activeId)) {
+                    const node = steps.get(activeId);
+                    node.root.classList.remove("is-active");
+                    node.root.classList.add("is-error");
+                }
+                activeId = null;
+                summaryText.textContent = "工作流中断";
+                summaryTime.textContent = "";
+            },
+        };
     }
 
-    function setAssistantError(messageEl, message) {
-        stopLoadingAnimation();
-        messageEl.classList.remove("pending");
-        const bubble = messageEl.querySelector(".bubble");
-        bubble.textContent = message;
+    // ------------------------------------------------------------------
+    // Turn 结构
+    // ------------------------------------------------------------------
+    function appendTurn(query, images) {
+        clearEmpty();
+        state.turnCount += 1;
 
-        const extras = document.createElement("div");
-        extras.className = "message-extras";
-        const alert = document.createElement("div");
-        alert.className = "alert-text";
-        alert.textContent = "请求失败，请检查服务端日志。";
-        extras.appendChild(alert);
-        messageEl.appendChild(extras);
-        scrollToBottom();
+        const turn = el("section", "turn");
+        turn.appendChild(el("h2", "q-title", query));
+
+        if (images && images.length) {
+            const strip = el("div", "q-attachments");
+            for (const img of images) {
+                const thumb = document.createElement("img");
+                thumb.src = img.base64;
+                thumb.alt = img.name || "图片";
+                strip.appendChild(thumb);
+            }
+            turn.appendChild(strip);
+        }
+
+        const workflow = createWorkflow();
+        turn.appendChild(workflow.el);
+
+        thread.appendChild(turn);
+        turn.scrollIntoView({ behavior: "smooth", block: "start" });
+        return { turn, workflow };
     }
 
-    function setLoading(isLoading) {
-        state.loading = isLoading;
-        sendButton.disabled = isLoading;
-        sendButton.classList.toggle("loading", isLoading);
-        if (forceSearchButton) {
-            forceSearchButton.disabled = isLoading;
-        }
-        if (isLoading) {
-            closeSearchSourceMenu();
-        }
-        if (editor) {
-            editor.setOption("readOnly", isLoading ? "nocursor" : false);
+    // ------------------------------------------------------------------
+    // 结果渲染
+    // ------------------------------------------------------------------
+    const MODE_LABELS = {
+        search: "联网检索",
+        local_rag: "本地检索",
+        direct_llm: "直接回答",
+        small_talk: "闲聊",
+        domain_api: "领域接口",
+        image_content_present: "图片理解",
+        search_unavailable: "本地回退",
+        react_fallback: "深度检索",
+        react_agent: "ReAct",
+    };
+
+    function renderSources(turn, hits) {
+        if (!Array.isArray(hits) || !hits.length) return;
+        const wrap = el("div", "sources");
+        wrap.appendChild(el("span", "section-label", `来源 · ${hits.length}`));
+        const scroll = el("div", "sources-scroll");
+        hits.slice(0, 12).forEach((hit, index) => {
+            const url = hit.url || "";
+            const domain = domainOf(url) || "来源";
+            const chip = document.createElement(url ? "a" : "span");
+            chip.className = "source-chip";
+            if (url) {
+                chip.href = url;
+                chip.target = "_blank";
+                chip.rel = "noopener noreferrer";
+            }
+            chip.title = hit.title || domain;
+            chip.appendChild(el("span", "src-index", String(index + 1).padStart(2, "0")));
+            if (url) {
+                const fav = document.createElement("img");
+                fav.className = "src-fav";
+                fav.loading = "lazy";
+                fav.src = `https://www.google.com/s2/favicons?sz=32&domain_url=${encodeURIComponent(url)}`;
+                fav.alt = "";
+                fav.addEventListener("error", () => {
+                    const fallback = el("span", "src-fallback", domain.charAt(0) || "·");
+                    fav.replaceWith(fallback);
+                });
+                chip.appendChild(fav);
+            }
+            chip.appendChild(el("span", "src-domain", domain));
+            scroll.appendChild(chip);
+        });
+        wrap.appendChild(scroll);
+        turn.appendChild(wrap);
+    }
+
+    function renderDocs(turn, docs) {
+        if (!Array.isArray(docs) || !docs.length) return;
+        const details = el("details", "docs");
+        const summaryEl = el("summary");
+        summaryEl.appendChild(el("span", "section-label", `本地文档 · ${docs.length}`));
+        details.appendChild(summaryEl);
+        docs.forEach((doc, index) => {
+            const item = el("div", "doc-item");
+            item.appendChild(el("div", "doc-name", doc.source || `文档片段 ${index + 1}`));
+            item.appendChild(el("div", "doc-snippet", snippet(doc.content, 200)));
+            details.appendChild(item);
+        });
+        turn.appendChild(details);
+    }
+
+    function renderNotes(turn, data) {
+        const notes = [];
+        if (data.llm_error) notes.push({ kind: "error", text: data.llm_error });
+        if (data.llm_warning) notes.push({ kind: "warn", text: data.llm_warning });
+        if (data.search_error) notes.push({ kind: "warn", text: `搜索：${data.search_error}` });
+        const warnings = Array.isArray(data.search_warnings)
+            ? data.search_warnings
+            : data.search_warnings
+                ? [data.search_warnings]
+                : [];
+        for (const w of warnings.filter(Boolean)) notes.push({ kind: "warn", text: w });
+        for (const note of notes) {
+            turn.appendChild(el("div", `note note-${note.kind}`, note.text));
         }
     }
 
-    function updateStatusFromResponse(data) {
-        const parts = [];
-        if (data.control && data.control.force_search_enabled) {
-            parts.push("强制联网：已启用");
+    function renderMeta(turn, data) {
+        const control = data.control || {};
+        const times = data.response_times || {};
+        const row = el("div", "meta-row");
+        let hasMeta = false;
+
+        if (settings.timing.includes("total") && typeof times.total_ms === "number") {
+            row.appendChild(el("span", null, fmtMs(times.total_ms)));
+            hasMeta = true;
         }
-        if (data.control && data.control.decision && data.control.decision.reason) {
-            parts.push(`路由：${data.control.decision.reason}`);
+
+        const llmCalls = Array.isArray(times.llm_calls) ? times.llm_calls : [];
+        const lastCall = llmCalls[llmCalls.length - 1];
+        if (lastCall && (lastCall.provider || lastCall.model)) {
+            if (hasMeta) row.appendChild(el("span", "meta-sep", "·"));
+            const suffix = lastCall.provider && lastCall.model
+                ? `${lastCall.provider}/${lastCall.model}`
+                : lastCall.provider || lastCall.model;
+            row.appendChild(el("span", null, suffix));
+            hasMeta = true;
         }
-        if (data.control && data.control.search_mode === "search_unavailable") {
-            parts.push("联网搜索不可用，自动切换本地模式");
+
+        const mode = MODE_LABELS[control.search_mode] || control.search_mode;
+        if (mode) {
+            if (hasMeta) row.appendChild(el("span", "meta-sep", "·"));
+            row.appendChild(el("span", null, mode));
+            hasMeta = true;
         }
-        if (data.llm_warning) {
-            parts.push(`警告：${data.llm_warning}`);
+
+        if (control.fallback_triggered) {
+            if (hasMeta) row.appendChild(el("span", "meta-sep", "·"));
+            row.appendChild(el("span", "meta-flag", "已启用深度检索恢复"));
+            hasMeta = true;
         }
-        if (data.llm_error) {
-            parts.push(`错误：${data.llm_error}`);
+
+        if (hasMeta) turn.appendChild(row);
+
+        // 耗时明细（受「耗时明细」设置控制）
+        const blocks = [];
+        if (settings.timing.includes("search") && Array.isArray(times.search_sources)) {
+            for (const entry of times.search_sources) blocks.push({ label: entry.label || entry.source || "搜索源", value: entry.duration_ms, group: "search" });
         }
-        if (data.search_error) {
-            parts.push(`搜索：${data.search_error}`);
+        if (settings.timing.includes("llm") && llmCalls.length) {
+            for (const entry of llmCalls) blocks.push({ label: entry.label || "LLM", value: entry.duration_ms, group: "llm" });
         }
-        if (data.search_warnings) {
-            const warnings = Array.isArray(data.search_warnings) ? data.search_warnings : [data.search_warnings];
-            warnings.filter(Boolean).forEach((message) => parts.push(`搜索提示：${message}`));
+        if (settings.timing.includes("tools") && Array.isArray(times.tool_calls)) {
+            for (const entry of times.tool_calls) blocks.push({ label: entry.tool || "工具", value: entry.duration_ms, group: "tools" });
         }
-        statusMessage.textContent = parts.length > 0 ? parts.join(" ｜ ") : "回答已生成";
+        if (blocks.length) {
+            const block = el("div", "meta-block");
+            for (const item of blocks) {
+                const line = el("div", "meta-line");
+                const label = el("b", null, item.label);
+                const value = el("span", null, fmtMs(item.value));
+                line.append(label, value);
+                block.appendChild(line);
+            }
+            turn.appendChild(block);
+        }
     }
 
+    function renderResult(refs, data) {
+        refs.workflow.finalize(data.response_times && data.response_times.total_ms);
+
+        const answer = (data && data.answer ? String(data.answer) : "").trim() || "未能生成答案";
+        const answerEl = el("div", "answer");
+        answerEl.innerHTML = renderMarkdown(answer);
+        highlightIn(answerEl);
+
+        // 回答插入到 workflow 之后
+        refs.workflow.el.after(answerEl);
+
+        renderSources(refs.turn, data.search_hits);
+        renderDocs(refs.turn, data.retrieved_docs);
+        renderNotes(refs.turn, data);
+        renderMeta(refs.turn, data);
+    }
+
+    // ------------------------------------------------------------------
+    // 降级路径：从最终结果合成步骤
+    // ------------------------------------------------------------------
+    function synthesizeSteps(data) {
+        const control = (data && data.control) || {};
+        const times = (data && data.response_times) || {};
+        const steps = [];
+        const llmCalls = Array.isArray(times.llm_calls) ? times.llm_calls : [];
+        const findCall = (label) => llmCalls.find((c) => c.label === label);
+
+        const mode = control.search_mode || "";
+        if (mode === "image_content_present") {
+            steps.push({ id: "visual", title: "图片理解", status: "done", detail: "已生成回答" });
+            return steps;
+        }
+
+        steps.push({
+            id: "intent",
+            title: "意图理解",
+            status: "done",
+            detail: control.domain && control.domain !== "general"
+                ? `识别领域：${control.domain}`
+                : mode === "small_talk" ? "识别为闲聊" : "通用问题",
+        });
+
+        if (control.decision) {
+            steps.push({
+                id: "route",
+                title: "路由决策",
+                status: "done",
+                detail: control.decision.needs_search ? "需要联网检索" : "无需检索，直接回答",
+                duration_ms: findCall("search_decision")?.duration_ms,
+            });
+        } else if (control.force_search_enabled) {
+            steps.push({ id: "route", title: "路由决策", status: "skipped", detail: "已跳过：强制联网" });
+        }
+
+        if (Array.isArray(control.keywords) && control.keywords.length) {
+            steps.push({
+                id: "keywords",
+                title: "生成检索词",
+                status: "done",
+                detail: control.keywords.slice(0, 4).join("、"),
+                duration_ms: findCall("keyword_generation")?.duration_ms,
+            });
+        }
+
+        if (control.search_performed) {
+            const searchSources = Array.isArray(times.search_sources) ? times.search_sources : [];
+            steps.push({
+                id: "search",
+                title: "联网检索",
+                status: "done",
+                detail: `${Array.isArray(data.search_hits) ? data.search_hits.length : 0} 条结果`,
+                items: searchSources.map((s) => ({
+                    label: s.label || s.source || "搜索源",
+                    value: fmtMs(s.duration_ms) + (s.error ? ` · ${s.error}` : ""),
+                })),
+            });
+        }
+
+        if (Array.isArray(data.retrieved_docs) && data.retrieved_docs.length) {
+            steps.push({ id: "local", title: "本地文档检索", status: "done", detail: `${data.retrieved_docs.length} 个片段` });
+        }
+
+        if (control.search_performed || (Array.isArray(data.retrieved_docs) && data.retrieved_docs.length)) {
+            steps.push({ id: "rerank", title: "证据重排融合", status: "done" });
+        }
+
+        const answerCall = findCall("search_rag_answer") || findCall("local_rag_answer") || findCall("direct_answer");
+        steps.push({
+            id: "generate",
+            title: "生成回答",
+            status: "done",
+            detail: answerCall && answerCall.provider && answerCall.model
+                ? `${answerCall.provider}/${answerCall.model}`
+                : undefined,
+            duration_ms: answerCall?.duration_ms,
+        });
+
+        const postcheck = control.postcheck;
+        if (postcheck) {
+            if (postcheck.eligible === false && postcheck.skipped_reason) {
+                steps.push({ id: "postcheck", title: "质量校验", status: "skipped", detail: "未启用或不适用" });
+            } else {
+                steps.push({
+                    id: "postcheck",
+                    title: "质量校验",
+                    status: "done",
+                    detail: postcheck.passes_postcheck ? "通过" : "未通过",
+                    duration_ms: findCall("postcheck_judge")?.duration_ms,
+                });
+            }
+        }
+
+        if (control.fallback_triggered) {
+            steps.push({
+                id: "react",
+                title: "深度检索恢复",
+                status: "done",
+                detail: control.max_iterations ? `最多 ${control.max_iterations} 轮迭代` : "ReAct",
+            });
+        }
+
+        return steps;
+    }
+
+    // ------------------------------------------------------------------
+    // SSE 客户端
+    // ------------------------------------------------------------------
+    function parseSSEFrame(frame) {
+        let event = "message";
+        const dataLines = [];
+        for (const line of frame.split("\n")) {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+        }
+        if (!dataLines.length) return null;
+        try {
+            return { event, data: JSON.parse(dataLines.join("\n")) };
+        } catch {
+            return null;
+        }
+    }
+
+    async function streamAnswer(payload, handlers) {
+        const response = await fetch("/api/answer/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok || !response.body) {
+            const error = new Error(`stream_http_${response.status}`);
+            error.fallback = true;
+            throw error;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buffer.indexOf("\n\n")) !== -1) {
+                const frame = buffer.slice(0, idx);
+                buffer = buffer.slice(idx + 2);
+                const parsed = parseSSEFrame(frame);
+                if (!parsed) continue;
+                if (parsed.event === "step") handlers.onStep(parsed.data);
+                else if (parsed.event === "result") handlers.onResult(parsed.data);
+                else if (parsed.event === "error") handlers.onError(parsed.data);
+            }
+        }
+    }
+
+    async function legacyAnswer(payload) {
+        const response = await fetch("/api/answer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data || data.error) {
+            throw new Error((data && data.error) || "请求失败");
+        }
+        return data;
+    }
+
+    // ------------------------------------------------------------------
+    // 提交
+    // ------------------------------------------------------------------
     function extractCodeBlocks(text) {
         const blocks = [];
         const regex = /```(\w*)\n([\s\S]*?)```/g;
         let match;
         while ((match = regex.exec(text)) !== null) {
-            blocks.push({
-                lang: match[1] || "text",
-                content: match[2]
-            });
+            blocks.push({ lang: match[1] || "text", content: match[2] });
         }
         return blocks;
+    }
+
+    function normalizeLimits() {
+        let total = parseInt(limitTotal.value, 10);
+        if (!Number.isFinite(total) || total < 1) total = 1;
+        if (total > 30) total = 30;
+        limitTotal.value = String(total);
+
+        let perSource = parseInt(limitPerSource.value, 10);
+        if (!Number.isFinite(perSource) || perSource < 1) perSource = 1;
+        if (perSource > 20) perSource = 20;
+        if (perSource > total) perSource = total;
+        limitPerSource.value = String(perSource);
+
+        let reference = parseInt(limitReference.value, 10);
+        if (!Number.isFinite(reference) || reference < 1) reference = 1;
+        if (reference > 20) reference = 20;
+        limitReference.value = String(reference);
+
+        settings.limits = { total, perSource, reference };
+        saveSettings();
+    }
+
+    function buildPayload(query) {
+        const payload = {
+            query,
+            search: settings.search ? "on" : "off",
+        };
+        const codeBlocks = extractCodeBlocks(query);
+        if (codeBlocks.length) payload.code_blocks = codeBlocks;
+        if (settings.model) payload.model = settings.model;
+        if (settings.search) {
+            if (settings.sources.length) payload.search_sources = [...settings.sources];
+            if (settings.forceSearch) payload.force_search = true;
+            normalizeLimits();
+            payload.search_total_limit = settings.limits.total;
+            payload.search_source_limit = settings.limits.perSource;
+            payload.search_reference_limit = settings.limits.reference;
+        }
+        if (state.images.length) {
+            payload.images = state.images.map((img) => ({
+                base64: img.base64,
+                mime_type: img.mime_type,
+            }));
+        }
+        return payload;
+    }
+
+    function setLoading(isLoading) {
+        state.loading = isLoading;
+        sendBtn.disabled = isLoading;
+        sendBtn.classList.toggle("is-loading", isLoading);
+        queryInput.readOnly = isLoading;
     }
 
     async function handleSubmit(event) {
         event.preventDefault();
         if (state.loading) return;
 
-        const query = editor.getValue().trim();
+        const query = queryInput.value.trim();
         if (!query) {
-            statusMessage.textContent = "请输入问题。";
+            setStatus("请输入问题。");
             return;
         }
 
-        const userMessage = appendMessage("user", query);
-        const assistantMessage = appendMessage("assistant", "");
-        // assistantMessage.classList.add("pending"); // Replaced by skeleton loader
-        startLoadingAnimation(assistantMessage, searchToggle.checked);
-
+        const attachedImages = [...state.images];
+        const refs = appendTurn(query, attachedImages);
         setLoading(true);
-        if (searchToggle.checked) {
-            statusMessage.textContent = state.forceSearch
-                ? "强制联网：直接进入关键词阶段…"
-                : "正在等待搜索结果…";
-        } else {
-            statusMessage.textContent = "正在等待LLM回应…";
-        }
-        editor.setValue("");
-        // autoResize(); // CodeMirror handles this
+        setStatus("正在执行…");
+        queryInput.value = "";
+        autosize();
 
-        const payload = {
-            query,
-            search: searchToggle.checked ? "on" : "off",
-        };
-
-        const codeBlocks = extractCodeBlocks(query);
-        if (codeBlocks.length > 0) {
-            payload.code_blocks = codeBlocks;
-        }
-
-        if (modelSelect.value) {
-            payload.model = modelSelect.value;
-        }
-        if (searchToggle.checked && state.searchSources.size > 0) {
-            payload.search_sources = Array.from(state.searchSources);
-        }
-        if (searchToggle.checked && state.forceSearch) {
-            payload.force_search = true;
-        }
-        if (state.images.length > 0) {
-            payload.images = state.images.map(img => ({
-                base64: img.base64,
-                mime_type: img.mime_type
-            }));
-        }
-        if (searchToggle.checked) {
-            normalizeSearchLimits();
-            if (totalLimitInput) {
-                const totalValue = parseInt(totalLimitInput.value, 10);
-                if (Number.isFinite(totalValue) && totalValue > 0) {
-                    payload.search_total_limit = totalValue;
-                }
-            }
-            if (perSourceLimitInput) {
-                const perSourceValue = parseInt(perSourceLimitInput.value, 10);
-                if (Number.isFinite(perSourceValue) && perSourceValue > 0) {
-                    payload.search_source_limit = perSourceValue;
-                }
-            }
-            if (referenceLimitInput) {
-                const referenceValue = parseInt(referenceLimitInput.value, 10);
-                if (Number.isFinite(referenceValue) && referenceValue > 0) {
-                    payload.search_reference_limit = referenceValue;
-                }
-            }
-        }
+        const payload = buildPayload(query);
+        let finished = false;
+        let failed = null;
 
         try {
-            const response = await fetch("/api/answer", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
+            await streamAnswer(payload, {
+                onStep: (step) => refs.workflow.apply(step),
+                onResult: (data) => {
+                    finished = true;
+                    renderResult(refs, data);
+                    setStatus("回答已生成");
+                },
+                onError: (data) => {
+                    failed = (data && data.error) || "请求失败";
+                },
+            });
+        } catch (err) {
+            if (err && err.fallback) {
+                // 旧后端降级：一次性接口 + 事后合成步骤
+                try {
+                    const data = await legacyAnswer(payload);
+                    for (const step of synthesizeSteps(data)) refs.workflow.apply(step);
+                    finished = true;
+                    renderResult(refs, data);
+                    setStatus("回答已生成");
+                } catch (legacyErr) {
+                    failed = (legacyErr && legacyErr.message) || "请求失败";
+                }
+            } else {
+                failed = "连接中断，请重试";
+            }
+        }
+
+        if (!finished && !failed) failed = "服务未返回结果";
+        if (failed) {
+            refs.workflow.fail();
+            const note = el("div", "note note-error", failed);
+            refs.workflow.el.after(note);
+            setStatus(failed, true);
+        }
+
+        setLoading(false);
+        queryInput.focus();
+        state.images = [];
+        renderChips();
+    }
+
+    // ------------------------------------------------------------------
+    // 模型列表
+    // ------------------------------------------------------------------
+    const PROVIDER_META = {
+        "opencode-go": { label: "OpenCode Go", order: 1 },
+        zai: { label: "Zai", order: 2 },
+        glm: { label: "GLM", order: 3 },
+        openai: { label: "OpenAI", order: 4 },
+        anthropic: { label: "Anthropic", order: 5 },
+        google: { label: "Google", order: 6 },
+        minimax: { label: "Minimax", order: 7 },
+        hkgai: { label: "HKGAI", order: 8 },
+        openrouter: { label: "OpenRouter", order: 9 },
+    };
+
+    function refreshTopbarModel() {
+        const selected = modelSelect.selectedOptions[0];
+        topbarModel.textContent = selected && selected.value
+            ? selected.textContent
+            : "默认模型";
+    }
+
+    async function loadModels() {
+        try {
+            const response = await fetch("/api/models");
+            if (!response.ok) throw new Error("models");
+            const data = await response.json();
+            const rawModels = Array.isArray(data.models) ? data.models : [];
+
+            const byId = new Map();
+            for (const m of rawModels) {
+                const id = m && m.id ? String(m.id) : null;
+                if (!id) continue;
+                const key = (m.provider || "").toString().trim().toLowerCase();
+                const provider = PROVIDER_META[key] ? key : key || "openrouter";
+                const existing = byId.get(id);
+                if (!existing || (existing.provider === "openrouter" && provider !== "openrouter")) {
+                    byId.set(id, { id, provider });
+                }
+            }
+
+            const groups = new Map();
+            for (const { id, provider } of byId.values()) {
+                if (!groups.has(provider)) groups.set(provider, []);
+                const label = `${(PROVIDER_META[provider] || {}).label || provider} — ${id}`;
+                groups.get(provider).push({ id, label });
+            }
+
+            modelSelect.innerHTML = "";
+            modelSelect.appendChild(new Option("默认模型", ""));
+
+            const sortedProviders = Array.from(groups.keys()).sort((a, b) => {
+                const oa = (PROVIDER_META[a] || {}).order ?? 99;
+                const ob = (PROVIDER_META[b] || {}).order ?? 99;
+                if (oa !== ob) return oa - ob;
+                return a.localeCompare(b);
             });
 
-            console.log("Response status:", response.status);
-            console.log("Response ok:", response.ok);
-
-            let data;
-            try {
-                data = await response.json();
-                console.log("Parsed JSON data:", data);
-            } catch (parseError) {
-                console.error("JSON parse error:", parseError);
-                throw new Error("响应解析失败");
+            for (const provider of sortedProviders) {
+                const group = document.createElement("optgroup");
+                group.label = (PROVIDER_META[provider] || {}).label || provider;
+                for (const item of groups.get(provider)) {
+                    group.appendChild(new Option(item.label, item.id));
+                }
+                modelSelect.appendChild(group);
             }
 
-            if (!response.ok) {
-                const message = data?.error || "请求失败";
-                console.error("Response not ok:", message);
-                statusMessage.textContent = message;
-                setAssistantError(assistantMessage, message);
-                return;
+            if (settings.model && byId.has(settings.model)) {
+                modelSelect.value = settings.model;
             }
+        } catch {
+            modelSelect.innerHTML = "";
+            modelSelect.appendChild(new Option("默认模型", ""));
+        }
+        refreshTopbarModel();
+    }
 
-            // Check if data has the expected structure
-            if (!data || typeof data !== 'object') {
-                console.error("Invalid response data:", data);
-                statusMessage.textContent = "服务器返回无效数据";
-                setAssistantError(assistantMessage, "服务器返回数据格式错误");
-                return;
-            }
-
-            // Check if there's an error in the data
-            if (data.error) {
-                console.error("Server error:", data.error);
-                statusMessage.textContent = data.error;
-                setAssistantError(assistantMessage, data.error);
-                return;
-            }
-
-            if (searchToggle.checked) {
-                statusMessage.textContent = "搜索结果已返回，正在等待LLM回应…";
-            } else {
-                statusMessage.textContent = "正在等待LLM回应…";
-            }
-
-            console.log("Setting assistant message with data");
-            setAssistantMessage(assistantMessage, data);
-            updateStatusFromResponse(data);
-        } catch (error) {
-            console.error("Request exception:", error);
-            console.error("Error stack:", error.stack);
-            statusMessage.textContent = "请求失败，请重试";
-            setAssistantError(assistantMessage, "抱歉，暂时无法完成请求。");
-        } finally {
-            setLoading(false);
-            editor.focus();
-            state.images = [];
-            renderImages();
+    // ------------------------------------------------------------------
+    // 文件与图片
+    // ------------------------------------------------------------------
+    function renderChips() {
+        chipRow.innerHTML = "";
+        for (let i = 0; i < state.images.length; i += 1) {
+            const img = state.images[i];
+            const chip = el("span", "fchip");
+            const thumb = document.createElement("img");
+            thumb.src = img.base64;
+            thumb.alt = "";
+            chip.appendChild(thumb);
+            chip.appendChild(el("span", "fchip-name", img.name));
+            const remove = el("button", null, "×");
+            remove.type = "button";
+            remove.setAttribute("aria-label", `移除 ${img.name}`);
+            remove.addEventListener("click", () => {
+                state.images.splice(i, 1);
+                renderChips();
+            });
+            chip.appendChild(remove);
+            chipRow.appendChild(chip);
+        }
+        for (const name of state.docs) {
+            const chip = el("span", "fchip");
+            chip.appendChild(el("span", "fchip-name", name));
+            const remove = el("button", null, "×");
+            remove.type = "button";
+            remove.setAttribute("aria-label", `删除 ${name}`);
+            remove.addEventListener("click", async () => {
+                try {
+                    await fetch(`/api/files/${encodeURIComponent(name)}`, { method: "DELETE" });
+                    setStatus(`已删除 ${name}`);
+                    await fetchFiles();
+                } catch {
+                    setStatus(`删除 ${name} 失败`, true);
+                }
+            });
+            chip.appendChild(remove);
+            chipRow.appendChild(chip);
         }
     }
 
     async function fetchFiles() {
         try {
             const response = await fetch("/api/files");
-            if (!response.ok) throw new Error("failed");
+            if (!response.ok) throw new Error("files");
             const files = await response.json();
-            renderFiles(Array.isArray(files) ? files : []);
-        } catch (error) {
-            console.error("无法获取文件列表", error);
+            state.docs = Array.isArray(files) ? files : [];
+        } catch {
+            state.docs = [];
         }
+        renderChips();
     }
 
-    function renderFiles(files) {
-        fileList.innerHTML = "";
-        if (!files || files.length === 0) {
-            const chip = document.createElement("div");
-            chip.className = "chip empty";
-            chip.textContent = "暂未上传文件";
-            fileList.appendChild(chip);
-            return;
-        }
-
-        files.forEach(name => {
-            const chip = document.createElement("div");
-            chip.className = "chip";
-            chip.textContent = name;
-
-            const removeButton = document.createElement("button");
-            removeButton.type = "button";
-            removeButton.setAttribute("aria-label", `删除 ${name}`);
-            removeButton.textContent = "×";
-            removeButton.addEventListener("click", async () => {
-                try {
-                    await fetch(`/api/files/${encodeURIComponent(name)}`, { method: "DELETE" });
-                    fetchFiles();
-                    statusMessage.textContent = `已删除 ${name}`;
-                } catch (error) {
-                    console.error(error);
-                    statusMessage.textContent = `删除 ${name} 失败`;
-                }
-            });
-
-            chip.appendChild(removeButton);
-            fileList.appendChild(chip);
-        });
-    }
-
-    async function uploadFiles(files) {
-        if (!files || files.length === 0) return;
-        
+    async function handleFiles(files) {
         const imageFiles = [];
         const docFiles = [];
-        
         for (const file of files) {
-            if (file.type.startsWith('image/')) {
-                imageFiles.push(file);
-            } else {
-                docFiles.push(file);
-            }
+            if (file.type.startsWith("image/")) imageFiles.push(file);
+            else docFiles.push(file);
         }
 
-        if (imageFiles.length > 0) {
-            for (const file of imageFiles) {
-                if (file.size > 5 * 1024 * 1024) {
-                    statusMessage.textContent = `${file.name} 太大 (最大 5MB)`;
-                    continue;
-                }
+        for (const file of imageFiles) {
+            if (file.size > 5 * 1024 * 1024) {
+                setStatus(`${file.name} 太大（最大 5MB）`, true);
+                continue;
+            }
+            const dataUrl = await new Promise((resolve) => {
                 const reader = new FileReader();
-                reader.onload = (e) => {
-                    state.images.push({
-                        name: file.name,
-                        base64: e.target.result,
-                        mime_type: file.type
-                    });
-                    renderImages();
-                };
+                reader.onload = (e) => resolve(e.target.result);
                 reader.readAsDataURL(file);
-            }
-            if (docFiles.length === 0) {
-                 statusMessage.textContent = `已添加 ${imageFiles.length} 张图片`;
-            }
+            });
+            state.images.push({ name: file.name, base64: dataUrl, mime_type: file.type });
+        }
+        if (imageFiles.length) {
+            renderChips();
+            setStatus(`已添加 ${imageFiles.length} 张图片`);
         }
 
-        if (docFiles.length > 0) {
-            statusMessage.textContent = "正在上传文件…";
-
-            for (const file of docFiles) {
-                const formData = new FormData();
-                formData.append("file", file);
-                try {
-                    const response = await fetch("/api/files", {
-                        method: "POST",
-                        body: formData,
-                    });
-                    if (!response.ok) {
-                        const error = await response.json().catch(() => ({}));
-                        throw new Error(error?.error || "上传失败");
-                    }
-                } catch (error) {
-                    console.error(error);
-                    statusMessage.textContent = `${file.name} 上传失败`;
-                    return;
-                }
+        for (const file of docFiles) {
+            const formData = new FormData();
+            formData.append("file", file);
+            try {
+                setStatus("正在上传文件…");
+                const response = await fetch("/api/files", { method: "POST", body: formData });
+                if (!response.ok) throw new Error("upload");
+                setStatus("文件上传完成");
+            } catch {
+                setStatus(`${file.name} 上传失败`, true);
             }
+        }
+        if (docFiles.length) await fetchFiles();
+    }
 
-            statusMessage.textContent = "文件上传完成";
-            await fetchFiles();
+    // ------------------------------------------------------------------
+    // 控件绑定
+    // ------------------------------------------------------------------
+    function autosize() {
+        queryInput.style.height = "auto";
+        queryInput.style.height = `${Math.min(queryInput.scrollHeight, 220)}px`;
+    }
+
+    function applySettingsToControls() {
+        searchPill.classList.toggle("is-on", settings.search);
+        searchPill.setAttribute("aria-pressed", settings.search ? "true" : "false");
+        for (const checkbox of sourceCheckboxes) {
+            checkbox.checked = settings.sources.includes(checkbox.value);
+        }
+        forceSearchInput.checked = settings.forceSearch;
+        limitTotal.value = String(settings.limits.total);
+        limitPerSource.value = String(settings.limits.perSource);
+        limitReference.value = String(settings.limits.reference);
+        for (const checkbox of timingCheckboxes) {
+            checkbox.checked = settings.timing.includes(checkbox.value);
+        }
+        updateSearchDependentControls();
+    }
+
+    function updateSearchDependentControls() {
+        const disabled = !settings.search;
+        for (const input of [limitTotal, limitPerSource, limitReference]) {
+            input.disabled = disabled;
+        }
+        forceSearchInput.disabled = disabled;
+        if (disabled && settings.forceSearch) {
+            settings.forceSearch = false;
+            forceSearchInput.checked = false;
         }
     }
 
-    function autoResize() {
-        textarea.style.height = "auto";
-        textarea.style.height = `${Math.min(textarea.scrollHeight, 320)}px`;
-    }
+    composer.addEventListener("submit", handleSubmit);
 
-    form.addEventListener("submit", handleSubmit);
-    // textarea.addEventListener("input", autoResize);
-    // textarea.addEventListener("keydown", (event) => {
-    //     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-    //         event.preventDefault();
-    //         form.dispatchEvent(new Event("submit", { cancelable: true }));
-    //     }
-    // });
+    queryInput.addEventListener("input", autosize);
+    queryInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+            event.preventDefault();
+            composer.requestSubmit();
+        }
+    });
 
-    uploadButton.addEventListener("click", () => fileInput.click());
+    attachBtn.addEventListener("click", () => fileInput.click());
     fileInput.addEventListener("change", () => {
-        if (fileInput.files && fileInput.files.length > 0) {
-            uploadFiles(Array.from(fileInput.files));
+        if (fileInput.files && fileInput.files.length) {
+            handleFiles(Array.from(fileInput.files));
             fileInput.value = "";
         }
     });
 
-    if (searchSourceButton) {
-        searchSourceButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            if (!searchToggle.checked) return;
-            toggleSearchSourceMenu();
-        });
-    }
+    searchPill.addEventListener("click", () => {
+        settings.search = !settings.search;
+        searchPill.classList.toggle("is-on", settings.search);
+        searchPill.setAttribute("aria-pressed", settings.search ? "true" : "false");
+        updateSearchDependentControls();
+        saveSettings();
+        setStatus(settings.search ? "联网搜索已启用" : "联网搜索已关闭");
+    });
 
-    if (forceSearchButton) {
-        forceSearchButton.addEventListener("click", () => {
-            if (!searchToggle.checked || state.loading) return;
-            const nextState = !state.forceSearch;
-            setForceSearchState(nextState);
-            statusMessage.textContent = nextState
-                ? "强制联网搜索已开启"
-                : "强制联网搜索已关闭";
-        });
-    }
+    modelSelect.addEventListener("change", () => {
+        settings.model = modelSelect.value;
+        saveSettings();
+        refreshTopbarModel();
+    });
 
-    for (const checkbox of searchSourceCheckboxes) {
-        checkbox.addEventListener("change", handleSearchSourceChange);
-    }
+    settingsBtn.addEventListener("click", () => {
+        const willOpen = settingsPanel.hidden;
+        settingsPanel.hidden = !willOpen;
+        settingsBtn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+        settingsBtn.classList.toggle("is-on", willOpen);
+    });
 
-    if (timingButton) {
-        timingButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            if (!timingToggle.checked) return;
-            toggleTimingMenu();
+    for (const checkbox of sourceCheckboxes) {
+        checkbox.addEventListener("change", () => {
+            const value = checkbox.value;
+            if (checkbox.checked) {
+                if (!settings.sources.includes(value)) settings.sources.push(value);
+            } else {
+                if (settings.sources.length <= 1) {
+                    checkbox.checked = true;
+                    setStatus("至少选择一个搜索源");
+                    return;
+                }
+                settings.sources = settings.sources.filter((s) => s !== value);
+            }
+            saveSettings();
         });
     }
 
     for (const checkbox of timingCheckboxes) {
-        checkbox.addEventListener("change", handleTimingChange);
-    }
-
-    document.addEventListener("click", (event) => {
-        if (!searchSourceDropdown) return;
-        if (!searchSourceDropdown.contains(event.target)) {
-            closeSearchSourceMenu();
-        }
-    });
-
-    document.addEventListener("click", (event) => {
-        if (!timingDropdown) return;
-        if (!timingDropdown.contains(event.target)) {
-            closeTimingMenu();
-        }
-    });
-
-    searchToggle.addEventListener("change", () => {
-        updateSearchSourceVisibility();
-        if (searchToggle.checked) {
-            setForceSearchState(false);
-            statusMessage.textContent = "联网搜索已启用";
-        } else {
-            setForceSearchState(false);
-            statusMessage.textContent = "正在等待LLM回应…";
-        }
-    });
-
-    timingToggle.addEventListener("change", () => {
-        updateTimingVisibility();
-        if (timingToggle.checked) {
-            statusMessage.textContent = "时间详情已启用";
-        } else {
-            statusMessage.textContent = "时间详情已关闭";
-        }
-    });
-
-    if (totalLimitInput) {
-        totalLimitInput.addEventListener("change", normalizeSearchLimits);
-    }
-
-    if (perSourceLimitInput) {
-        perSourceLimitInput.addEventListener("change", normalizeSearchLimits);
-    }
-
-    if (referenceLimitInput) {
-        referenceLimitInput.addEventListener("change", normalizeSearchLimits);
-    }
-
-    function renderImages() {
-        if (!imagePreviewList) return;
-        imagePreviewList.innerHTML = "";
-        state.images.forEach((img, index) => {
-            const chip = document.createElement("div");
-            chip.className = "chip image-chip";
-            
-            const thumb = document.createElement("img");
-            thumb.src = img.base64;
-            thumb.style.height = "20px";
-            thumb.style.marginRight = "6px";
-            thumb.style.verticalAlign = "middle";
-            chip.appendChild(thumb);
-
-            const nameSpan = document.createElement("span");
-            nameSpan.textContent = img.name;
-            chip.appendChild(nameSpan);
-
-            const removeButton = document.createElement("button");
-            removeButton.type = "button";
-            removeButton.textContent = "×";
-            removeButton.addEventListener("click", () => {
-                state.images.splice(index, 1);
-                renderImages();
-            });
-            chip.appendChild(removeButton);
-            
-            imagePreviewList.appendChild(chip);
+        checkbox.addEventListener("change", () => {
+            const value = checkbox.value;
+            if (checkbox.checked) {
+                if (!settings.timing.includes(value)) settings.timing.push(value);
+            } else {
+                if (settings.timing.length <= 1) {
+                    checkbox.checked = true;
+                    setStatus("至少保留一项耗时明细");
+                    return;
+                }
+                settings.timing = settings.timing.filter((t) => t !== value);
+            }
+            saveSettings();
         });
     }
 
-    ensurePlaceholder();
+    forceSearchInput.addEventListener("change", () => {
+        settings.forceSearch = forceSearchInput.checked;
+        saveSettings();
+    });
+
+    for (const input of [limitTotal, limitPerSource, limitReference]) {
+        input.addEventListener("change", normalizeLimits);
+    }
+
+    // ------------------------------------------------------------------
+    // 初始化
+    // ------------------------------------------------------------------
+    state.docs = [];
+    applySettingsToControls();
+    renderEmpty();
     fetchFiles();
-    loadAvailableModels();
-    // autoResize();
-    initializeSearchSources();
-    initializeTimingOptions();
-    updateSearchSourceVisibility();
-    updateTimingVisibility();
-    normalizeSearchLimits();
-    setForceSearchState(false);
+    loadModels();
+    autosize();
 });

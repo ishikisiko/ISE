@@ -45,6 +45,7 @@ from langchain.langchain_support import Document, FileReader, LangChainVectorSto
 from langchain.langchain_tools import SearchRetriever, WebSearchTool
 from search.search import SearchClient, SearchHit, GoogleSearchClient
 from utils.timing_utils import TimingRecorder
+from utils.workflow_trace import ensure_tracer
 from utils.query_config import (
     TEMPORAL_CHANGE_KEYWORDS,
     TIME_RANGE_CONFIG,
@@ -253,6 +254,7 @@ class SearchRAGChain:
         min_rerank_score: float = 0.0,
         max_per_domain: int = 1,
         source_selector: Optional[Any] = None,
+        tracer: Optional[Any] = None,
     ) -> None:
         self.llm = llm
         self.search_client = search_client
@@ -262,11 +264,13 @@ class SearchRAGChain:
         self.min_rerank_score = min_rerank_score
         self.max_per_domain = max(1, max_per_domain)
         self.source_selector = source_selector
-        
+
         # Initialize local vector store if data_path provided
+        tracer = ensure_tracer(tracer)
         self.vector_store: Optional[LangChainVectorStore] = None
         if data_path:
             print("Loading and indexing local documents...")
+            tracer.begin("local_index", "准备本地向量索引", detail="加载嵌入模型并索引文档")
             try:
                 self.vector_store = LangChainVectorStore(
                     model_name=embedding_model,
@@ -276,8 +280,10 @@ class SearchRAGChain:
                 )
                 chunk_count = self.vector_store.index_from_directory(data_path)
                 print(f"Indexed {chunk_count} chunks from local documents.")
+                tracer.end("local_index", detail=f"{chunk_count} 个分块")
             except Exception as e:
                 print(f"Failed to load local documents: {e}")
+                tracer.end("local_index", detail="无可用本地文档", status="skipped")
                 self.vector_store = None
 
         self.web_source = WebEvidenceSource(search_client)
@@ -413,8 +419,10 @@ class SearchRAGChain:
         domain_result: Optional[Dict[str, Any]] = None,
         extra_context: Optional[str] = None,
         enable_domain: bool = False,
+        tracer: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Retrieve and normalize evidence from enabled first-class sources."""
+        tracer = ensure_tracer(tracer)
         effective_query = search_query.strip() if search_query else query
         active_sources: List[Dict[str, Any]] = []
         evidence_items: List[EvidenceItem] = []
@@ -437,6 +445,9 @@ class SearchRAGChain:
 
         if enable_search:
             active_sources.append(self.web_source.describe())
+            tracer.begin("search", "联网检索", detail=effective_query)
+            search_timings: List[Dict[str, Any]] = []
+            hits_count = 0
             try:
                 per_source_cap = per_source_limit or num_search_results
                 fetch_limit = num_search_results
@@ -474,14 +485,16 @@ class SearchRAGChain:
                         hits.extend(granular_hits)
 
                 hits, rerank_meta = self._apply_rerank(query, hits, limit=num_search_results)
+                hits_count = len(hits)
                 evidence_items.extend(self.web_source.hits_to_items(hits))
             except Exception as exc:
                 search_error = str(exc)
             finally:
-                if timing_recorder:
-                    timings_getter = getattr(self.search_client, "get_last_timings", None)
-                    if callable(timings_getter):
-                        timing_recorder.extend_search_timings(timings_getter())
+                timings_getter = getattr(self.search_client, "get_last_timings", None)
+                if callable(timings_getter):
+                    search_timings = list(timings_getter() or [])
+                    if timing_recorder:
+                        timing_recorder.extend_search_timings(search_timings)
 
             get_last_errors = getattr(self.search_client, "get_last_errors", None)
             if callable(get_last_errors):
@@ -491,16 +504,40 @@ class SearchRAGChain:
                     detail = str(item.get("error") or "未知错误")
                     search_warnings.append(f"{source} 出现异常：{detail}")
 
-        if enable_local_docs and self.local_source.is_available():
-            active_sources.append(self.local_source.describe())
-            evidence_items.extend(
-                self.local_source.retrieve(
-                    query,
-                    RetrievalOptions(num_results=num_retrieved_docs),
-                )
-            )
+            if search_error:
+                tracer.error("search", detail="检索异常")
+            else:
+                step_items = []
+                for entry in search_timings:
+                    if not isinstance(entry, dict):
+                        continue
+                    label = str(entry.get("label") or entry.get("source") or "搜索源")
+                    try:
+                        value = f"{float(entry.get('duration_ms', 0.0)):.0f} ms"
+                    except (TypeError, ValueError):
+                        value = "--"
+                    if entry.get("error"):
+                        value += f" · {entry['error']}"
+                    step_items.append({"label": label, "value": value})
+                detail_parts = [f"{hits_count} 条结果"]
+                source_names = sorted({str(t.get("source")) for t in search_timings if isinstance(t, dict) and t.get("source")})
+                if source_names:
+                    detail_parts.append("、".join(source_names[:4]))
+                tracer.end("search", detail=" · ".join(detail_parts), items=step_items or None)
 
+        if enable_local_docs and self.local_source.is_available():
+            tracer.begin("local", "本地文档检索")
+            active_sources.append(self.local_source.describe())
+            local_items = self.local_source.retrieve(
+                query,
+                RetrievalOptions(num_results=num_retrieved_docs),
+            )
+            evidence_items.extend(local_items)
+            tracer.end("local", detail=f"{len(local_items)} 个片段")
+
+        tracer.begin("rerank", "证据重排融合")
         evidence_items, fusion_meta = self._dedupe_and_rank_evidence(evidence_items)
+        tracer.end("rerank", detail=f"保留 {len(evidence_items)} 条证据")
         return {
             "effective_query": effective_query,
             "evidence_items": evidence_items,
@@ -852,8 +889,10 @@ class SearchRAGChain:
         domain: Optional[str] = None,
         domain_result: Optional[Dict[str, Any]] = None,
         enable_domain: bool = False,
+        tracer: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Answer a query using search + local docs RAG pipeline."""
+        tracer = ensure_tracer(tracer)
         retrieval = self._retrieve_evidence(
             query,
             search_query=search_query,
@@ -869,6 +908,7 @@ class SearchRAGChain:
             domain_result=domain_result,
             extra_context=extra_context,
             enable_domain=enable_domain,
+            tracer=tracer,
         )
         evidence_items: List[EvidenceItem] = retrieval["evidence_items"]
         search_hits = evidence_items_to_search_hits(evidence_items)
@@ -927,6 +967,7 @@ class SearchRAGChain:
             messages.append(HumanMessage(content=user_prompt))
         
         # Generate response
+        tracer.begin("generate", "生成回答")
         response_start = time.perf_counter()
         try:
             response = self.llm.invoke(
@@ -935,6 +976,9 @@ class SearchRAGChain:
                 temperature=temperature,
             )
             content = response.content if hasattr(response, 'content') else str(response)
+        except Exception as exc:
+            tracer.error("generate", detail=str(exc)[:80])
+            raise
         finally:
             if timing_recorder:
                 duration_ms = (time.perf_counter() - response_start) * 1000
@@ -944,6 +988,10 @@ class SearchRAGChain:
                     provider=getattr(self.llm, "provider", None),
                     model=getattr(self.llm, "model_name", None),
                 )
+        _provider = getattr(self.llm, "provider", None)
+        _model_name = getattr(self.llm, "model_name", None)
+        _model_suffix = f"{_provider}/{_model_name}" if _provider and _model_name else (_provider or _model_name)
+        tracer.end("generate", detail=_model_suffix or None)
         
         # Build answer with references
         answer = content

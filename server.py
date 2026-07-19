@@ -3,11 +3,13 @@ from __future__ import annotations
 import copy
 import json
 import os
+import queue
 import sys
+import threading
 from functools import lru_cache
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Generator, Optional, List
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from werkzeug.utils import secure_filename
 
 # Add project directory to path for imports
@@ -17,6 +19,7 @@ from main import build_search_client, build_reranker
 from utils.chunking import resolve_chunk_settings
 from utils.config_validation import configured_value
 from utils.temperature_config import get_temperature_for_task
+from utils.workflow_trace import WorkflowTracer
 from langchain.langchain_llm import create_chat_model
 from langchain.langchain_orchestrator import create_langchain_orchestrator, LangChainOrchestrator
 
@@ -29,6 +32,37 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 class ConfigurationError(RuntimeError):
     """Raised when the application configuration is invalid."""
+
+
+class PayloadError(ValueError):
+    """Raised when an answer request payload is invalid."""
+
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def _coerce_bool(raw_value: Any) -> bool:
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        return normalized in {"true", "1", "yes", "y", "on"}
+    if isinstance(raw_value, (int, float)):
+        return bool(raw_value)
+    return False
+
+
+def _coerce_positive_int(raw_value: Any, field: str) -> Optional[int]:
+    if raw_value is None:
+        return None
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        raise PayloadError(f"'{field}' must be a positive integer.")
+    if parsed <= 0:
+        raise PayloadError(f"'{field}' must be a positive integer.")
+    return parsed
 
 
 def ensure_json_serializable(obj: Any) -> Any:
@@ -368,19 +402,21 @@ def delete_file(filename):
 
 
 
-@app.post("/api/answer")
-def answer() -> Any:
-    payload: Dict[str, Any] = request.get_json(silent=True) or {}
-    query = (payload.get("query") or "").strip()
+def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and normalize an answer request payload.
 
+    Shared by the JSON and SSE answer endpoints. Raises PayloadError for
+    client-visible validation problems.
+    """
+    query = (payload.get("query") or "").strip()
     if not query:
-        return jsonify({"error": "Missing 'query' in request body."}), 400
+        raise PayloadError("Missing 'query' in request body.")
 
     search_sources: Optional[List[str]] = None
     if payload.get("search_sources") is not None:
         raw_sources = payload["search_sources"]
         if not isinstance(raw_sources, list):
-            return jsonify({"error": "'search_sources' must be an array."}), 400
+            raise PayloadError("'search_sources' must be an array.")
         allowed_sources = {
             "brave",
             "firecrawl",
@@ -394,10 +430,10 @@ def answer() -> Any:
         seen = set()
         for item in raw_sources:
             if not isinstance(item, str):
-                return jsonify({"error": "Invalid search source value."}), 400
+                raise PayloadError("Invalid search source value.")
             token = item.strip().lower()
             if token not in allowed_sources:
-                return jsonify({"error": f"Unsupported search source '{item}'."}), 400
+                raise PayloadError(f"Unsupported search source '{item}'.")
             if token in seen:
                 continue
             seen.add(token)
@@ -415,62 +451,22 @@ def answer() -> Any:
     code_blocks = payload.get("code_blocks")
     if code_blocks and isinstance(code_blocks, list):
         print(f"[server] Received {len(code_blocks)} code blocks")
-        # Optional: Append a hint to the query if code blocks are detected
-        # query += "\n\n[System Note: The user has provided code blocks. Please analyze them carefully.]"
-
-    def _coerce_bool(raw_value: Any) -> bool:
-        if isinstance(raw_value, bool):
-            return raw_value
-        if isinstance(raw_value, str):
-            normalized = raw_value.strip().lower()
-            return normalized in {"true", "1", "yes", "y", "on"}
-        if isinstance(raw_value, (int, float)):
-            return bool(raw_value)
-        return False
 
     force_search = _coerce_bool(payload.get("force_search")) and allow_search
-    
+
     images = payload.get("images")
     if images and not isinstance(images, list):
-        return jsonify({"error": "'images' must be a list."}), 400
-
-    try:
-        # Support both provider and model parameters for backward compatibility
-        model = payload.get("model") or payload.get("provider")
-        pipeline = build_pipeline(
-            model_override=model,
-            search_sources=search_sources if allow_search and search_sources else None,
-            chunk_size=payload.get("chunk_size"),
-            chunk_overlap=payload.get("chunk_overlap"),
-        )
-    except ConfigurationError as exc:
-        return jsonify({"error": str(exc)}), 500
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        return jsonify({"error": f"Failed to build pipeline: {exc}"}), 500
-
-    def _coerce_positive_int(raw_value: Any, field: str) -> Optional[int]:
-        if raw_value is None:
-            return None
-        try:
-            parsed = int(raw_value)
-        except (TypeError, ValueError):
-            raise ValueError(f"'{field}' must be a positive integer.")
-        if parsed <= 0:
-            raise ValueError(f"'{field}' must be a positive integer.")
-        return parsed
+        raise PayloadError("'images' must be a list.")
 
     reference_limit: Optional[int] = None
     search_reference_value = payload.get("search_reference_limit")
     fallback_display_value = payload.get("search_source_display_limit")
-    try:
-        legacy_num = _coerce_positive_int(payload.get("num_results"), "num_results")
-        total_limit = _coerce_positive_int(payload.get("search_total_limit"), "search_total_limit")
-        per_source_limit = _coerce_positive_int(payload.get("search_source_limit"), "search_source_limit")
-        reference_limit = _coerce_positive_int(search_reference_value, "search_reference_limit")
-        if reference_limit is None and fallback_display_value is not None:
-            reference_limit = _coerce_positive_int(fallback_display_value, "search_source_display_limit")
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    legacy_num = _coerce_positive_int(payload.get("num_results"), "num_results")
+    total_limit = _coerce_positive_int(payload.get("search_total_limit"), "search_total_limit")
+    per_source_limit = _coerce_positive_int(payload.get("search_source_limit"), "search_source_limit")
+    reference_limit = _coerce_positive_int(search_reference_value, "search_reference_limit")
+    if reference_limit is None and fallback_display_value is not None:
+        reference_limit = _coerce_positive_int(fallback_display_value, "search_source_display_limit")
 
     default_total = legacy_num if legacy_num is not None else 5
     if total_limit is None:
@@ -485,29 +481,86 @@ def answer() -> Any:
     if "/" in provider:
         # Extract provider from model path
         provider = provider.split("/")[0]
-    
+
     # Get temperature from request or use configured default
     request_temp = payload.get("temperature")
     if request_temp is not None:
         temperature = float(request_temp)
     else:
         temperature = get_temperature_for_task(config, "direct_answer", provider, 0.3)
-    
+
+    return {
+        "query": query,
+        "allow_search": allow_search,
+        "search_sources": search_sources,
+        "force_search": force_search,
+        "images": images,
+        "model": payload.get("model") or payload.get("provider"),
+        "total_limit": total_limit,
+        "per_source_limit": per_source_limit,
+        "num_retrieved_docs": num_retrieved_docs,
+        "reference_limit": reference_limit,
+        "temperature": temperature,
+        "max_tokens": int(payload.get("max_tokens")) if payload.get("max_tokens") else 5000,
+        "chunk_size": payload.get("chunk_size"),
+        "chunk_overlap": payload.get("chunk_overlap"),
+    }
+
+
+def _execute_answer(ctx: Dict[str, Any], tracer: Optional[WorkflowTracer] = None) -> Dict[str, Any]:
+    """Build the pipeline and run the answer flow for a prepared context."""
+    pipeline = build_pipeline(
+        model_override=ctx["model"],
+        search_sources=ctx["search_sources"] if ctx["allow_search"] and ctx["search_sources"] else None,
+        chunk_size=ctx["chunk_size"],
+        chunk_overlap=ctx["chunk_overlap"],
+    )
+
+    print(f"[server] Processing query: {ctx['query'][:50]}...")
+    result = pipeline.answer(
+        ctx["query"],
+        num_search_results=ctx["total_limit"],
+        per_source_search_results=ctx["per_source_limit"],
+        num_retrieved_docs=ctx["num_retrieved_docs"],
+        max_tokens=ctx["max_tokens"],
+        temperature=ctx["temperature"],
+        allow_search=ctx["allow_search"],
+        reference_limit=ctx["reference_limit"],
+        force_search=ctx["force_search"],
+        images=ctx["images"],
+        tracer=tracer,
+    )
+    print(f"[server] Pipeline returned result with keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+
+    if not isinstance(result, dict):
+        raise RuntimeError("服务器返回数据格式错误")
+
+    if "answer" not in result:
+        result["answer"] = "未能生成答案"
+
+    if ctx["reference_limit"] is not None:
+        control = result.get("control")
+        if not isinstance(control, dict):
+            control = {}
+            result["control"] = control
+        control["search_reference_limit"] = ctx["reference_limit"]
+
+    return result
+
+
+@app.post("/api/answer")
+def answer() -> Any:
+    payload: Dict[str, Any] = request.get_json(silent=True) or {}
+
     try:
-        print(f"[server] Processing query: {query[:50]}...")
-        result = pipeline.answer(
-            query,
-            num_search_results=total_limit,
-            per_source_search_results=per_source_limit,
-            num_retrieved_docs=num_retrieved_docs,
-            max_tokens=int(payload.get("max_tokens")) if payload.get("max_tokens") else 5000,
-            temperature=temperature,
-            allow_search=allow_search,
-            reference_limit=reference_limit,
-            force_search=force_search,
-            images=images,
-        )
-        print(f"[server] Pipeline returned result with keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+        ctx = _prepare_answer_context(payload)
+    except PayloadError as exc:
+        return jsonify({"error": str(exc)}), exc.status
+
+    try:
+        result = _execute_answer(ctx)
+    except ConfigurationError as exc:
+        return jsonify({"error": str(exc)}), 500
     except Exception as exc:  # pragma: no cover - propagate runtime issues
         import traceback
         error_msg = str(exc).encode('utf-8', errors='replace').decode('utf-8')
@@ -515,26 +568,10 @@ def answer() -> Any:
         print(traceback.format_exc())
         return jsonify({"error": f"Pipeline execution failed: {error_msg}"}), 500
 
-    # Validate result structure
-    if not isinstance(result, dict):
-        print(f"[server] Invalid result type: {type(result)}")
-        return jsonify({"error": "服务器返回数据格式错误"}), 500
-    
-    if "answer" not in result:
-        print(f"[server] Missing 'answer' in result: {result.keys()}")
-        result["answer"] = "未能生成答案"
-    
     # Log answer length
     answer_len = len(result.get("answer", "")) if isinstance(result.get("answer"), str) else 0
     print(f"[server] Answer length: {answer_len} chars")
 
-    if reference_limit is not None:
-        control = result.get("control")
-        if not isinstance(control, dict):
-            control = {}
-            result["control"] = control
-        control["search_reference_limit"] = reference_limit
-    
     # Ensure all values are JSON serializable
     try:
         result = ensure_json_serializable(result)
@@ -542,7 +579,7 @@ def answer() -> Any:
     except Exception as exc:
         print(f"[server] Failed to serialize result: {exc}")
         return jsonify({"error": "响应数据序列化失败"}), 500
-    
+
     # Try to create JSON to verify it works
     try:
         test_json = json.dumps(result, ensure_ascii=False)
@@ -550,8 +587,75 @@ def answer() -> Any:
     except Exception as exc:
         print(f"[server] JSON creation failed: {exc}")
         return jsonify({"error": f"JSON序列化失败: {str(exc)}"}), 500
-    
+
     return jsonify(result)
+
+
+@app.post("/api/answer/stream")
+def answer_stream() -> Any:
+    """Stream workflow step events over SSE, then the final result.
+
+    Frames:
+      event: step   — one JSON object per workflow step state change
+      event: result — the full final result (same shape as /api/answer)
+      event: error  — {error: str} when the pipeline fails
+      event: done   — marks the end of the stream
+    """
+    payload: Dict[str, Any] = request.get_json(silent=True) or {}
+
+    try:
+        ctx = _prepare_answer_context(payload)
+    except PayloadError as exc:
+        return jsonify({"error": str(exc)}), exc.status
+
+    def generate() -> Generator[str, None, None]:
+        events: "queue.Queue[Any]" = queue.Queue()
+        tracer = WorkflowTracer()
+        tracer.on_event(lambda event: events.put(("step", event)))
+        holder: Dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                holder["result"] = _execute_answer(ctx, tracer=tracer)
+            except Exception as exc:  # pragma: no cover - propagate runtime issues
+                import traceback
+                error_msg = str(exc).encode("utf-8", errors="replace").decode("utf-8")
+                print(f"[server] Stream pipeline error: {error_msg}")
+                print(traceback.format_exc())
+                holder["error"] = error_msg
+            finally:
+                events.put(None)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            kind, data = item
+            yield f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        if "error" in holder:
+            yield f"event: error\ndata: {json.dumps({'error': holder['error']}, ensure_ascii=False)}\n\n"
+        else:
+            try:
+                result = ensure_json_serializable(holder["result"])
+            except Exception as exc:
+                yield f"event: error\ndata: {json.dumps({'error': f'响应数据序列化失败: {exc}'}, ensure_ascii=False)}\n\n"
+            else:
+                yield f"event: result\ndata: {json.dumps(result, ensure_ascii=False)}\n\n"
+        yield "event: done\ndata: {}\n\n"
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 if __name__ == "__main__":

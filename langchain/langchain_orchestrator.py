@@ -35,6 +35,7 @@ from utils.time_parser import TimeConstraint, parse_time_constraint
 from utils.search_routing import coerce_bool, extract_json_object, is_small_talk_query, normalize_sources
 from utils.timing_utils import TimingRecorder
 from utils.current_time import get_current_date_str
+from utils.workflow_trace import ensure_tracer
 
 
 class QueryIntent(str, Enum):
@@ -344,6 +345,7 @@ Always answer in the same language as the user's question."""
         snapshot: Optional[tuple],
         *,
         require_search_client: bool = False,
+        tracer: Optional[Any] = None,
     ) -> Optional[SearchRAGChain]:
         """Get or create the unified primary RAG pipeline."""
         if require_search_client and not self.search_client:
@@ -364,6 +366,7 @@ Always answer in the same language as the user's question."""
                 min_rerank_score=self.min_rerank_score,
                 max_per_domain=self.max_per_domain,
                 source_selector=self.source_selector,
+                tracer=tracer,
             )
             self._primary_signature = search_signature
 
@@ -452,8 +455,9 @@ Always answer in the same language as the user's question."""
         domain: Optional[str] = None,
         domain_result: Optional[Dict[str, Any]] = None,
         enable_domain: bool = False,
+        tracer: Optional[Any] = None,
     ) -> Optional[Dict[str, Any]]:
-        pipeline = self._get_primary_rag(snapshot)
+        pipeline = self._get_primary_rag(snapshot, tracer=tracer)
         if not pipeline:
             return None
 
@@ -475,6 +479,7 @@ Always answer in the same language as the user's question."""
             domain=domain,
             domain_result=domain_result,
             enable_domain=enable_domain,
+            tracer=tracer,
         )
 
     def answer(
@@ -490,6 +495,7 @@ Always answer in the same language as the user's question."""
         reference_limit: Optional[int] = None,
         force_search: bool = False,
         images: Optional[List[Dict[str, str]]] = None,
+        tracer: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Answer a query using intelligent routing.
         
@@ -500,6 +506,7 @@ Always answer in the same language as the user's question."""
         4. Web search RAG for current information
         5. Local RAG for document-based queries
         """
+        tracer = ensure_tracer(tracer)
         timing_recorder = TimingRecorder(enabled=self.show_timings)
         timing_recorder.start()
         
@@ -520,32 +527,44 @@ Always answer in the same language as the user's question."""
         
         # Handle images (visual retrieval)
         if images:
+            tracer.begin("visual", "图片理解", detail="正在解析图片内容")
             visual_response = self._handle_visual_query(
-                query, images, max_tokens, temperature, 
+                query, images, max_tokens, temperature,
                 has_docs, allow_search, timing_recorder
             )
+            tracer.end("visual", detail="已生成回答")
             return self._finalize_response(visual_response, timing_recorder)
-        
+
         # Small talk detection
         if self._is_small_talk(effective_query):
+            tracer.begin("intent", "意图理解")
+            tracer.end("intent", detail="识别为闲聊")
+            tracer.begin("generate", "生成回答")
             response = self._handle_small_talk(
-                query, max_tokens, temperature, 
+                query, max_tokens, temperature,
                 has_docs, allow_search, timing_recorder
             )
+            tracer.end("generate", detail="模型直答")
             return self._finalize_response(response, timing_recorder)
-        
+
         # Search disabled
         if not allow_search:
+            tracer.begin("intent", "意图理解")
+            tracer.end("intent", detail="联网已关闭，使用本地知识")
             response = self._handle_local_only(
                 query, snapshot, has_docs, num_retrieved_docs,
-                max_tokens, temperature, timing_recorder
+                max_tokens, temperature, timing_recorder,
+                tracer=tracer,
             )
             return self._finalize_response(response, timing_recorder)
-        
+
         # Domain classification and API handling
+        tracer.begin("intent", "意图理解")
         domain, sources = self.source_selector.select_sources(
             effective_query, timing_recorder=timing_recorder
         )
+        domain_label = domain if domain and str(domain).lower() != "general" else None
+        tracer.end("intent", detail=f"识别领域：{domain_label}" if domain_label else "通用问题")
         enhanced_query = self.source_selector.generate_domain_specific_query(
             effective_query, domain
         )
@@ -558,32 +577,46 @@ Always answer in the same language as the user's question."""
         has_finance_keywords = any(kw in query.lower() for kw in finance_keywords)
         finance_query = query if has_finance_keywords else effective_query
         
+        tracer.begin("domain_api", "领域数据查询", detail=domain_label or "通用")
         domain_api_result = self.source_selector.fetch_domain_data(
             finance_query, domain, timing_recorder=timing_recorder
         )
-        
+        if domain_api_result and domain_api_result.get("handled"):
+            tracer.end("domain_api", detail="已获取领域数据")
+        else:
+            tracer.end("domain_api", detail="无需领域数据", status="skipped")
+
         should_continue = domain_api_result.get("continue_search", False) if domain_api_result else False
-        
+
         if domain_api_result and domain_api_result.get("handled") and domain_api_result.get("answer") and not should_continue:
+            tracer.begin("domain_answer", "组织领域回答")
             response = self._handle_domain_api(
                 query, domain, sources, enhanced_query,
                 domain_api_result, has_docs, allow_search, force_search, timing_recorder
             )
+            tracer.end("domain_answer", detail=domain_label or str(domain))
             return self._finalize_response(response, timing_recorder)
         
         # Routing decision
         if not force_search:
+            tracer.begin("route", "路由决策")
             decision = self._make_routing_decision(effective_query, timing_recorder)
-            
+            tracer.end(
+                "route",
+                detail="需要联网检索" if decision["needs_search"] else "无需检索，直接回答",
+            )
+
             if not decision["needs_search"] and decision.get("direct_answer"):
                 response = self._build_direct_response(
                     query, decision["direct_answer"], decision,
                     has_docs, allow_search
                 )
                 return self._finalize_response(response, timing_recorder)
-            
+
             if not decision["needs_search"]:
+                tracer.begin("generate", "生成回答")
                 direct = self._direct_answer(query, timing_recorder)
+                tracer.end("generate", detail="模型直答")
                 response = self._build_direct_response(
                     query, direct.get("content", ""), decision,
                     has_docs, allow_search,
@@ -591,21 +624,27 @@ Always answer in the same language as the user's question."""
                     llm_error=direct.get("error"),
                 )
                 return self._finalize_response(response, timing_recorder)
-        
+        else:
+            tracer.skip("route", "路由决策", detail="已跳过：强制联网")
+
         # Search is needed
         if not self.search_client:
+            tracer.skip("search", "联网检索", detail="搜索不可用，回退本地模式")
             response = self._handle_search_unavailable(
                 query, snapshot, has_docs, num_retrieved_docs,
-                max_tokens, temperature, timing_recorder
+                max_tokens, temperature, timing_recorder,
+                tracer=tracer,
             )
             if force_search:
                 response.setdefault("control", {})["force_search_enabled"] = True
             return self._finalize_response(response, timing_recorder)
-        
+
         # Generate keywords
+        tracer.begin("keywords", "生成检索词")
         keyword_info = self._generate_keywords(effective_query, timing_recorder)
         keywords = keyword_info.get("keywords") or [effective_query]
         search_query = " ".join(keywords).strip() or effective_query
+        tracer.end("keywords", detail="、".join(str(k) for k in keywords[:4]))
         
         # Execute search RAG
         result = self._run_primary_rag(
@@ -626,11 +665,13 @@ Always answer in the same language as the user's question."""
             domain=domain,
             domain_result=domain_api_result,
             enable_domain=bool(domain_api_result and should_continue),
+            tracer=tracer,
         )
         if not result:
             response = self._handle_search_unavailable(
                 query, snapshot, has_docs, num_retrieved_docs,
-                max_tokens, temperature, timing_recorder
+                max_tokens, temperature, timing_recorder,
+                tracer=tracer,
             )
             return self._finalize_response(response, timing_recorder)
         
@@ -677,8 +718,9 @@ Always answer in the same language as the user's question."""
             reference_limit=reference_limit,
             force_search=force_search,
             timing_recorder=timing_recorder,
+            tracer=tracer,
         )
-        
+
         return self._finalize_response(result, timing_recorder)
 
     def _handle_visual_query(
@@ -833,6 +875,7 @@ Always answer in the same language as the user's question."""
         max_tokens: int,
         temperature: float,
         timing_recorder: Optional[TimingRecorder],
+        tracer: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Handle local-only queries (search disabled)."""
         if not has_docs:
@@ -844,6 +887,7 @@ Always answer in the same language as the user's question."""
                 temperature=temperature,
                 timing_recorder=timing_recorder,
                 enable_search=False,
+                tracer=tracer,
             )
             if pipeline_result:
                 pipeline_result["control"] = {
@@ -863,6 +907,7 @@ Always answer in the same language as the user's question."""
             temperature=temperature,
             timing_recorder=timing_recorder,
             enable_search=False,
+            tracer=tracer,
         )
         if not pipeline_result:
             direct = self._direct_answer(query, timing_recorder)
@@ -1024,6 +1069,7 @@ Always answer in the same language as the user's question."""
         max_tokens: int,
         temperature: float,
         timing_recorder: Optional[TimingRecorder],
+        tracer: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Handle case where search is requested but unavailable."""
         result = self._run_primary_rag(
@@ -1034,11 +1080,13 @@ Always answer in the same language as the user's question."""
             temperature=temperature,
             timing_recorder=timing_recorder,
             enable_search=False,
+            tracer=tracer,
         )
         if result is None:
             result = self._handle_local_only(
                 query, snapshot, has_docs, num_retrieved_docs,
-                max_tokens, temperature, timing_recorder
+                max_tokens, temperature, timing_recorder,
+                tracer=tracer,
             )
         control = result.setdefault("control", {})
         control["search_mode"] = "search_unavailable"
@@ -1290,10 +1338,13 @@ Always answer in the same language as the user's question."""
         reference_limit: Optional[int],
         force_search: bool,
         timing_recorder: Optional[TimingRecorder],
+        tracer: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Run post-check and optionally escalate to ReAct fallback."""
+        tracer = ensure_tracer(tracer)
         postcheck_meta: Dict[str, Any]
         if not self.postcheck_config["enabled"]:
+            tracer.skip("postcheck", "质量校验", detail="未启用")
             postcheck_meta = {
                 "eligible": False,
                 "skipped_reason": "disabled",
@@ -1342,6 +1393,8 @@ Always answer in the same language as the user's question."""
 
         fallback_enabled = self.postcheck_config["react_fallback"]["enabled"]
         if not verdict.should_fallback_to_react or not verdict.recoverable or not fallback_enabled:
+            passes = getattr(verdict, "passes_postcheck", True)
+            tracer.end("postcheck", detail="通过" if passes else "未通过，保持原答案")
             control["fallback_triggered"] = False
             control["final_executor"] = "default_pipeline"
             if verdict.should_fallback_to_react and not fallback_enabled:
@@ -1350,10 +1403,14 @@ Always answer in the same language as the user's question."""
 
         fallback_orchestrator = self._get_react_fallback_orchestrator()
         if fallback_orchestrator is None:
+            tracer.end("postcheck", detail="未通过，但回退不可用")
             control["fallback_triggered"] = False
             control["fallback_reason"] = "react_fallback_unavailable"
             control["final_executor"] = "default_pipeline"
             return result
+
+        tracer.end("postcheck", detail="未通过，转入深度检索")
+        tracer.begin("react", "深度检索恢复", detail=verdict.reason or "postcheck_fallback")
 
         evidence_summary = self._format_evidence_summary(
             result.get("search_hits") or [],
@@ -1386,6 +1443,8 @@ Always answer in the same language as the user's question."""
             force_search=force_search,
             fallback_context=fallback_context,
         )
+        max_iterations = self.postcheck_config["react_fallback"]["max_iterations"]
+        tracer.end("react", detail=f"最多 {max_iterations} 轮迭代")
         fallback_control = fallback_result.setdefault("control", {})
         fallback_control["postcheck"] = postcheck_meta
         fallback_control["fallback_triggered"] = True

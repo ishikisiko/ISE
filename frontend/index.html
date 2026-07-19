@@ -3,203 +3,136 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能问答助手</title>
+    <title>ISE · 智能检索引擎</title>
     <link rel="stylesheet" href="styles.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/theme/monokai.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
 </head>
 <body>
-    <div class="app-shell">
-        <header class="hero">
-            <h1>有什么可以帮助您</h1>
-            <p>How can we help you today?</p>
-        </header>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <div class="brand">
+                <span class="brand-mark">ISE</span>
+                <span class="brand-sub">智能检索引擎</span>
+            </div>
+            <span id="topbar-model" class="topbar-model" title="当前模型"></span>
+        </div>
+    </header>
 
-        <main class="chat-shell">
-            <section id="chat-log" class="chat-log" aria-live="polite" aria-label="对话内容"></section>
+    <main id="thread" class="thread" aria-live="polite"></main>
 
-            <form id="query-form" class="composer" autocomplete="off">
-                <div class="composer-input">
-                    <div id="query-editor"></div>
-                    <textarea
-                        id="query"
-                        name="query"
-                        rows="3"
-                        placeholder="发送您的问题，例如：介绍一下检索增强生成的优势"
-                        required
-                        style="display: none;"
-                    ></textarea>
+    <div class="composer-dock">
+        <form id="composer" class="composer" autocomplete="off">
+            <div id="chip-row" class="chip-row" aria-live="polite"></div>
+
+            <div class="composer-box">
+                <textarea
+                    id="query"
+                    name="query"
+                    rows="1"
+                    placeholder="提出任何问题…"
+                    required
+                ></textarea>
+                <div class="composer-actions">
+                    <button type="button" id="attach-btn" class="icon-btn" title="上传文档或图片" aria-label="上传文档或图片">
+                        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l8.57-8.57A4 4 0 1118 8.84l-8.59 8.57a2 2 0 01-2.83-2.83l8.49-8.48"/>
+                        </svg>
+                    </button>
+                    <button type="submit" id="send-btn" class="send-btn" title="发送" aria-label="发送">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M12 19V5M5 12l7-7 7 7"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="toolbar">
+                <button type="button" id="search-pill" class="pill is-on" aria-pressed="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
+                    </svg>
+                    <span>联网</span>
+                </button>
+
+                <div class="pill-select" title="模型选择">
+                    <select id="model" name="model" aria-label="模型选择">
+                        <option value="">默认模型</option>
+                    </select>
                 </div>
 
-                <div class="composer-controls">
-                    <label class="control-field">
-                        <span>模型选择</span>
-                        <select id="model" name="model">
-                            <option value="">默认模型 (Zai - glm-4.6)</option>
-                            <!-- Options will be populated dynamically from config -->
-                        </select>
-                    </label>
+                <button type="button" id="settings-btn" class="pill" aria-expanded="false" aria-controls="settings-panel">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
+                        <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
+                        <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
+                        <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>
+                    </svg>
+                    <span>参数</span>
+                </button>
+            </div>
 
-                    <div class="control-field toggle-field">
-                        <span>联网搜索</span>
-                        <div class="toggle-group">
-                            <div class="toggle">
-                                <input type="checkbox" id="search-toggle" name="search" checked>
-                                <span class="toggle-slider" aria-hidden="true"></span>
-                            </div>
-                            <div class="search-source-dropdown hidden" id="search-source-dropdown">
-                                <button
-                                    type="button"
-                                    id="search-source-button"
-                                    class="search-source-button"
-                                    aria-haspopup="true"
-                                    aria-expanded="false"
-                                    aria-controls="search-source-menu"
-                                >搜索源</button>
-                                <div class="search-source-menu" id="search-source-menu" role="menu">
-                                    <label class="search-source-option" for="search-source-brave">
-                                        <input type="checkbox" id="search-source-brave" value="brave" checked>
-                                        <span>Brave Search</span>
-                                    </label>
-                                    <label class="search-source-option" for="search-source-firecrawl">
-                                        <input type="checkbox" id="search-source-firecrawl" value="firecrawl" checked>
-                                        <span>Firecrawl</span>
-                                    </label>
-                                    <label class="search-source-option" for="search-source-tavily">
-                                        <input type="checkbox" id="search-source-tavily" value="tavily" checked>
-                                        <span>Tavily</span>
-                                    </label>
-                                    <label class="search-source-option" for="search-source-parallel">
-                                        <input type="checkbox" id="search-source-parallel" value="parallel" checked>
-                                        <span>Parallel</span>
-                                    </label>
-                                    <label class="search-source-option" for="search-source-brightdata">
-                                        <input type="checkbox" id="search-source-brightdata" value="brightdata" checked>
-                                        <span>Bright Data SERP</span>
-                                    </label>
-                                    <label class="search-source-option" for="search-source-you">
-                                        <input type="checkbox" id="search-source-you" value="you" checked>
-                                        <span>You.com</span>
-                                    </label>
-                                    <label class="search-source-option" for="search-source-google">
-                                        <input type="checkbox" id="search-source-google" value="google" checked>
-                                        <span>Google</span>
-                                    </label>
-                                </div>
-                            </div>
-                            <div class="force-search-wrapper hidden" id="force-search-wrapper">
-                                <button
-                                    type="button"
-                                    id="force-search-button"
-                                    class="force-search-button"
-                                    aria-pressed="false"
-                                    title="跳过搜索决策，直接进入关键词生成"
-                                >强制搜索</button>
-                                <span class="force-search-hint">跳过是否搜索判断</span>
-                            </div>
+            <section id="settings-panel" class="settings" hidden aria-label="检索参数设置">
+                <div class="settings-grid">
+                    <fieldset class="settings-group">
+                        <legend>搜索源</legend>
+                        <div class="chip-set" id="source-chips">
+                            <label class="check-chip"><input type="checkbox" value="brave" checked><span>Brave</span></label>
+                            <label class="check-chip"><input type="checkbox" value="firecrawl" checked><span>Firecrawl</span></label>
+                            <label class="check-chip"><input type="checkbox" value="tavily" checked><span>Tavily</span></label>
+                            <label class="check-chip"><input type="checkbox" value="parallel" checked><span>Parallel</span></label>
+                            <label class="check-chip"><input type="checkbox" value="brightdata" checked><span>Bright Data</span></label>
+                            <label class="check-chip"><input type="checkbox" value="you" checked><span>You.com</span></label>
+                            <label class="check-chip"><input type="checkbox" value="google" checked><span>Google</span></label>
                         </div>
-                    </div>
+                    </fieldset>
 
-                    <div class="control-field toggle-field">
-                        <span>显示时间详情</span>
-                        <div class="toggle-group">
-                            <div class="toggle">
-                                <input type="checkbox" id="timing-toggle" name="timing" checked>
-                                <span class="toggle-slider" aria-hidden="true"></span>
-                            </div>
-                            <div class="timing-dropdown hidden" id="timing-dropdown">
-                                <button
-                                    type="button"
-                                    id="timing-button"
-                                    class="timing-button"
-                                    aria-haspopup="true"
-                                    aria-expanded="false"
-                                    aria-controls="timing-menu"
-                                >时间详情</button>
-                                <div class="timing-menu" id="timing-menu" role="menu">
-                                    <label class="timing-option" for="timing-show-total">
-                                        <input type="checkbox" id="timing-show-total" value="total" checked>
-                                        <span>总体响应时间</span>
-                                    </label>
-                                    <label class="timing-option" for="timing-show-search">
-                                        <input type="checkbox" id="timing-show-search" value="search" checked>
-                                        <span>搜索源详情</span>
-                                    </label>
-                                    <label class="timing-option" for="timing-show-llm">
-                                        <input type="checkbox" id="timing-show-llm" value="llm" checked>
-                                        <span>LLM调用详情</span>
-                                    </label>
-                                    <label class="timing-option" for="timing-show-tools">
-                                        <input type="checkbox" id="timing-show-tools" value="tools" checked>
-                                        <span>工具调用详情</span>
-                                    </label>
-                                </div>
-                            </div>
+                    <fieldset class="settings-group">
+                        <legend>检索参数</legend>
+                        <div class="field-row">
+                            <label class="num-field">
+                                <span>汇总上限</span>
+                                <input type="number" id="limit-total" min="1" max="30" value="5" inputmode="numeric">
+                            </label>
+                            <label class="num-field">
+                                <span>单源上限</span>
+                                <input type="number" id="limit-per-source" min="1" max="20" value="5" inputmode="numeric">
+                            </label>
+                            <label class="num-field">
+                                <span>参考链接</span>
+                                <input type="number" id="limit-reference" min="1" max="20" value="5" inputmode="numeric">
+                            </label>
                         </div>
-                    </div>
+                    </fieldset>
 
-                        <label class="control-field">
-                            <span>汇总结果上限</span>
-                            <input
-                                type="number"
-                                id="search-total-limit"
-                                name="search_total_limit"
-                                min="1"
-                                max="40"
-                                value="5"
-                                inputmode="numeric"
-                            >
-                        </label>
+                    <fieldset class="settings-group">
+                        <legend>行为</legend>
+                        <div class="field-row">
+                            <label class="switch-field">
+                                <input type="checkbox" id="force-search">
+                                <span class="switch" aria-hidden="true"></span>
+                                <span>强制搜索<em class="field-hint">跳过是否搜索判断</em></span>
+                            </label>
+                        </div>
+                    </fieldset>
 
-                        <label class="control-field">
-                            <span>单源结果上限</span>
-                            <input
-                                type="number"
-                                id="search-per-source-limit"
-                                name="search_source_limit"
-                                min="1"
-                                max="20"
-                                value="5"
-                                inputmode="numeric"
-                            >
-                        </label>
-
-                        <label class="control-field">
-                            <span>参考链接数量</span>
-                            <input
-                                type="number"
-                                id="search-reference-limit"
-                                name="search_reference_limit"
-                                min="1"
-                                max="20"
-                                value="5"
-                                inputmode="numeric"
-                            >
-                        </label>
-
-                    <div class="control-field upload-field">
-                        <span>文件上传</span>
-                        <button type="button" id="upload-button">选择文件</button>
-                        <input type="file" id="file-input" hidden multiple accept=".txt,.md,.pdf,.jpg,.jpeg,.png,.gif,.webp">
-                    </div>
+                    <fieldset class="settings-group">
+                        <legend>耗时明细</legend>
+                        <div class="chip-set" id="timing-chips">
+                            <label class="check-chip"><input type="checkbox" value="total" checked><span>总体</span></label>
+                            <label class="check-chip"><input type="checkbox" value="search" checked><span>搜索源</span></label>
+                            <label class="check-chip"><input type="checkbox" value="llm" checked><span>LLM</span></label>
+                            <label class="check-chip"><input type="checkbox" value="tools" checked><span>工具</span></label>
+                        </div>
+                    </fieldset>
                 </div>
+            </section>
 
-                <div class="file-chip-list" id="image-preview-list" aria-live="polite"></div>
-                <div class="file-chip-list" id="file-list" aria-live="polite"></div>
-
-                <div class="composer-footer">
-                    <span id="status-message" class="status" role="status"></span>
-                    <button type="submit" class="send-btn">发送</button>
-                </div>
-            </form>
-        </main>
+            <p id="status-line" class="status-line" role="status"></p>
+        </form>
     </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/javascript/javascript.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/python/python.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/markdown/markdown.min.js"></script>
+    <input type="file" id="file-input" hidden multiple accept=".txt,.md,.pdf,.jpg,.jpeg,.png,.gif,.webp">
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
