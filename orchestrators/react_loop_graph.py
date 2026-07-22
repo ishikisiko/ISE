@@ -14,7 +14,7 @@ from typing import Annotated, Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 
 from langchain.postcheck import (
     _extract_numbers,
@@ -112,6 +112,7 @@ class ReactLoopGraphRunner:
         query: str = "",
         time_constraint: Optional[TimeConstraint] = None,
         fallback_context: Optional[Dict[str, Any]] = None,
+        history_window: int = 5,
     ) -> None:
         self.llm = llm
         self.tools = list(tools or [])
@@ -122,6 +123,7 @@ class ReactLoopGraphRunner:
         self.query = query
         self.time_constraint = time_constraint
         self.fallback_context = fallback_context or {}
+        self.history_window = max(1, int(history_window))
         self.initial_checklist = self._derive_checklist()
         self.system_prompt = TOOL_CALLING_SYSTEM_PROMPT.format(
             success_criteria=self._format_success_criteria()
@@ -185,7 +187,7 @@ class ReactLoopGraphRunner:
     # ------------------------------------------------------------------
     # Graph construction
     # ------------------------------------------------------------------
-    def build_graph(self) -> Any:
+    def build_graph(self, checkpointer: Optional[Any] = None) -> Any:
         from langgraph.graph import END, START, StateGraph
         from langgraph.graph.message import add_messages
         from typing_extensions import TypedDict
@@ -229,7 +231,10 @@ class ReactLoopGraphRunner:
             self._route_after_evaluate,
             {"act": "act", "end": END},
         )
-        return builder.compile()
+        compile_kwargs: Dict[str, Any] = {}
+        if checkpointer is not None:
+            compile_kwargs["checkpointer"] = checkpointer
+        return builder.compile(**compile_kwargs)
 
     # ------------------------------------------------------------------
     # Nodes
@@ -548,10 +553,9 @@ class ReactLoopGraphRunner:
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
-    def run(self, user_input: str) -> Dict[str, Any]:
-        """Execute the loop and return a structured result."""
-        graph = self.build_graph()
-        initial_state = {
+    def _build_initial_state(self, user_input: str) -> Dict[str, Any]:
+        """Construct the full state for a brand-new ReAct run."""
+        return {
             "messages": [HumanMessage(content=user_input)],
             "evidence_pool": [],
             "iteration": 0,
@@ -570,12 +574,108 @@ class ReactLoopGraphRunner:
             "final_answer": None,
             "judge_error": None,
         }
-        recursion_limit = self.max_iterations * 4 + 10
-        final_state = graph.invoke(initial_state, config={"recursion_limit": recursion_limit})
+
+    def _build_followup_state_input(
+        self,
+        graph: Any,
+        config: Dict[str, Any],
+        user_input: str,
+    ) -> Dict[str, Any]:
+        """Construct a partial input that resumes from a checkpointed thread.
+
+        ``evidence_pool`` and ``verdicts`` are intentionally omitted so the
+        checkpointed values are retained; per-loop control fields are reset for
+        the new turn. Stale tool/observation messages beyond the history window
+        are removed via ``RemoveMessage`` to bound token cost.
+        """
+        removals = self._compute_message_removals(graph, config)
+        return {
+            "messages": removals + [HumanMessage(content=user_input)],
+            "iteration": 0,
+            "constraints_met": [],
+            "constraints_missing": list(self.initial_checklist),
+            "last_fingerprint": None,
+            "fingerprint_streak": 0,
+            "no_progress_streak": 0,
+            "tool_error_streak": 0,
+            "had_successful_observation": False,
+            "last_round_new_evidence": False,
+            "last_round_observations": [],
+            "final_proposed": False,
+            "termination_reason": None,
+            "final_answer": None,
+            "judge_error": None,
+        }
+
+    def _compute_message_removals(self, graph: Any, config: Dict[str, Any]) -> List[Any]:
+        """Return ``RemoveMessage`` ops for trimmable messages beyond the window.
+
+        Only tool results (``ToolMessage``) and shim-mode observation wrappers
+        (``HumanMessage`` starting with ``[工具``) are eligible for removal;
+        user messages and final answers are always preserved.
+        """
+        try:
+            snapshot = graph.get_state(config)
+        except Exception:  # noqa: BLE001 - trimming is best effort
+            return []
+        values = getattr(snapshot, "values", None) or {}
+        messages = list(values.get("messages") or [])
+
+        trimmable = [
+            m
+            for m in messages
+            if isinstance(m, ToolMessage)
+            or (isinstance(m, HumanMessage) and str(getattr(m, "content", "")).lstrip().startswith("[工具"))
+        ]
+        # Keep a bounded number of recent trimmable entries (heuristic budget).
+        keep_count = self.history_window * 2
+        if len(trimmable) <= keep_count:
+            return []
+        to_remove = trimmable[: len(trimmable) - keep_count]
+        return [RemoveMessage(id=m.id) for m in to_remove if getattr(m, "id", None)]
+
+    def run(
+        self,
+        user_input: str,
+        *,
+        conversation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Execute the loop and return a structured result.
+
+        When ``conversation_id`` is supplied and a checkpoint exists for that
+        thread, the run resumes from the checkpointed state (retaining the
+        evidence pool and verdict history). Otherwise a fresh run is started;
+        if a checkpointer is available the fresh run is still recorded under the
+        thread so subsequent turns can resume.
+        """
+        mgr = None
+        checkpointer = None
+        if conversation_id:
+            from orchestrators.conversation_store import get_conversation_manager
+
+            mgr = get_conversation_manager()
+            if mgr.enabled and mgr.saver:
+                checkpointer = mgr.saver
+        graph = self.build_graph(checkpointer=checkpointer)
+
+        config: Dict[str, Any] = {"recursion_limit": self.max_iterations * 4 + 10}
+        resume = False
+        if conversation_id and checkpointer and mgr is not None:
+            config["configurable"] = {"thread_id": str(conversation_id)}
+            resume = mgr.has_checkpoint(conversation_id) and not mgr.last_turn_is_topic_reset(
+                str(conversation_id)
+            )
+
+        if resume:
+            state_input = self._build_followup_state_input(graph, config, user_input)
+        else:
+            state_input = self._build_initial_state(user_input)
+
+        final_state = graph.invoke(state_input, config=config)
 
         termination = final_state.get("termination_reason") or "exhausted"
         answer = final_state.get("final_answer") or self._best_effort_answer("", termination)
-        return {
+        result = {
             "answer": answer,
             "loop_status": termination,
             "termination_reason": termination,
@@ -585,4 +685,8 @@ class ReactLoopGraphRunner:
             "constraints_missing": list(final_state.get("constraints_missing") or []),
             "judge_error": final_state.get("judge_error"),
             "search_hits": [],
+            "conversation_resumed": resume,
         }
+        if resume:
+            result["evidence_pool_size"] = len(final_state.get("evidence_pool") or [])
+        return result

@@ -23,6 +23,11 @@ from utils.workflow_trace import WorkflowTracer
 from langchain.langchain_llm import create_chat_model
 from langchain.langchain_orchestrator import create_langchain_orchestrator, LangChainOrchestrator
 
+# Per-conversation locks ensuring same-thread requests run sequentially so the
+# checkpointed state is not interleaved. Maps conversation_id -> threading.Lock.
+_CONVERSATION_LOCKS: Dict[str, threading.Lock] = {}
+_CONVERSATION_LOCKS_GUARD = threading.Lock()
+
 # Adjust paths for the new structure
 base_dir = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=os.path.join(base_dir, "frontend"), static_url_path="")
@@ -64,6 +69,18 @@ def _coerce_positive_int(raw_value: Any, field: str) -> Optional[int]:
     if parsed <= 0:
         raise PayloadError(f"'{field}' must be a positive integer.")
     return parsed
+
+
+def _conversation_lock(conversation_id: str) -> Optional[threading.Lock]:
+    """Return a dedicated lock for a conversation id (None if no id)."""
+    if not conversation_id:
+        return None
+    with _CONVERSATION_LOCKS_GUARD:
+        lock = _CONVERSATION_LOCKS.get(conversation_id)
+        if lock is None:
+            lock = threading.Lock()
+            _CONVERSATION_LOCKS[conversation_id] = lock
+        return lock
 
 
 def ensure_json_serializable(obj: Any) -> Any:
@@ -500,10 +517,25 @@ def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
         "max_tokens": int(payload.get("max_tokens")) if payload.get("max_tokens") else 5000,
         "chunk_size": payload.get("chunk_size"),
         "chunk_overlap": payload.get("chunk_overlap"),
+        "conversation_id": (str(payload.get("conversation_id")).strip()
+                            if payload.get("conversation_id") else None),
     }
 
 
 def _execute_answer(ctx: Dict[str, Any], tracer: Optional[WorkflowTracer] = None) -> Dict[str, Any]:
+    """Build the pipeline and run the answer flow for a prepared context."""
+    conversation_id = ctx.get("conversation_id")
+    lock = _conversation_lock(conversation_id) if conversation_id else None
+    if lock is not None:
+        lock.acquire()
+    try:
+        return _execute_answer_unlocked(ctx, tracer)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _execute_answer_unlocked(ctx: Dict[str, Any], tracer: Optional[WorkflowTracer] = None) -> Dict[str, Any]:
     """Build the pipeline and run the answer flow for a prepared context."""
     pipeline = build_pipeline(
         model_override=ctx["model"],
@@ -524,6 +556,7 @@ def _execute_answer(ctx: Dict[str, Any], tracer: Optional[WorkflowTracer] = None
         reference_limit=ctx["reference_limit"],
         force_search=ctx["force_search"],
         images=ctx["images"],
+        conversation_id=ctx.get("conversation_id"),
         tracer=tracer,
     )
     print(f"[server] Pipeline returned result with keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")

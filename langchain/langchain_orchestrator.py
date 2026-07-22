@@ -496,6 +496,7 @@ Always answer in the same language as the user's question."""
         reference_limit: Optional[int] = None,
         force_search: bool = False,
         images: Optional[List[Dict[str, str]]] = None,
+        conversation_id: Optional[str] = None,
         tracer: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Answer a query using intelligent routing.
@@ -506,23 +507,53 @@ Always answer in the same language as the user's question."""
         3. Direct LLM answer for simple questions
         4. Web search RAG for current information
         5. Local RAG for document-based queries
+
+        When ``conversation_id`` is supplied and the turn is a follow-up on the
+        previous answer, the request resumes the ReAct loop on the checkpointed
+        conversation state instead of starting from scratch.
         """
         tracer = ensure_tracer(tracer)
         timing_recorder = TimingRecorder(enabled=self.show_timings)
         timing_recorder.start()
-        
+
+        # Conversation bookkeeping (per-request instance; orchestrator is built fresh)
+        self._conversation_id = conversation_id
+        self._conversation_query = query
+        self._current_time_constraint = None
+        self._topic_reset = False
+
         total_limit = max(1, int(num_search_results))
         per_source_limit = max(1, int(per_source_search_results or total_limit))
         force_search = bool(force_search and allow_search)
-        
+
         # Parse time constraints
         time_constraint = parse_time_constraint(query)
+        self._current_time_constraint = time_constraint if time_constraint.days else None
         effective_query = time_constraint.cleaned_query if time_constraint.days else query
-        
+
         if time_constraint.days:
             current_date = get_current_date_str()
             effective_query = f"{effective_query} (Current Date: {current_date})"
-        
+
+        # Conversation resume: a follow-up turn continues on the checkpointed state
+        resume_result = self._maybe_resume_conversation(
+            query=query,
+            conversation_id=conversation_id,
+            time_constraint=time_constraint,
+            num_search_results=total_limit,
+            per_source_limit=per_source_limit,
+            num_retrieved_docs=num_retrieved_docs,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            allow_search=allow_search,
+            reference_limit=reference_limit,
+            force_search=force_search,
+            timing_recorder=timing_recorder,
+            tracer=tracer,
+        )
+        if resume_result is not None:
+            return resume_result
+
         snapshot = self._snapshot_local_docs()
         has_docs = bool(snapshot)
         
@@ -1166,7 +1197,171 @@ Always answer in the same language as the user's question."""
                 domain = control.get("domain", "")
                 timing_payload["领域智能类型"] = domain if domain and domain.lower() != "general" else "无"
                 result["response_times"] = timing_payload
-        
+
+        self._record_conversation_turn(result.get("answer", ""))
+        return result
+
+    # ------------------------------------------------------------------
+    # Conversation resume
+    # ------------------------------------------------------------------
+    def _record_conversation_turn(self, answer: str) -> None:
+        """Persist this turn to the conversation record (all execution paths)."""
+        cid = getattr(self, "_conversation_id", None)
+        if not cid:
+            return
+        try:
+            from orchestrators.conversation_store import get_conversation_manager
+
+            mgr = get_conversation_manager()
+            if not mgr.enabled:
+                return
+            mgr.record_turn(
+                cid,
+                getattr(self, "_conversation_query", ""),
+                answer or "",
+                getattr(self, "_current_time_constraint", None),
+                topic_reset=getattr(self, "_topic_reset", False),
+            )
+        except Exception as exc:  # noqa: BLE001 - recording must never break a response
+            print(f"[conversation] record_turn failed: {exc}")
+
+    def _classify_followup_intent(self, query: str, recent_turns: List[Dict[str, Any]]) -> str:
+        """Classify a follow-up turn as ``continuation`` or ``new_topic``.
+
+        Defaults to ``continuation`` on any failure so context is retained.
+        """
+        if not recent_turns:
+            return "new_topic"
+        history_lines: List[str] = []
+        for turn in recent_turns[-4:]:
+            history_lines.append(f"Q: {turn.get('query', '')}")
+            answer = turn.get("answer") or ""
+            if answer:
+                history_lines.append(f"A: {answer[:200]}")
+        history = "\n".join(history_lines)
+        system_prompt = (
+            "你是对话意图判别器。根据对话历史判断新问题属于「continuation」（延续上一轮主题、"
+            "修改/补充/追问上一轮回答）还是「new_topic」（全新话题）。"
+            "只输出一个词：continuation 或 new_topic。"
+        )
+        user_prompt = f"对话历史：\n{history}\n\n新问题：{query}"
+        try:
+            response = self.routing_llm.invoke(
+                [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+            )
+            content = (response.content if hasattr(response, "content") else str(response)).strip().lower()
+            if "new" in content and "topic" in content:
+                return "new_topic"
+            return "continuation"
+        except Exception:  # noqa: BLE001 - default to continuation
+            return "continuation"
+
+    def _maybe_resume_conversation(
+        self,
+        *,
+        query: str,
+        conversation_id: Optional[str],
+        time_constraint: TimeConstraint,
+        num_search_results: int,
+        per_source_limit: int,
+        num_retrieved_docs: int,
+        max_tokens: int,
+        temperature: float,
+        allow_search: bool,
+        reference_limit: Optional[int],
+        force_search: bool,
+        timing_recorder: TimingRecorder,
+        tracer: Optional[Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Route a follow-up turn to the ReAct loop, resuming state if present.
+
+        Returns ``None`` when the turn is not a conversation follow-up so normal
+        routing proceeds.
+        """
+        if not conversation_id:
+            return None
+        try:
+            from orchestrators.conversation_store import get_conversation_manager
+
+            mgr = get_conversation_manager()
+        except Exception as exc:  # noqa: BLE001 - degrade to normal routing
+            print(f"[conversation] manager unavailable: {exc}")
+            return None
+        if not mgr.enabled:
+            return None
+
+        last_turn = mgr.get_last_turn(conversation_id)
+        if not last_turn:
+            return None  # first turn of this conversation -> normal routing
+
+        intent = self._classify_followup_intent(query, mgr.get_recent_turns(conversation_id))
+        if intent == "new_topic":
+            # Fresh topic: discard the stale agent state, keep the dialogue log.
+            mgr.delete_checkpoint(conversation_id)
+            self._topic_reset = True
+            return None
+
+        # Continuation: build follow-up context from the conversation record.
+        previous_answer = str(last_turn.get("answer") or "").strip()
+        inherited_constraint = None
+        if not time_constraint.days:
+            inherited = mgr.get_inherited_time_constraint(conversation_id)
+            if inherited:
+                inherited_constraint = (
+                    f"{inherited.get('time_expression') or ''} "
+                    f"(约 {inherited.get('days')} 天内)".strip()
+                )
+                self._current_time_constraint = inherited
+
+        fallback_context: Dict[str, Any] = {
+            "previous_answer": previous_answer,
+            "user_feedback": query,
+            "missing_constraints": [],
+            "failure_types": [],
+            "evidence_summary": "",
+            "recovery_goal": f"根据用户反馈调整上一轮回答：{query}",
+            "inherited_time_constraint": inherited_constraint,
+            "judge_source": "human_feedback",
+        }
+
+        react_orchestrator = self._get_react_fallback_orchestrator()
+        if react_orchestrator is None:
+            return None  # no react path available -> fall back to normal routing
+
+        tracer.begin("conversation_resume", "会话续跑", detail="基于上轮调整")
+        response = react_orchestrator.answer(
+            query,
+            num_search_results=num_search_results,
+            per_source_search_results=per_source_limit,
+            num_retrieved_docs=num_retrieved_docs,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            allow_search=allow_search,
+            reference_limit=reference_limit,
+            force_search=force_search,
+            fallback_context=fallback_context,
+            conversation_id=conversation_id,
+            tracer=tracer,
+        )
+        tracer.end("conversation_resume", detail="续跑完成")
+
+        # Ensure control exposes conversation metadata and record the turn.
+        control = response.setdefault("control", {})
+        control.setdefault("conversation_id", conversation_id)
+        control["conversation_resumed"] = bool(control.get("conversation_resumed"))
+        control.setdefault("judge_source", "human_feedback")
+        response["control"] = control
+        self._record_conversation_turn(response.get("answer", ""))
+        return self._attach_timing(response, timing_recorder)
+
+    def _attach_timing(self, result: Dict[str, Any], timing_recorder: TimingRecorder) -> Dict[str, Any]:
+        """Attach timing payload to a delegated result without double-counting."""
+        if timing_recorder.enabled:
+            timing_recorder.stop()
+            payload = timing_recorder.to_dict()
+            if payload:
+                payload["领域智能类型"] = "会话续跑"
+                result["response_times"] = payload
         return result
 
     def _format_evidence_summary(

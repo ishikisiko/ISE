@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 import os
+import uuid
 from typing import Optional, Tuple, Dict, Any, List, Union, Set
 
 # Add project directory to path for imports
@@ -397,6 +398,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Override the local RAG chunk overlap for this run.",
+    )
+    parser.add_argument(
+        "--conversation-id",
+        type=str,
+        default=None,
+        help="Conversation id for multi-turn follow-ups. Omit to start a new conversation; the generated id is printed for reuse.",
     )
     return parser.parse_args()
 
@@ -859,6 +866,9 @@ def main() -> None:
     # If user explicitly set temperature via CLI, use that value
     effective_temperature = args.temperature if args.temperature != 0.3 else configured_temp
     
+    # Resolve conversation id: reuse provided, else mint a new one.
+    conversation_id = args.conversation_id or f"cli-{uuid.uuid4().hex[:12]}"
+
     result = orchestrator.answer(
         args.query,
         num_search_results=args.num_results,
@@ -866,7 +876,9 @@ def main() -> None:
         max_tokens=args.max_tokens,
         temperature=effective_temperature,
         allow_search=allow_search,
+        conversation_id=conversation_id,
     )
+    result.setdefault("conversation_id", conversation_id)
 
     # Check if there are any errors or warnings
     has_error = result.get("llm_error") is not None
@@ -885,6 +897,8 @@ def main() -> None:
     else:
         # Normal case: only output the answer
         print(result["answer"])
+        if not args.conversation_id:
+            print(f"\n[conversation_id] {conversation_id}（使用 --conversation-id {conversation_id} 继续追问）")
         if show_timings and isinstance(timings_payload, dict):
             print("\n[响应时间]")
             total_ms = timings_payload.get("total_ms")

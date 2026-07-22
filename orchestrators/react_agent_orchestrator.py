@@ -117,6 +117,7 @@ class ReactAgentOrchestrator:
         force_search: bool = False,
         images: Optional[List[Dict[str, str]]] = None,
         fallback_context: Optional[Dict[str, Any]] = None,
+        conversation_id: Optional[str] = None,
         tracer: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Answer a query using ReAct agent.
@@ -144,6 +145,7 @@ class ReactAgentOrchestrator:
                 query,
                 allow_search=allow_search,
                 fallback_context=fallback_context,
+                conversation_id=conversation_id,
                 tracer=tracer,
                 timing_recorder=timing_recorder,
             )
@@ -242,6 +244,7 @@ class ReactAgentOrchestrator:
         fallback_context: Optional[Dict[str, Any]],
         tracer: Optional[Any],
         timing_recorder: TimingRecorder,
+        conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run the explicit LangGraph loop and build a compatible response."""
         from orchestrators.react_loop_graph import ReactLoopGraphRunner
@@ -250,6 +253,18 @@ class ReactAgentOrchestrator:
         tracer = ensure_tracer(tracer)
         evaluation_config = (self.config.get("reactAgent", {}) or {}).get("evaluation")
         user_input = self._build_agent_input(query, fallback_context)
+        history_window = 5
+        resumed = False
+        if conversation_id:
+            from orchestrators.conversation_store import get_conversation_manager
+
+            mgr = get_conversation_manager()
+            if mgr.enabled:
+                history_window = mgr.history_window
+                resumed = bool(
+                    mgr.has_checkpoint(conversation_id)
+                    and not mgr.last_turn_is_topic_reset(conversation_id)
+                )
 
         tracer.begin("react_loop", "ReAct 循环", detail="langgraph 引擎")
         try:
@@ -261,8 +276,10 @@ class ReactAgentOrchestrator:
                 judge_llm=self.judge_llm,
                 query=query,
                 fallback_context=fallback_context,
+                history_window=history_window,
             )
-            loop_result = runner.run(user_input)
+            loop_result = runner.run(user_input, conversation_id=conversation_id)
+            resumed = resumed or bool(loop_result.get("conversation_resumed"))
         except Exception as exc:
             tracer.error("react_loop", detail=str(exc))
             return {
@@ -355,6 +372,7 @@ class ReactAgentOrchestrator:
             "loop_termination_reason": loop_result.get("termination_reason"),
             "final_executor": "react_fallback" if fallback_context else "react_agent",
             "fallback_triggered": bool(fallback_context),
+            "conversation_resumed": resumed,
             "evidence_sources_active": response.get("evidence_sources_active") or [],
             "evidence_sources_used": response.get("evidence_sources_used") or [],
             "evidence_source_types_active": response.get("evidence_source_types_active") or [],
@@ -387,9 +405,38 @@ class ReactAgentOrchestrator:
         query: str,
         fallback_context: Optional[Dict[str, Any]],
     ) -> str:
-        """Build the ReAct agent input, optionally with fallback context."""
+        """Build the ReAct agent input, optionally with fallback context.
+
+        When ``fallback_context`` carries a ``user_feedback`` key the message is
+        framed as a human follow-up on the previous answer; otherwise the
+        existing recovery-agent framing is used.
+        """
         if not fallback_context:
             return query
+
+        user_feedback = str(fallback_context.get("user_feedback") or "").strip()
+        if user_feedback:
+            lines = [
+                "用户对上一轮回答提出反馈，请据此调整。",
+                "",
+                f"用户反馈：{user_feedback}",
+            ]
+            previous_answer = str(fallback_context.get("previous_answer") or "").strip()
+            if previous_answer:
+                lines.extend(["", f"上一轮回答：\n{previous_answer}"])
+            missing_constraints = fallback_context.get("missing_constraints") or []
+            if missing_constraints:
+                lines.extend(["", f"需覆盖的约束：{', '.join(map(str, missing_constraints))}"])
+            inherited_time = str(fallback_context.get("inherited_time_constraint") or "").strip()
+            if inherited_time:
+                lines.extend(["", f"继承的时间约束：{inherited_time}"])
+            lines.extend(
+                [
+                    "",
+                    "可直接修改上一轮回答（无需重新检索），或在需要时调用工具补充信息后重新作答。",
+                ]
+            )
+            return "\n".join(lines)
 
         lines = [
             f"Original Query:\n{query}",

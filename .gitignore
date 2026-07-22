@@ -5,6 +5,7 @@ config.json
 .claude/
 uploads/*
 results/*
+checkpoints/*
 # Python
 __pycache__/
 *.py[cod]

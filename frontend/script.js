@@ -15,6 +15,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const fileInput = document.getElementById("file-input");
     const chipRow = document.getElementById("chip-row");
     const searchPill = document.getElementById("search-pill");
+    const newSessionPill = document.getElementById("new-session-pill");
     const modelSelect = document.getElementById("model");
     const settingsBtn = document.getElementById("settings-btn");
     const settingsPanel = document.getElementById("settings-panel");
@@ -35,6 +36,44 @@ document.addEventListener("DOMContentLoaded", () => {
     // 设置持久化
     // ------------------------------------------------------------------
     const SETTINGS_KEY = "ise.settings.v1";
+    const CONVERSATION_ID_KEY = "ise.conversation.v1";
+
+    function newConversationId() {
+        return (
+            Date.now().toString(36) + "-" +
+            Math.random().toString(36).slice(2, 10)
+        );
+    }
+
+    function getConversationId() {
+        let id = "";
+        try {
+            id = localStorage.getItem(CONVERSATION_ID_KEY) || "";
+        } catch {
+            id = "";
+        }
+        if (!id) {
+            id = newConversationId();
+            try {
+                localStorage.setItem(CONVERSATION_ID_KEY, id);
+            } catch {
+                /* localStorage 不可用时静默 */
+            }
+        }
+        return id;
+    }
+
+    function resetConversation() {
+        const id = newConversationId();
+        try {
+            localStorage.setItem(CONVERSATION_ID_KEY, id);
+        } catch {
+            /* localStorage 不可用时静默 */
+        }
+        return id;
+    }
+
+    let conversationId = getConversationId();
     const DEFAULT_SETTINGS = {
         search: true,
         sources: ["brave", "firecrawl", "tavily", "parallel", "brightdata", "google"],
@@ -813,6 +852,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const payload = {
             query,
             search: settings.search ? "on" : "off",
+            conversation_id: conversationId,
         };
         const codeBlocks = extractCodeBlocks(query);
         if (codeBlocks.length) payload.code_blocks = codeBlocks;
@@ -1139,6 +1179,16 @@ document.addEventListener("DOMContentLoaded", () => {
         saveSettings();
         setStatus(settings.search ? "联网搜索已启用" : "联网搜索已关闭");
     });
+
+    if (newSessionPill) {
+        newSessionPill.addEventListener("click", () => {
+            conversationId = resetConversation();
+            thread.innerHTML = "";
+            state.turnCount = 0;
+            setStatus("已开启新会话");
+            queryInput.focus();
+        });
+    }
 
     modelSelect.addEventListener("change", () => {
         settings.model = modelSelect.value;

@@ -277,6 +277,22 @@ python main.py "your query here" \
 
 Both `python main.py ...` and `python server.py` honor `NLP_CONFIG_PATH=/full/path/config.json` when you want to run against a non-default config file.
 
+### Multi-turn Conversation (Follow-up Refinement)
+
+The agent supports multi-turn refinement: after an answer is delivered, you can ask it to adjust ("精简一点", "展开第二节", "那竞争对手呢") and it resumes from the previous turn's state (answer, evidence pool, and tool history) rather than starting from scratch.
+
+In the web UI this is automatic — every turn carries a `conversation_id`, and the **新会话** pill starts a fresh conversation. Conversations are persisted under `checkpoints/conversations.sqlite` (configurable via the `conversation` block in `config.json`); delete that directory to reset all sessions.
+
+From the CLI, omit `--conversation-id` to start a new conversation (the generated id is printed for reuse), then pass it back to continue:
+
+```bash
+# First turn prints a [conversation_id]; reuse it to refine the previous answer
+python main.py "苹果和微软的区别"
+python main.py "精简一点，只要三个要点" --conversation-id <printed-id>
+```
+
+Set `conversation.enabled=false` in `config.json` to fall back to stateless single-turn behaviour.
+
 ## Search Quality Evaluation
 
 You can evaluate retrieval quality in two steps:

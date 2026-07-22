@@ -2,6 +2,12 @@
     "displayResponseTimes": true,
     "LLM_PROVIDER": "opencode-go",
     "orchestrator_mode": "langchain",
+    "conversation": {
+        "enabled": true,
+        "checkpoint_path": "./checkpoints/conversations.sqlite",
+        "history_window": 5,
+        "max_threads": 200
+    },
     "postcheck": {
         "enabled": false,
         "log_verdicts": false,
