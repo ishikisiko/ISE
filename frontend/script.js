@@ -37,7 +37,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const SETTINGS_KEY = "ise.settings.v1";
     const DEFAULT_SETTINGS = {
         search: true,
-        sources: ["brave", "firecrawl", "tavily", "parallel", "brightdata", "you", "google"],
+        sources: ["brave", "firecrawl", "tavily", "parallel", "brightdata", "google"],
         forceSearch: false,
         limits: { total: 5, perSource: 5, reference: 5 },
         timing: ["total", "search", "llm", "tools"],
@@ -49,11 +49,16 @@ document.addEventListener("DOMContentLoaded", () => {
             const raw = localStorage.getItem(SETTINGS_KEY);
             if (!raw) return { ...DEFAULT_SETTINGS };
             const parsed = JSON.parse(raw);
-            return {
+            const merged = {
                 ...DEFAULT_SETTINGS,
                 ...parsed,
                 limits: { ...DEFAULT_SETTINGS.limits, ...(parsed.limits || {}) },
             };
+            merged.sources = (Array.isArray(merged.sources) ? merged.sources : []).filter((s) =>
+                DEFAULT_SETTINGS.sources.includes(s)
+            );
+            if (!merged.sources.length) merged.sources = [...DEFAULT_SETTINGS.sources];
+            return merged;
         } catch {
             return { ...DEFAULT_SETTINGS };
         }

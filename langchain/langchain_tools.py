@@ -25,7 +25,6 @@ from search.search import (
     SearchClient,
     SearchHit,
     TavilySearchClient,
-    YouSearchClient,
 )
 from utils.config_validation import configured_value
 
@@ -126,20 +125,6 @@ class BraveSearchTool(WebSearchTool):
             primary_api_key=primary_api_key,
             secondary_api_key=secondary_api_key,
         )
-        super().__init__(search_client=client, **kwargs)
-
-
-class YouSearchTool(WebSearchTool):
-    """LangChain tool for You.com search."""
-    
-    name: str = "you_search"
-    description: str = (
-        "Search the web using You.com API. "
-        "Provides web results and news with AI-friendly snippets."
-    )
-
-    def __init__(self, api_key: str, **kwargs: Any) -> None:
-        client = YouSearchClient(api_key=api_key)
         super().__init__(search_client=client, **kwargs)
 
 
@@ -280,20 +265,6 @@ def create_search_tool_from_config(config: Dict[str, Any]) -> Optional[WebSearch
             )
         except Exception as exc:
             print(f"[search tool] Bright Data disabled: {exc}")
-    
-    # You.com
-    you_cfg = config.get("youSearch") or {}
-    you_key = configured_value(you_cfg.get("api_key") or config.get("YOU_API_KEY"))
-    if you_key:
-        try:
-            you_kwargs: Dict[str, Any] = {}
-            if you_cfg.get("base_url"):
-                you_kwargs["base_url"] = you_cfg["base_url"]
-            if you_cfg.get("timeout"):
-                you_kwargs["timeout"] = int(you_cfg["timeout"])
-            fallback_clients.append(YouSearchClient(api_key=you_key, **you_kwargs))
-        except Exception as exc:
-            print(f"[search tool] You.com disabled: {exc}")
     
     # Google Custom Search
     google_cfg = config.get("googleSearch") or {}

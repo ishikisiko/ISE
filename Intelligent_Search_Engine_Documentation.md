@@ -107,7 +107,6 @@
 
 #### 搜索与数据源
 - **SerpAPI**: Google搜索结果API
-- **You.com**: 替代搜索引擎
 - **Yahoo Finance API**: 金融数据接口
 - **Google Cloud Vision API**: 图像识别与视觉检索
 
@@ -348,7 +347,7 @@ max_per_domain: int = 1          # 每个域名最大结果数
 **搜索源并行**:
 ```python
 # 支持多个搜索源并行
-active_sources = ["serp", "you.com", "mcp"]
+active_sources = ["brave", "google", "mcp"]
 # 每个源返回结果后统一进行重排序和合并
 ```
 

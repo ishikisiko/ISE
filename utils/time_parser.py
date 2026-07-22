@@ -29,8 +29,8 @@ class TimeConstraint:
     # 时间范围（天数）
     days: Optional[int] = None
     
-    # You.com freshness 参数值
-    you_freshness: Optional[str] = None
+    # 通用 freshness 参数值（day/week/month/year，供 Tavily 等搜索源使用）
+    freshness: Optional[str] = None
     
     # Google dateRestrict 参数值
     google_date_restrict: Optional[str] = None
@@ -119,8 +119,8 @@ class TimeParser:
             return 30  # "现在" 默认对应最近一个月，保证信息的新鲜度但不过于严格
         return 1
     
-    def _map_to_you_freshness(self, days: int) -> str:
-        """将天数映射到 You.com freshness 参数"""
+    def _map_to_freshness(self, days: int) -> str:
+        """将天数映射到通用 freshness 参数（day/week/month/year）"""
         if days <= 1:
             return 'day'
         elif days <= 7:
@@ -187,7 +187,7 @@ class TimeParser:
         if days is not None:
             result.days = days
             result.time_expression = time_expression
-            result.you_freshness = self._map_to_you_freshness(days)
+            result.freshness = self._map_to_freshness(days)
             result.google_date_restrict = self._map_to_google_date_restrict(days)
         
         return result
@@ -243,7 +243,7 @@ if __name__ == "__main__":
         if result.days:
             print(f"时间表达: {result.time_expression}")
             print(f"天数: {result.days}")
-            print(f"You.com freshness: {result.you_freshness}")
+            print(f"freshness: {result.freshness}")
             print(f"Google dateRestrict: {result.google_date_restrict}")
         else:
             print("未检测到时间限制")

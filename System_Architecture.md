@@ -72,7 +72,7 @@ sequenceDiagram
 *   **Reranking**:
     *   **Model**: Qwen3-rerank (Alibaba DashScope).
 *   **Search & Data Sources**:
-    *   **Web**: SerpAPI, You.com, Google Custom Search.
+    *   **Web**: Brave Search, Google Custom Search.
     *   **Domain APIs**: Google Weather/Routes/Places, Finnhub, Yahoo Finance, TheSportsDB.
 
 ---
@@ -123,7 +123,7 @@ sequenceDiagram
 为了解决传统搜索引擎返回结果中存在的噪声问题，本系统在 `rag/search_rag.py` 和 `search/rerank.py` 中引入了先进的 **Re-ranking (重排序)** 机制。
 
 *   **初筛阶段 (Initial Retrieval)**:
-    `SearchRAG` 模块通过集成 SerpAPI、You.com 或 Google Custom Search API，首先获取较广泛的候选结果集 (通常为 Top-10 或 Top-20)。这些结果 (`SearchHit` 对象) 包含标题、URL 和简短摘要。
+    `SearchRAG` 模块通过集成 Brave Search、Tavily 或 Google Custom Search API，首先获取较广泛的候选结果集 (通常为 Top-10 或 Top-20)。这些结果 (`SearchHit` 对象) 包含标题、URL 和简短摘要。
 
 *   **重排序模型 (Reranking Model)**:
     系统实现了 `Qwen3Reranker` 类，对接阿里云 DashScope 的 `qwen3-rerank` 模型。不同于仅基于向量距离的粗排，Cross-Encoder 架构的 Rerank 模型会同时接收 Pair 对 (User Query, Document Chunk)，通过深层交互注意力机制计算相关性分数。
@@ -143,7 +143,7 @@ sequenceDiagram
 当前默认由 `langchain/langchain_orchestrator.py` 中的 `LangChainOrchestrator` 充当系统的主编排器，协调感知、决策、执行与回退的完整 Agent 工作流。`SmartSearchOrchestrator` 保留为兼容路径，不再是默认执行主线。
 
 *   **时间感知与解析 (Time Awareness & Parsing)**:
-    内置的 `TimeParser` 工具 (`utils/time_parser.py`) 利用正则表达式能够精准识别自然语言中的时间限制 (如 "最近3天", "past 6 months")。解析出的 `TimeConstraint` 对象会被转换为搜索引擎接受的参数 (如 Google 的 `tbs=qdr:d3` 或 You.com 的 `freshness=month`)，从源头保证信息的时效性。
+    内置的 `TimeParser` 工具 (`utils/time_parser.py`) 利用正则表达式能够精准识别自然语言中的时间限制 (如 "最近3天", "past 6 months")。解析出的 `TimeConstraint` 对象会被转换为搜索引擎接受的参数 (如 Google 的 `dateRestrict=d3` 或 Tavily 的 `time_range=month`)，从源头保证信息的时效性。
 
 *   **决策与编排 (Decision & Orchestration)**:
     *   **Search Check**: 在处理非领域特定查询时，Orchestrator 会调用 LLM (`DECISION_SYSTEM_PROMPT`) 进行二元分类，判断查询是否需要联网。这避免了对简单常识性问题 (如 "你好", "主要颜色的定义") 进行不必要的网络搜索，降低延迟。

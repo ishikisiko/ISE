@@ -200,7 +200,6 @@ def test_build_search_client_prefers_brave_metadata():
         "firecrawlSearch": {"api_key": "firecrawl-key"},
         "tavilySearch": {"api_key": "tavily-key"},
         "parallelSearch": {"api_key": "parallel-key"},
-        "YOU_API_KEY": "you-key",
         "GOOGLE_API_KEY": "google-key",
         "GOOGLE_CX": "google-cx",
     }
@@ -208,7 +207,7 @@ def test_build_search_client_prefers_brave_metadata():
     client = build_search_client(config)
 
     assert client is not None
-    expected = ["brave", "firecrawl", "tavily", "parallel", "brightdata", "you", "google"]
+    expected = ["brave", "firecrawl", "tavily", "parallel", "brightdata", "google"]
     assert getattr(client, "requested_sources") == expected
     assert getattr(client, "active_sources") == expected
     assert getattr(client, "configured_sources") == expected

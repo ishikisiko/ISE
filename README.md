@@ -188,7 +188,7 @@ MiniMax M2 model supports a **thinking mode** that allows the model to show its 
 
 - **Brave Search**: Default first-choice provider for general web search. The backend records Brave requests to the configured JSONL log so monthly quota usage can be audited.
 - **Bright Data SERP**: Google-style fallback search provider implemented through Bright Data's request API.
-- **You.com / Google Custom Search**: Optional additional general web search providers that can be used when configured.
+- **Google Custom Search**: Optional additional general web search provider that can be used when configured.
 
 ## Usage
 

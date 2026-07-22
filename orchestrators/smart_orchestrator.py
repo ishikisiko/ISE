@@ -48,7 +48,6 @@ class SmartSearchOrchestrator:
     SEARCH_SOURCE_LABELS = {
         "brave": "Brave Search",
         "brightdata": "Bright Data SERP",
-        "you": "You.com",
         "google": "Google Search",
     }
 
@@ -157,7 +156,7 @@ class SmartSearchOrchestrator:
              llm_time_constraint = self._detect_time_constraint_with_llm(query, timing_recorder)
              if llm_time_constraint:
                  time_constraint = llm_time_constraint
-                 print(f"LLM detected time constraint: {time_constraint.days} days ({time_constraint.you_freshness})")
+                 print(f"LLM detected time constraint: {time_constraint.days} days ({time_constraint.freshness})")
 
         effective_query = time_constraint.cleaned_query if time_constraint.days else query
         
@@ -401,8 +400,8 @@ class SmartSearchOrchestrator:
             )
             pipeline_kwargs["per_source_limit"] = per_source_limit
             # 添加时间限制参数
-            if time_constraint.you_freshness:
-                pipeline_kwargs["freshness"] = time_constraint.you_freshness
+            if time_constraint.freshness:
+                pipeline_kwargs["freshness"] = time_constraint.freshness
             if time_constraint.google_date_restrict:
                 pipeline_kwargs["date_restrict"] = time_constraint.google_date_restrict
             if reference_limit is not None:
@@ -458,7 +457,7 @@ class SmartSearchOrchestrator:
                 "cleaned_query": time_constraint.cleaned_query,
                 "time_expression": time_constraint.time_expression,
                 "days": time_constraint.days,
-                "you_freshness": time_constraint.you_freshness,
+                "freshness": time_constraint.freshness,
                 "google_date_restrict": time_constraint.google_date_restrict,
             }
 
@@ -1274,7 +1273,7 @@ class SmartSearchOrchestrator:
                     # Use the parser instance to help
                     from time_parser import get_time_parser
                     parser = get_time_parser()
-                    tc.you_freshness = parser._map_to_you_freshness(days)
+                    tc.freshness = parser._map_to_freshness(days)
                     tc.google_date_restrict = parser._map_to_google_date_restrict(days)
                     return tc
                     

@@ -659,7 +659,7 @@ Always answer in the same language as the user's question."""
             per_source_limit=per_source_limit,
             reference_limit=reference_limit,
             search_query=search_query,
-            freshness=time_constraint.you_freshness if time_constraint.days else None,
+            freshness=time_constraint.freshness if time_constraint.days else None,
             date_restrict=time_constraint.google_date_restrict if time_constraint.days else None,
             extra_context=domain_api_result.get("answer") if domain_api_result and should_continue else None,
             domain=domain,

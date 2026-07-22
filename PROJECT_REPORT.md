@@ -82,7 +82,7 @@ NLP_Project/
 - 工作流编排：协调各模块执行复杂任务
 
 #### 2.2.4 搜索模块 (search/)
-- **search.py**: 支持多种搜索API（Brave Search、Bright Data SERP、You.com、Google Custom Search）
+- **search.py**: 支持多种搜索API（Brave Search、Bright Data SERP、Google Custom Search）
 - **rerank.py**: 重排序实现（支持Qwen3重排序模型）
 - **source_selector.py**: 智能源选择器
 - **sports_api.py**: 体育数据API集成
@@ -129,7 +129,6 @@ NLP_Project/
 ### 3.5 搜索与数据源
 - **Brave Search**: 默认优先使用的通用网页搜索提供商
 - **Bright Data SERP**: Google风格 SERP 的后备搜索提供商
-- **You.com**: 替代搜索引擎
 - **Google Custom Search JSON API**: 自定义搜索
 - **Yahoo Finance API (yfinance)**: 金融数据接口
 - **Finnhub**: 金融数据API
@@ -180,15 +179,8 @@ NLP_Project/
 ```json
 {
     "SERPAPI_API_KEY": "...",
-    "YOU_API_KEY": "...",
     "GOOGLE_API_KEY": "...",
     "GOOGLE_CX": "...",
-    "youSearch": {
-        "country": "US",
-        "safesearch": "moderate",
-        "include_news": true,
-        "default_count": 8
-    },
     "googleSearch": {
         "lr": "lang_zh-CN|lang_zh-TW|lang_en",
         "safe": "medium",

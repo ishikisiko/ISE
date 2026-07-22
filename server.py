@@ -27,6 +27,7 @@ from langchain.langchain_orchestrator import create_langchain_orchestrator, Lang
 base_dir = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=os.path.join(base_dir, "frontend"), static_url_path="")
 UPLOAD_FOLDER = os.path.join(base_dir, 'uploads')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 
@@ -236,10 +237,6 @@ def build_pipeline(
     bright_cfg = config.get("brightDataSearch") or {}
     if configured_value(bright_cfg.get("api_token")) and (bright_cfg.get("zone") or "").strip():
         configured_sources.append("brightdata")
-    you_cfg = config.get("youSearch") or {}
-    you_key = configured_value(you_cfg.get("api_key") or config.get("YOU_API_KEY"))
-    if you_key:
-        configured_sources.append("you")
     google_cfg = config.get("googleSearch") or {}
     google_key = configured_value(google_cfg.get("api_key") or config.get("GOOGLE_API_KEY"))
     google_cx = configured_value(google_cfg.get("cx") or config.get("GOOGLE_CX"))
@@ -423,7 +420,6 @@ def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
             "tavily",
             "parallel",
             "brightdata",
-            "you",
             "google",
         }
         normalized_sources: List[str] = []

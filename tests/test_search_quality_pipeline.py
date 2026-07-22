@@ -30,7 +30,7 @@ def test_evaluate_record_with_detailed_relevance_labels():
             "total_ms": 1200,
             "search_sources": [
                 {"source": "google", "duration_ms": 200},
-                {"source": "you", "duration_ms": 150},
+                {"source": "brave", "duration_ms": 150},
             ],
             "llm_calls": [
                 {"label": "rewrite", "duration_ms": 300},

@@ -12,7 +12,7 @@ NLP_Project/
 ├── llm/                     # LLM 客户端模块
 │   └── api.py              # LLMClient, HKGAIClient
 ├── search/                  # 搜索相关模块
-│   ├── search.py           # 搜索客户端 (Brave, Bright Data, You.com, Google)
+│   ├── search.py           # 搜索客户端 (Brave, Bright Data, Google)
 │   ├── rerank.py           # 重排序器 (Qwen3Reranker)
 │   ├── source_selector.py  # 智能源选择器
 │   └── sports_api.py       # 体育 API 客户端

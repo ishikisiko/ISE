@@ -36,7 +36,6 @@
         "chunk_size": 1000,
         "chunk_overlap": 200
     },
-    "YOU_API_KEY": "YOUR_YOU_API_KEY_HERE",
     "GOOGLE_API_KEY": "YOUR_GOOGLE_API_KEY_HERE",
     "GOOGLE_CX": "YOUR_GOOGLE_CUSTOM_SEARCH_ENGINE_ID_HERE",
     "brightDataSearch": {
@@ -77,18 +76,11 @@
     "FINNHUB_API_KEY": "",
     "SPORTSDB_API_KEY": "",
     "APISPORTS_KEY": "",
-    "youSearch": {
-        "country": "US",
-        "safesearch": "moderate",
-        "include_news": true,
-        "default_count": 8
-    },
     "googleSearch": {
         "lr": "lang_zh-CN|lang_zh-TW|lang_en",
         "safe": "medium",
         "timeout": 15
     },
-
     "rerank": {
         "enabled": false,
         "provider": "qwen",

@@ -18,7 +18,6 @@ from search.search import (
     PrioritySearchClient,
     SearchClient,
     TavilySearchClient,
-    YouSearchClient,
 )
 from search.rerank import BaseReranker, Qwen3Reranker
 from orchestrators.smart_orchestrator import SmartSearchOrchestrator
@@ -79,7 +78,7 @@ def build_search_client(
     *,
     sources: Optional[List[str]] = None,
 ) -> Optional[SearchClient]:
-    """Build a search client from config supporting Brave, Bright Data, You.com, and Google."""
+    """Build a search client from config supporting Brave, Bright Data, and Google."""
 
     allowed_sources = {
         "brave",
@@ -87,7 +86,6 @@ def build_search_client(
         "tavily",
         "parallel",
         "brightdata",
-        "you",
         "google",
     }
     requested_order: Optional[List[str]] = None
@@ -141,7 +139,6 @@ def build_search_client(
         "tavily": False,
         "parallel": False,
         "brightdata": False,
-        "you": False,
         "google": False,
     }
     missing_requested: List[str] = []
@@ -261,53 +258,6 @@ def build_search_client(
                 print(f"[search] Bright Data disabled: {exc}")
     elif requested_lookup is not None and "brightdata" in requested_lookup:
         missing_requested.append("brightdata")
-
-    you_cfg = config_or_key.get("youSearch") or {}
-    you_key = configured_value(you_cfg.get("api_key") or config_or_key.get("YOU_API_KEY"))
-    if you_key:
-        configured_flags["you"] = True
-        if wants("you"):
-            you_kwargs: Dict[str, Any] = {}
-            base_url = (you_cfg.get("base_url") or "").strip()
-            if base_url:
-                you_kwargs["base_url"] = base_url
-            contents_base_url = (you_cfg.get("contents_base_url") or "").strip()
-            if contents_base_url:
-                you_kwargs["contents_base_url"] = contents_base_url
-            timeout_raw = you_cfg.get("timeout")
-            if timeout_raw is not None:
-                try:
-                    you_kwargs["timeout"] = int(timeout_raw)
-                except (TypeError, ValueError):
-                    pass
-            country = (you_cfg.get("country") or "").strip()
-            if country:
-                you_kwargs["country"] = country
-            safesearch = (you_cfg.get("safesearch") or "").strip()
-            if safesearch:
-                you_kwargs["safesearch"] = safesearch
-            freshness = (you_cfg.get("freshness") or "").strip()
-            if freshness:
-                you_kwargs["freshness"] = freshness
-            include_news = you_cfg.get("include_news")
-            if include_news is not None:
-                you_kwargs["include_news"] = bool(include_news)
-            default_count = you_cfg.get("default_count")
-            if default_count is not None:
-                try:
-                    you_kwargs["default_count"] = int(default_count)
-                except (TypeError, ValueError):
-                    pass
-            extra_params = you_cfg.get("extra_params")
-            if isinstance(extra_params, dict):
-                you_kwargs["extra_params"] = extra_params
-
-            try:
-                fallback_clients.append(YouSearchClient(api_key=you_key, **you_kwargs))
-            except Exception as exc:
-                print(f"[search] You.com search disabled: {exc}")
-    elif requested_lookup is not None and "you" in requested_lookup:
-        missing_requested.append("you")
 
     # Google Custom Search JSON API
     google_cfg = config_or_key.get("googleSearch") or {}
@@ -773,9 +723,6 @@ def main() -> None:
     bright_cfg_cli = config.get("brightDataSearch") or {}
     if configured_value(bright_cfg_cli.get("api_token")) and (bright_cfg_cli.get("zone") or "").strip():
         configured_sources.append("brightdata")
-    you_cfg_cli = config.get("youSearch") or {}
-    if configured_value(you_cfg_cli.get("api_key") or config.get("YOU_API_KEY")):
-        configured_sources.append("you")
     google_cfg_cli = config.get("googleSearch") or {}
     google_key_cli = configured_value(google_cfg_cli.get("api_key") or config.get("GOOGLE_API_KEY"))
     google_cx_cli = configured_value(google_cfg_cli.get("cx") or config.get("GOOGLE_CX"))
