@@ -448,7 +448,10 @@ class UniversalChatModel(BaseChatModel):
             inner = msg.get("delta") or {}
             return inner.get("text", "") if isinstance(inner, dict) else ""
         else:
-            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            choices = chunk.get("choices") or []
+            if not choices:
+                return ""
+            delta = choices[0].get("delta", {})
             return delta.get("content", "")
 
 

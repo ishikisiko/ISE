@@ -201,6 +201,7 @@ Always answer in the same language as the user's question."""
             "react_fallback": {
                 "enabled": bool(react_cfg.get("enabled", False)),
                 "max_iterations": int(react_cfg.get("max_iterations", 4) or 4),
+                "engine": str(react_cfg.get("engine") or "").strip().lower() or None,
             },
         }
 
@@ -1319,6 +1320,8 @@ Always answer in the same language as the user's question."""
             data_path=self.data_path,
             max_iterations=self.postcheck_config["react_fallback"]["max_iterations"],
             show_timings=self.show_timings,
+            engine=self.postcheck_config["react_fallback"].get("engine"),
+            judge_llm=self.postcheck_llm,
         )
         return self._react_fallback_orchestrator
 
@@ -1442,6 +1445,7 @@ Always answer in the same language as the user's question."""
             reference_limit=reference_limit,
             force_search=force_search,
             fallback_context=fallback_context,
+            tracer=tracer,
         )
         max_iterations = self.postcheck_config["react_fallback"]["max_iterations"]
         tracer.end("react", detail=f"最多 {max_iterations} 轮迭代")
@@ -1470,7 +1474,10 @@ Always answer in the same language as the user's question."""
         Returns:
             AgentExecutor instance ready to run
         """
-        from langchain.agents import create_react_agent, AgentExecutor
+        try:
+            from langchain.agents import create_react_agent, AgentExecutor
+        except ModuleNotFoundError:
+            from langchain_classic.agents import create_react_agent, AgentExecutor
 
         # Default ReAct prompt (English)
         default_react_prompt = """You are a helpful assistant.
@@ -1523,6 +1530,19 @@ Final Answer: [你的回答]
 开始！"""
 
         prompt_template = react_prompt or chinese_react_prompt
+
+        if isinstance(prompt_template, str):
+            from langchain_core.prompts import PromptTemplate
+
+            template_text = prompt_template
+            if "{input}" not in template_text:
+                template_text += "\n\nQuestion: {input}"
+            if "{agent_scratchpad}" not in template_text:
+                template_text += "\n{agent_scratchpad}"
+            prompt_template = PromptTemplate(
+                template=template_text,
+                input_variables=["input", "agent_scratchpad", "tools", "tool_names"],
+            )
 
         agent = create_react_agent(llm, tools, prompt_template)
         return AgentExecutor.from_agent_and_tools(

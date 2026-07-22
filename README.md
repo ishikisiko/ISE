@@ -9,6 +9,13 @@ This project demonstrates a simple Retrieval-Augmented Generation (RAG) pipeline
 - `search_hits` and `retrieved_docs` are still returned for compatibility, but they are now projected from the internal unified evidence set instead of being maintained as separate internal truth sources.
 - ReAct is still available, but the default product path uses it as a post-check fallback executor rather than as a parallel top-level runtime.
 
+### ReAct Loop Engines
+
+The ReAct executor supports two engines selected via `config.json`:
+
+- `reactAgent.engine: "langgraph"` (default): an explicit `act -> observe -> evaluate` state machine. Each iteration produces a `LoopVerdict` (rule-based constraint coverage plus an optional LLM judge), and the loop termination reason is exposed as `control["loop_status"]` (`succeeded` / `exhausted` / `stagnated` / `unrecoverable`). Loop evaluation thresholds live under `reactAgent.evaluation` (`judge_interval`, `repeat_threshold`, `no_progress_threshold`, `tool_error_threshold`, `new_evidence_min_ratio`). The fallback path can override the engine via `postcheck.react_fallback.engine`.
+- `reactAgent.engine: "legacy"`: the LangChain `AgentExecutor` loop (kept as a rollback path; also used automatically when langgraph is not installed).
+
 ## Unified Evidence Layer
 
 The default LangChain pipeline now normalizes first-class evidence into a shared model:

@@ -12,11 +12,20 @@
         },
         "react_fallback": {
             "enabled": false,
-            "max_iterations": 4
+            "max_iterations": 4,
+            "engine": "langgraph"
         }
     },
     "reactAgent": {
-        "max_iterations": 5
+        "max_iterations": 5,
+        "engine": "langgraph",
+        "evaluation": {
+            "judge_interval": 2,
+            "repeat_threshold": 2,
+            "no_progress_threshold": 2,
+            "tool_error_threshold": 2,
+            "new_evidence_min_ratio": 0.1
+        }
     },
     "domainClassifier": {
         "provider": "opencode-go",

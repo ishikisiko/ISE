@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 import server
 from evidence import EvidenceItem
 from langchain.langchain_orchestrator import LangChainOrchestrator
@@ -132,6 +134,7 @@ def test_react_agent_orchestrator_answer_returns_compatible_payload(monkeypatch)
         llm=object(),
         tools=[tool],
         max_iterations=3,
+        engine="legacy",
     )
 
     result = orchestrator.answer("compare apple and microsoft")
@@ -156,7 +159,7 @@ def test_react_agent_orchestrator_accepts_fallback_context(monkeypatch):
         lambda **kwargs: StubExecutor(),
     )
 
-    orchestrator = ReactAgentOrchestrator(llm=object(), tools=[], max_iterations=2)
+    orchestrator = ReactAgentOrchestrator(llm=object(), tools=[], max_iterations=2, engine="legacy")
     result = orchestrator.answer(
         "What changed over the last week?",
         fallback_context={
@@ -548,3 +551,134 @@ def test_server_build_pipeline_passes_resolved_chunk_settings(monkeypatch):
     assert server.build_pipeline() == "default-orchestrator"
     assert captured[-1]["chunk_size"] == 777
     assert captured[-1]["chunk_overlap"] == 111
+
+
+def test_react_agent_orchestrator_engine_defaults_to_langgraph():
+    from orchestrators.react_loop_graph import langgraph_available
+
+    if not langgraph_available():
+        pytest.skip("langgraph not installed")
+    orchestrator = ReactAgentOrchestrator(llm=object(), tools=[], max_iterations=2)
+    assert orchestrator.engine == "langgraph"
+    assert orchestrator._agent_executor is None
+
+
+def test_react_agent_orchestrator_engine_from_config(monkeypatch):
+    def _boom(**kwargs):
+        raise AssertionError("legacy executor must not be created in langgraph mode")
+
+    monkeypatch.setattr(
+        "orchestrators.react_agent_orchestrator.LangChainOrchestrator.create_react_agent",
+        _boom,
+    )
+    from orchestrators.react_loop_graph import langgraph_available
+
+    if not langgraph_available():
+        pytest.skip("langgraph not installed")
+    orchestrator = ReactAgentOrchestrator(
+        llm=object(),
+        tools=[],
+        max_iterations=2,
+        config={"reactAgent": {"engine": "langgraph"}},
+    )
+    assert orchestrator.engine == "langgraph"
+    assert orchestrator._agent_executor is None
+
+
+def test_react_agent_orchestrator_engine_kwarg_overrides_config(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrators.react_agent_orchestrator.LangChainOrchestrator.create_react_agent",
+        lambda **kwargs: object(),
+    )
+    orchestrator = ReactAgentOrchestrator(
+        llm=object(),
+        tools=[],
+        max_iterations=2,
+        config={"reactAgent": {"engine": "langgraph"}},
+        engine="legacy",
+    )
+    assert orchestrator.engine == "legacy"
+
+
+def test_react_agent_orchestrator_langgraph_missing_package_falls_back(monkeypatch):
+    created = []
+    monkeypatch.setattr(
+        "orchestrators.react_agent_orchestrator.LangChainOrchestrator.create_react_agent",
+        lambda **kwargs: created.append(kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        "orchestrators.react_loop_graph.langgraph_available",
+        lambda: False,
+    )
+    orchestrator = ReactAgentOrchestrator(
+        llm=object(),
+        tools=[],
+        max_iterations=2,
+        config={"reactAgent": {"engine": "langgraph"}},
+    )
+    assert orchestrator.engine == "legacy"
+    assert created, "legacy executor should be created on fallback"
+
+
+def test_react_agent_orchestrator_langgraph_loop_status_metadata():
+    from orchestrators.react_loop_graph import langgraph_available
+
+    if not langgraph_available():
+        pytest.skip("langgraph not installed")
+
+    from tests.test_react_loop_graph import FakeTools, NativeScriptedChatModel, _tool_call
+
+    tools = [FakeTools.make("web_search", ["2025年苹果和微软分别公布财报，苹果相比微软更强，而微软同时领先，" * 6])]
+    llm = NativeScriptedChatModel(
+        replies=[_tool_call("web_search"), "2025年苹果相比微软更强，而微软同时领先，" * 6]
+    )
+    orchestrator = ReactAgentOrchestrator(
+        llm=llm,
+        tools=tools,
+        max_iterations=4,
+        config={"reactAgent": {"engine": "langgraph"}},
+    )
+    result = orchestrator.answer("苹果和微软的区别")
+
+    control = result["control"]
+    assert control["loop_status"] == "succeeded"
+    assert control["engine"] == "langgraph"
+    assert isinstance(control["loop_verdicts"], list) and control["loop_verdicts"]
+    # 既有字段保持兼容
+    assert control["search_mode"] == "react_agent"
+    assert control["max_iterations"] == 4
+    assert control["fallback_triggered"] is False
+    assert "decision" in control
+    assert result["answer"]
+
+
+def test_react_agent_orchestrator_langgraph_fallback_checklist_injection():
+    from orchestrators.react_loop_graph import langgraph_available
+
+    if not langgraph_available():
+        pytest.skip("langgraph not installed")
+
+    from tests.test_react_loop_graph import NativeScriptedChatModel
+
+    llm = NativeScriptedChatModel(replies=["短答案"] * 3)
+    orchestrator = ReactAgentOrchestrator(
+        llm=llm,
+        tools=[],
+        max_iterations=2,
+        config={"reactAgent": {"engine": "langgraph"}},
+    )
+    result = orchestrator.answer(
+        "对比苹果和微软",
+        fallback_context={
+            "previous_answer": "旧答案",
+            "failure_types": ["missing_comparison_coverage"],
+            "missing_constraints": ["comparison"],
+            "recovery_goal": "补足对比覆盖",
+            "search_hits": [],
+        },
+    )
+    control = result["control"]
+    assert control["search_mode"] == "react_fallback"
+    assert control["loop_status"] == "exhausted"
+    reasons = [v["reason"] for v in control["loop_verdicts"]]
+    assert "final_answer_rejected" in reasons

@@ -1,8 +1,7 @@
-# react-agent Specification
+# react-agent Specification (delta)
 
-## Purpose
-TBD - created by archiving change langchain-react-agent. Update Purpose after archive.
-## Requirements
+## MODIFIED Requirements
+
 ### Requirement: ReAct Agent 引擎
 系统 SHALL 提供基于显式状态机（LangGraph graph）的迭代推理引擎，图结构为 `act → observe → evaluate → (continue | finish)`。该引擎接收用户查询，输出最终回答。系统 SHALL 保留 legacy LangChain `AgentExecutor` 引擎作为可配置回退路径。
 
@@ -32,15 +31,3 @@ TBD - created by archiving change langchain-react-agent. Update Purpose after ar
 - **WHEN** 模型在 act 阶段产出最终答案提议
 - **THEN** 循环 SHALL NOT 直接终止
 - **AND** evaluate 节点 SHALL 验证约束 checklist 后方决定是否接受该答案
-
-### Requirement: 自定义 ReAct Prompt
-系统 SHALL 支持注入自定义 ReAct System Prompt，以支持中文推理场景。
-
-#### Scenario: 使用默认英文 Prompt
-- **WHEN** 系统未提供自定义 prompt
-- **THEN** 使用 LangChain 默认 ReAct prompt
-
-#### Scenario: 使用自定义中文 Prompt
-- **WHEN** 调用 `create_react_agent` 时传入 `react_prompt` 参数
-- **THEN** 使用传入的 prompt 替代默认 prompt
-

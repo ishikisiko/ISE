@@ -59,6 +59,7 @@ class WorkflowTracer:
         detail: Optional[str] = None,
         items: Optional[List[Dict[str, str]]] = None,
         status: str = "done",
+        badge: Optional[Dict[str, str]] = None,
     ) -> None:
         """Mark a step as finished (or errored/skipped after a begin)."""
         start = self._starts.pop(step_id, None)
@@ -76,6 +77,8 @@ class WorkflowTracer:
             payload["duration_ms"] = duration_ms
         if items:
             payload["items"] = items
+        if badge:
+            payload["badge"] = badge
         self._emit(payload)
 
     def skip(self, step_id: str, title: str, detail: Optional[str] = None) -> None:

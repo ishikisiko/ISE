@@ -124,6 +124,62 @@ def _stringify_evidence(search_hits: List[Dict[str, Any]], retrieved_docs: List[
     return " ".join(parts).lower()
 
 
+def _tokenize_for_overlap(text: str) -> List[str]:
+    """Tokenize text for overlap comparison (latin words/numbers + single CJK chars)."""
+    return re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", text.lower())
+
+
+def evidence_increment_ratio(pool_text: str, new_observation: str) -> float:
+    """Return the ratio of unique tokens in new_observation absent from pool_text.
+
+    A ratio near 0 means the observation adds no new information; near 1 means
+    it is entirely new. Empty observations always return 0.0.
+    """
+    observation_tokens = set(_tokenize_for_overlap(_normalize_text(new_observation)))
+    if not observation_tokens:
+        return 0.0
+    pool_tokens = set(_tokenize_for_overlap(_normalize_text(pool_text)))
+    new_tokens = observation_tokens - pool_tokens
+    return len(new_tokens) / len(observation_tokens)
+
+
+def check_constraint_coverage(
+    query: str,
+    evidence_text: str,
+    draft_answer: str,
+    time_constraint: Optional[TimeConstraint] = None,
+) -> tuple[List[str], List[str]]:
+    """Check which query constraints are covered by the current draft and evidence.
+
+    Returns (constraints_met, constraints_missing). Constraint identifiers:
+    "time_constraint", "comparison", "multi_hop_reasoning".
+    """
+    met: List[str] = []
+    missing: List[str] = []
+    body = _answer_body(_normalize_text(draft_answer))
+    body_lower = body.lower()
+    query_lower = (query or "").lower()
+
+    if time_constraint and getattr(time_constraint, "days", None):
+        time_text = f"{body} {_normalize_text(evidence_text)}"
+        has_time_signal = bool(re.search(r"(?<!\d)20\d{2}(?!\d)", time_text)) or _contains_any(
+            time_text.lower(),
+            ("current date", "today", "latest", "recent", "今天", "当前", "最近", "最新", "过去", "近"),
+        )
+        (met if has_time_signal else missing).append("time_constraint")
+
+    if _contains_any(query_lower, COMPARISON_PATTERNS):
+        comparison_markers = ("相比", "而", "同时", "vs", "versus", "compared", "both", "分别", "对比", "比较")
+        covered = _contains_any(body_lower, comparison_markers) and len(body) >= 120
+        (met if covered else missing).append("comparison")
+
+    if _contains_any(query_lower, MULTI_HOP_PATTERNS):
+        covered = len(body) >= 160
+        (met if covered else missing).append("multi_hop_reasoning")
+
+    return met, missing
+
+
 def screen_search_answer(
     *,
     query: str,

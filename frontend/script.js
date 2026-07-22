@@ -285,21 +285,33 @@ document.addEventListener("DOMContentLoaded", () => {
                     dot.setAttribute("aria-hidden", "true");
                     const body = el("div", "wf-body");
                     const head = el("div", "wf-head");
+                    const titleGroup = el("span", "wf-title-group");
                     const title = el("span", "wf-title", step.title || step.id);
+                    const badge = el("span", "wf-badge");
+                    badge.hidden = true;
+                    titleGroup.append(title, badge);
                     const time = el("span", "wf-time", "");
-                    head.append(title, time);
+                    head.append(titleGroup, time);
                     const detail = el("p", "wf-detail");
                     detail.hidden = true;
                     const items = el("ul", "wf-items");
                     items.hidden = true;
                     body.append(head, detail, items);
                     item.append(dot, body);
-                    node = { root: item, titleEl: title, timeEl: time, detailEl: detail, itemsEl: items, startTs: 0 };
+                    node = { root: item, titleEl: title, badgeEl: badge, timeEl: time, detailEl: detail, itemsEl: items, startTs: 0 };
                     steps.set(step.id, node);
                     list.appendChild(item);
                 }
 
                 if (step.title) node.titleEl.textContent = step.title;
+
+                if (step.badge && step.badge.text) {
+                    node.badgeEl.textContent = step.badge.text;
+                    node.badgeEl.className = `wf-badge${step.badge.tone ? ` is-${step.badge.tone}` : ""}`;
+                    node.badgeEl.hidden = false;
+                } else {
+                    node.badgeEl.hidden = true;
+                }
 
                 node.root.classList.remove("is-active", "is-done", "is-error", "is-skipped");
                 const status = step.status || "done";
@@ -655,12 +667,45 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         if (control.fallback_triggered) {
-            steps.push({
+            const loopStatus = control.loop_status;
+            const loopMeta = {
+                succeeded: { text: "循环成功", tone: "ok", status: "done" },
+                exhausted: { text: "迭代用尽", tone: "warn", status: "done" },
+                stagnated: { text: "检索停滞", tone: "warn", status: "error" },
+                unrecoverable: { text: "不可恢复", tone: "err", status: "error" },
+            }[loopStatus];
+            const reasonLabels = {
+                constraints_satisfied: "约束满足",
+                continue: "继续检索",
+                final_answer_rejected: "答案未达标，继续补充",
+                exhausted: "迭代用尽",
+                stagnated: "检索停滞",
+                unrecoverable: "工具持续失败",
+            };
+            const verdicts = Array.isArray(control.loop_verdicts) ? control.loop_verdicts : [];
+            const reactStep = {
                 id: "react",
                 title: "深度检索恢复",
-                status: "done",
-                detail: control.max_iterations ? `最多 ${control.max_iterations} 轮迭代` : "ReAct",
-            });
+                status: loopMeta ? loopMeta.status : "done",
+                detail: loopMeta
+                    ? `${control.loop_iterations ?? "?"} 轮迭代 · ${control.engine || "langgraph"} 引擎`
+                    : control.max_iterations
+                        ? `最多 ${control.max_iterations} 轮迭代`
+                        : "ReAct",
+            };
+            if (loopMeta) {
+                reactStep.badge = { text: loopMeta.text, tone: loopMeta.tone };
+            }
+            if (verdicts.length) {
+                reactStep.items = verdicts.map((v) => ({
+                    label: `第 ${v.iteration ?? "?"} 轮`,
+                    value: (reasonLabels[v.reason] || v.reason || "")
+                        + (Array.isArray(v.constraints_missing) && v.constraints_missing.length
+                            ? `（缺：${v.constraints_missing.join("、")}）`
+                            : ""),
+                }));
+            }
+            steps.push(reactStep);
         }
 
         return steps;

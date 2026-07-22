@@ -92,6 +92,32 @@ def parse_args() -> argparse.Namespace:
         help="Force search for every query during collection. Useful for search-result judging sets.",
     )
 
+    parity_parser = subparsers.add_parser(
+        "parity",
+        help="Run the same queries through legacy and langgraph ReAct engines and compare outcomes.",
+    )
+    parity_parser.add_argument(
+        "--queries-file",
+        required=True,
+        help="UTF-8 text file with one query per line. Blank lines and # comments are ignored.",
+    )
+    parity_parser.add_argument(
+        "--output-file",
+        default=None,
+        help="Optional path to save the parity report as JSON.",
+    )
+    parity_parser.add_argument(
+        "--config",
+        default=None,
+        help="Optional path to config.json. Defaults to NLP_CONFIG_PATH env or ./config.json.",
+    )
+    parity_parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=4,
+        help="Maximum ReAct iterations for both engines.",
+    )
+
     evaluate_parser = subparsers.add_parser(
         "evaluate",
         help="Read manually judged search results and compute retrieval quality metrics.",
@@ -1216,8 +1242,74 @@ def print_summary(report: Dict[str, Any], *, print_details: bool = False) -> Non
         )
 
 
+def run_engine_parity(args: argparse.Namespace) -> Dict[str, Any]:
+    """Run the same query set through legacy and langgraph ReAct engines."""
+    queries = read_queries(args.queries_file)
+    if not queries:
+        raise SystemExit("No queries found in the provided file.")
+
+    config = load_config(args.config)
+
+    from orchestrators.react_agent_orchestrator import ReactAgentOrchestrator
+
+    orchestrators: Dict[str, Any] = {}
+    for engine in ("legacy", "langgraph"):
+        orchestrators[engine] = ReactAgentOrchestrator.create_from_config(
+            config=config,
+            engine=engine,
+            max_iterations=args.max_iterations,
+        )
+
+    status_counts: Dict[str, Dict[str, int]] = {"legacy": {}, "langgraph": {}}
+    records: List[Dict[str, Any]] = []
+    for index, query in enumerate(queries, start=1):
+        row: Dict[str, Any] = {"query_id": index, "query": query}
+        for engine, orchestrator in orchestrators.items():
+            print(f"[parity] {index}/{len(queries)} {engine}: {query}")
+            try:
+                result = orchestrator.answer(query)
+                control = result.get("control") or {}
+                status = control.get("loop_status") or "completed"
+                row[engine] = {
+                    "engine": control.get("engine"),
+                    "loop_status": status,
+                    "iterations": control.get("loop_iterations"),
+                    "answer_chars": len(result.get("answer") or ""),
+                    "llm_error": result.get("llm_error"),
+                    "verdicts": control.get("loop_verdicts") or [],
+                }
+            except Exception as exc:  # noqa: BLE001 - parity records errors as data
+                row[engine] = {"error": str(exc)}
+                status = "error"
+            counts = status_counts[engine]
+            counts[status] = counts.get(status, 0) + 1
+        records.append(row)
+
+    return {
+        "meta": {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "num_queries": len(records),
+            "max_iterations": args.max_iterations,
+            "loop_judge": "disabled",
+            "note": "legacy engine has no loop evaluation; its status is always 'completed' unless it errors.",
+        },
+        "status_distribution": status_counts,
+        "records": records,
+    }
+
+
 def main() -> None:
     args = parse_args()
+
+    if args.command == "parity":
+        report = run_engine_parity(args)
+        print(json.dumps(report["status_distribution"], ensure_ascii=False, indent=2))
+        if args.output_file:
+            ensure_parent_dir(args.output_file)
+            with open(args.output_file, "w", encoding="utf-8") as handle:
+                json.dump(report, handle, ensure_ascii=False, indent=2)
+            print(f"Saved parity report to {args.output_file}")
+        return
 
     if args.command == "map-external":
         handle_map_external_command(args)
