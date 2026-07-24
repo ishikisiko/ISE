@@ -35,7 +35,25 @@ from utils.time_parser import TimeConstraint, parse_time_constraint
 from utils.search_routing import coerce_bool, extract_json_object, is_small_talk_query, normalize_sources
 from utils.timing_utils import TimingRecorder
 from utils.current_time import get_current_date_str
-from utils.workflow_trace import ensure_tracer
+from utils.workflow_trace import WorkflowTracer, ensure_tracer
+from utils.audit_log import AuditRecorder, resolve_audit_settings
+from utils.query_orchestration import (
+    EvidenceLedger,
+    EvidencePolicyRegistry,
+    PlanController,
+    PlanStepKind,
+    PlanStepResult,
+    QueryExecutionTrace,
+    QueryPlan,
+    QueryAnalysis,
+    VerificationOutcome,
+    VerificationStatus,
+    analyze_query,
+    build_query_plan,
+    deterministic_query_for_plan,
+    merge_optional_analysis,
+    verify_evidence_plan,
+)
 
 
 class QueryIntent(str, Enum):
@@ -145,6 +163,16 @@ Always answer in the same language as the user's question."""
         self.google_api_key = google_api_key
         self.postcheck_llm = postcheck_llm or self.llm
         self.postcheck_config = self._normalize_postcheck_config(self.config.get("postcheck") or {})
+        self.orchestration_config = self._normalize_orchestration_config(
+            self.config.get("orchestration") or {}
+        )
+        self._policy_registry = EvidencePolicyRegistry()
+        self._current_analysis: Optional[QueryAnalysis] = None
+        self._current_plan: Optional[QueryPlan] = None
+        self._current_ledger: Optional[EvidenceLedger] = None
+        self._current_execution_trace: Optional[QueryExecutionTrace] = None
+        self._current_plan_controller: Optional[PlanController] = None
+        self._current_verification: Optional[VerificationOutcome] = None
         self._react_fallback_orchestrator: Optional[Any] = None
         
         # Initialize source selector
@@ -204,6 +232,273 @@ Always answer in the same language as the user's question."""
                 "engine": str(react_cfg.get("engine") or "").strip().lower() or None,
             },
         }
+
+    @staticmethod
+    def _normalize_orchestration_config(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize rollout controls without making optional analysis mandatory."""
+        return {
+            "enabled": bool(config.get("enabled", True)),
+            "enforce_verification": bool(config.get("enforce_verification", True)),
+            "llm_analysis": bool(config.get("llm_analysis", False)),
+            "query_budget": max(1, int(config.get("query_budget", 3) or 3)),
+            "result_budget": max(1, int(config.get("result_budget", 8) or 8)),
+            "time_budget_ms": max(1000, int(config.get("time_budget_ms", 20000) or 20000)),
+            "recovery_budget": max(0, int(config.get("recovery_budget", 1) or 1)),
+        }
+
+    def _initialize_orchestration(
+        self,
+        query: str,
+        *,
+        allow_search: bool,
+        time_constraint: TimeConstraint,
+    ) -> None:
+        """Create the per-turn analysis and trace before any evidence work."""
+        self._current_analysis = None
+        self._current_plan = None
+        self._current_ledger = None
+        self._current_plan_controller = None
+        self._current_verification = None
+        self._current_execution_trace = None
+        if not self.orchestration_config["enabled"]:
+            return
+
+        analysis = analyze_query(
+            query,
+            allow_search=allow_search,
+            requested_sources=self.requested_search_sources,
+            time_constraint=time_constraint,
+        )
+        if self.orchestration_config["llm_analysis"] and self.routing_llm is not None:
+            candidate = self._optional_llm_analysis(query)
+            analysis = merge_optional_analysis(analysis, candidate)
+        trace = QueryExecutionTrace(
+            configured=self.configured_search_sources,
+            requested=self.requested_search_sources,
+            eligible=self.active_search_sources,
+        )
+        trace.record_analysis(analysis)
+        self._current_analysis = analysis
+        self._current_execution_trace = trace
+
+    def _optional_llm_analysis(self, query: str) -> Optional[Dict[str, Any]]:
+        """Ask an opt-in analyzer, then let deterministic validation constrain it."""
+        system_prompt = (
+            "Extract only query-analysis hints as JSON with entities, claim_classes, "
+            "ambiguities, and critical_ambiguity. Do not decide that search is allowed."
+        )
+        try:
+            response = self.routing_llm.invoke(
+                [SystemMessage(content=system_prompt), HumanMessage(content=query)]
+            )
+            content = response.content if hasattr(response, "content") else str(response)
+            parsed = extract_json_object(content)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+
+    def _should_select_domain_sources(self, query: str) -> bool:
+        """Avoid an unneeded domain-classifier call for a generic evidence plan.
+
+        The legacy selector includes a broad ``temporal_change`` label, so a
+        comparison alone can otherwise spend an LLM call and appear to select
+        temporal sources before the plan rejects that route.  Structured-domain
+        keywords retain the existing classifier path; selectors without a
+        keyword inventory also retain their current behavior for compatibility.
+        """
+        if not self.orchestration_config["enabled"]:
+            return True
+        analysis = self._current_analysis
+        if analysis is None or not analysis.requires_evidence:
+            return True
+        domain_keywords = getattr(self.source_selector, "domain_keywords", None)
+        if not isinstance(domain_keywords, dict):
+            return True
+        query_lower = query.casefold()
+        for domain in ("weather", "transportation", "finance", "sports", "location"):
+            keywords = domain_keywords.get(domain) or []
+            if any(str(keyword).casefold() in query_lower for keyword in keywords if keyword):
+                return True
+        return False
+
+    def _prepare_query_plan(
+        self,
+        *,
+        needs_evidence: bool,
+        has_local_docs: bool,
+        domain_hint: Optional[str] = None,
+        result_budget: Optional[int] = None,
+    ) -> Optional[QueryPlan]:
+        """Bind the shared analysis to the concrete route selected this turn."""
+        if not self.orchestration_config["enabled"]:
+            return None
+        analysis = self._current_analysis
+        if analysis is None:
+            return None
+        if domain_hint and str(domain_hint).lower() != "general":
+            analysis.domain_hint = str(domain_hint)
+        plan = build_query_plan(
+            analysis,
+            has_local_docs=has_local_docs,
+            needs_evidence=needs_evidence,
+            query_budget=self.orchestration_config["query_budget"],
+            result_budget=result_budget or self.orchestration_config["result_budget"],
+            time_budget_ms=self.orchestration_config["time_budget_ms"],
+            recovery_budget=self.orchestration_config["recovery_budget"],
+            registry=self._policy_registry,
+        )
+        self._current_plan = plan
+        self._current_ledger = EvidenceLedger(plan)
+        trace = self._current_execution_trace
+        if trace is not None:
+            trace.record_plan(plan)
+            self._current_plan_controller = PlanController(plan, trace)
+        return plan
+
+    def _verify_current_plan(self, result: Dict[str, Any]) -> Optional[VerificationOutcome]:
+        """Run deterministic verification against the ledger built for this turn."""
+        plan = self._current_plan
+        ledger = self._current_ledger
+        trace = self._current_execution_trace
+        if plan is None or ledger is None:
+            return None
+        if not ledger.entries:
+            ledger.ingest(result.get("evidence_items") or [])
+            ledger.apply_limits(max_items=plan.result_budget)
+            if trace is not None:
+                trace.record_ledger(ledger)
+        outcome = verify_evidence_plan(
+            plan,
+            ledger,
+            answer=str(result.get("answer") or ""),
+        )
+        controller = self._current_plan_controller
+        if (
+            outcome.recoverable
+            and controller is not None
+            and controller.recoveries_used >= plan.recovery_budget
+        ):
+            outcome = VerificationOutcome(
+                status=VerificationStatus.EVIDENCE_INSUFFICIENT,
+                missing_constraints=list(outcome.missing_constraints),
+                failure_types=list(outcome.failure_types) + ["recovery_budget_exhausted"],
+                recoverable=False,
+                next_action="return_insufficient",
+                rule_hits=list(outcome.rule_hits),
+            )
+        if outcome.recoverable and result.get("search_error"):
+            outcome = VerificationOutcome(
+                status=VerificationStatus.EVIDENCE_INSUFFICIENT,
+                missing_constraints=list(outcome.missing_constraints),
+                failure_types=list(outcome.failure_types) + ["search_unavailable"],
+                recoverable=False,
+                next_action="return_insufficient",
+                rule_hits=list(outcome.rule_hits),
+            )
+        self._current_verification = outcome
+        if trace is not None:
+            trace.record_verification(outcome)
+        return outcome
+
+    def _build_clarification_response(
+        self,
+        query: str,
+        *,
+        has_local_docs: bool,
+    ) -> Dict[str, Any]:
+        """Stop before retrieval when the deterministic plan cannot name its target."""
+        analysis = self._current_analysis
+        ambiguities = list(analysis.ambiguities) if analysis is not None else []
+        is_chinese = any("\u4e00" <= char <= "\u9fff" for char in query)
+        details = "、".join(ambiguities) if ambiguities else "关键实体或约束"
+        answer = (
+            f"需要先澄清 {details}，才能开始检索并比较。请补充要比较的准确对象或范围。"
+            if is_chinese
+            else "I need the exact entities or constraints before searching, so I do not guess the comparison target."
+        )
+        result = {
+            "query": query,
+            "answer": answer,
+            "search_hits": [],
+            "retrieved_docs": [],
+            "evidence_items": [],
+            "evidence_summary": "",
+            "evidence_sources_active": [],
+            "evidence_sources_used": [],
+            "evidence_source_types_active": [],
+            "evidence_source_types_used": [],
+            "control": {
+                "search_performed": False,
+                "decision": {"needs_search": False, "reason": "clarification_required"},
+                "search_mode": "clarification_required",
+                "local_docs_present": has_local_docs,
+                "search_allowed": bool(analysis.search_allowed) if analysis else True,
+                "final_executor": "clarification_required",
+            },
+        }
+        self._verify_current_plan(result)
+        return result
+
+    @staticmethod
+    def _mark_evidence_insufficient(
+        result: Dict[str, Any],
+        control: Dict[str, Any],
+        outcome: VerificationOutcome,
+    ) -> Dict[str, Any]:
+        """Replace an unsupported factual draft with an explicit bounded state."""
+        query = str(result.get("query") or "")
+        is_chinese = any("\u4e00" <= char <= "\u9fff" for char in query)
+        missing = "、".join(outcome.missing_constraints[:4]) or "所需证据"
+        result["answer"] = (
+            f"当前检索到的证据不足以可靠回答该请求，缺少：{missing}。"
+            if is_chinese
+            else f"The available evidence is insufficient to answer this reliably. Missing: {missing}."
+        )
+        control["verification"] = outcome.to_dict()
+        control["final_executor"] = "evidence_insufficient"
+        control["evidence_insufficient"] = True
+        result["control"] = control
+        return result
+
+    def _attach_orchestration_metadata(self, result: Dict[str, Any]) -> None:
+        """Add bounded plan facts without altering compatibility result fields."""
+        if not self.orchestration_config["enabled"]:
+            return
+        control = result.setdefault("control", {})
+        analysis = self._current_analysis
+        plan = self._current_plan
+        ledger = self._current_ledger
+        trace = self._current_execution_trace
+        if plan is None and analysis is not None:
+            decision = control.get("decision") if isinstance(control.get("decision"), dict) else {}
+            plan = self._prepare_query_plan(
+                needs_evidence=bool(decision.get("needs_search")),
+                has_local_docs=bool(control.get("local_docs_present")),
+            )
+            ledger = self._current_ledger
+            trace = self._current_execution_trace
+        if analysis is not None:
+            control.setdefault("query_analysis", analysis.to_dict())
+        if plan is not None:
+            control.setdefault("query_plan", plan.to_dict())
+        if ledger is not None:
+            if not ledger.entries:
+                ledger.ingest(result.get("evidence_items") or [])
+                ledger.apply_limits(max_items=plan.result_budget if plan else None)
+            control.setdefault("evidence_coverage", ledger.coverage_summary())
+        if self._current_verification is not None:
+            control.setdefault("verification", self._current_verification.to_dict())
+        if trace is not None:
+            control.setdefault("execution_trace", trace.to_dict())
+            control.setdefault(
+                "providers",
+                {
+                    "configured": list(trace.configured),
+                    "requested": list(trace.requested),
+                    "eligible": list(trace.eligible),
+                    "executed": list(trace.executed),
+                },
+            )
 
     def _build_decision_chain(self):
         """Build the routing decision chain."""
@@ -457,10 +752,20 @@ Always answer in the same language as the user's question."""
         domain_result: Optional[Dict[str, Any]] = None,
         enable_domain: bool = False,
         tracer: Optional[Any] = None,
+        query_plan: Optional[QueryPlan] = None,
+        evidence_ledger: Optional[EvidenceLedger] = None,
+        execution_trace: Optional[QueryExecutionTrace] = None,
+        plan_controller: Optional[PlanController] = None,
     ) -> Optional[Dict[str, Any]]:
         pipeline = self._get_primary_rag(snapshot, tracer=tracer)
         if not pipeline:
             return None
+
+        if self.orchestration_config["enabled"] and query_plan is None:
+            query_plan = self._current_plan
+            evidence_ledger = evidence_ledger or self._current_ledger
+            execution_trace = execution_trace or self._current_execution_trace
+            plan_controller = plan_controller or self._current_plan_controller
 
         return pipeline.answer(
             query,
@@ -481,6 +786,10 @@ Always answer in the same language as the user's question."""
             domain_result=domain_result,
             enable_domain=enable_domain,
             tracer=tracer,
+            query_plan=query_plan,
+            evidence_ledger=evidence_ledger,
+            execution_trace=execution_trace,
+            plan_controller=plan_controller,
         )
 
     def answer(
@@ -498,6 +807,7 @@ Always answer in the same language as the user's question."""
         images: Optional[List[Dict[str, str]]] = None,
         conversation_id: Optional[str] = None,
         tracer: Optional[Any] = None,
+        audit_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Answer a query using intelligent routing.
         
@@ -512,13 +822,35 @@ Always answer in the same language as the user's question."""
         previous answer, the request resumes the ReAct loop on the checkpointed
         conversation state instead of starting from scratch.
         """
-        tracer = ensure_tracer(tracer)
-        timing_recorder = TimingRecorder(enabled=self.show_timings)
+        audit_settings = resolve_audit_settings(self.config)
+        audit_override = (audit_mode or "").strip().lower()
+        if audit_override == "off":
+            audit_active = False
+            audit_external = False
+        elif audit_override == "external":
+            audit_active = True
+            audit_external = True
+        else:
+            audit_active = bool(audit_settings.get("enabled"))
+            audit_external = False
+        self._audit_settings = audit_settings if audit_active else None
+        self._audit_external = audit_external
+
+        # JSON web requests do not provide the SSE tracer. Create one only when
+        # audit is enabled so their persisted records still contain workflow steps.
+        if audit_active and tracer is None:
+            tracer = WorkflowTracer()
+        else:
+            tracer = ensure_tracer(tracer)
+        self._current_tracer = tracer
+
+        timing_recorder = TimingRecorder(enabled=self.show_timings or audit_active)
         timing_recorder.start()
 
         # Conversation bookkeeping (per-request instance; orchestrator is built fresh)
         self._conversation_id = conversation_id
         self._conversation_query = query
+        self._conversation_allow_search = allow_search
         self._current_time_constraint = None
         self._topic_reset = False
 
@@ -534,6 +866,12 @@ Always answer in the same language as the user's question."""
         if time_constraint.days:
             current_date = get_current_date_str()
             effective_query = f"{effective_query} (Current Date: {current_date})"
+
+        self._initialize_orchestration(
+            query,
+            allow_search=allow_search,
+            time_constraint=time_constraint,
+        )
 
         # Conversation resume: a follow-up turn continues on the checkpointed state
         resume_result = self._maybe_resume_conversation(
@@ -583,6 +921,11 @@ Always answer in the same language as the user's question."""
         if not allow_search:
             tracer.begin("intent", "意图理解")
             tracer.end("intent", detail="联网已关闭，使用本地知识")
+            self._prepare_query_plan(
+                needs_evidence=False,
+                has_local_docs=has_docs,
+                result_budget=total_limit,
+            )
             response = self._handle_local_only(
                 query, snapshot, has_docs, num_retrieved_docs,
                 max_tokens, temperature, timing_recorder,
@@ -592,30 +935,94 @@ Always answer in the same language as the user's question."""
 
         # Domain classification and API handling
         tracer.begin("intent", "意图理解")
-        domain, sources = self.source_selector.select_sources(
-            effective_query, timing_recorder=timing_recorder
-        )
+        if self._should_select_domain_sources(effective_query):
+            domain, sources = self.source_selector.select_sources(
+                effective_query, timing_recorder=timing_recorder
+            )
+        else:
+            domain, sources = "general", []
         domain_label = domain if domain and str(domain).lower() != "general" else None
-        tracer.end("intent", detail=f"识别领域：{domain_label}" if domain_label else "通用问题")
-        enhanced_query = self.source_selector.generate_domain_specific_query(
-            effective_query, domain
-        )
-        
-        # For queries with finance keywords, use original query to preserve time expressions
-        # like "前三年" which yfinance needs for proper date range parsing
+
         finance_keywords = ["股价", "stock", "股票", "市值", "market cap", "收益", "revenue",
                            "英伟达", "nvidia", "nvda", "英特尔", "intel", "intc", "amd",
                            "苹果", "apple", "aapl", "微软", "microsoft", "msft"]
         has_finance_keywords = any(kw in query.lower() for kw in finance_keywords)
-        finance_query = query if has_finance_keywords else effective_query
-        
-        tracer.begin("domain_api", "领域数据查询", detail=domain_label or "通用")
-        domain_api_result = self.source_selector.fetch_domain_data(
-            finance_query, domain, timing_recorder=timing_recorder
+        structured_domains = {"weather", "transportation", "finance", "sports", "location"}
+        domain_api_hint = domain_label if domain_label in structured_domains else None
+        if domain_label == "temporal_change" and has_finance_keywords:
+            domain_api_hint = "finance"
+        analysis = self._current_analysis
+        if (
+            domain_label == "temporal_change"
+            and not has_finance_keywords
+            and analysis is not None
+            and not analysis.constraints.get("temporal_required")
+        ):
+            # A source classifier's broad comparison label cannot create a
+            # temporal route when shared analysis found no explicit time scope.
+            domain = "general"
+            domain_label = None
+            sources = []
+        tracer.end("intent", detail=f"识别领域：{domain_label}" if domain_label else "通用问题")
+        enhanced_query = (
+            self.source_selector.generate_domain_specific_query(effective_query, domain_api_hint)
+            if domain_api_hint
+            else effective_query
         )
+        
+        # Domain selection is only a source hint. The plan keeps it from
+        # becoming an untracked side channel and gates critical ambiguity before
+        # any provider receives a guessed entity.
+        analysis_requires_evidence = bool(
+            self._current_analysis and self._current_analysis.requires_evidence
+        )
+        plan = self._prepare_query_plan(
+            needs_evidence=analysis_requires_evidence or bool(domain_api_hint),
+            has_local_docs=has_docs,
+            domain_hint=domain_api_hint,
+            result_budget=total_limit,
+        )
+        if plan and plan.clarification_required:
+            return self._finalize_response(
+                self._build_clarification_response(query, has_local_docs=has_docs),
+                timing_recorder,
+            )
+
+        # For finance queries preserve time expressions that the structured
+        # source selector understands. The call itself remains a plan step.
+        finance_query = query if has_finance_keywords else effective_query
+        domain_api_domain = domain_api_hint or domain
+        domain_step = plan.step_for_kind(PlanStepKind.DOMAIN_API) if plan else None
+        domain_api_result: Optional[Dict[str, Any]] = None
+        tracer.begin("domain_api", "领域数据查询", detail=domain_label or "通用")
+        if domain_step is not None and self._current_plan_controller is not None:
+            def fetch_domain(step: Any) -> PlanStepResult:
+                payload = self.source_selector.fetch_domain_data(
+                    finance_query,
+                    domain_api_domain,
+                    timing_recorder=timing_recorder,
+                )
+                return PlanStepResult(
+                    payload=payload,
+                    providers=[f"domain:{domain_api_hint or domain_label or domain or 'general'}"],
+                    attempts=[{"provider": f"domain:{domain_api_hint or domain_label or domain or 'general'}", "status": "done"}],
+                )
+
+            domain_step_result = self._current_plan_controller.run_step(domain_step, fetch_domain)
+            if isinstance(domain_step_result.payload, dict):
+                domain_api_result = domain_step_result.payload
+            elif domain_step_result.status not in {"skipped", "done"}:
+                tracer.error("domain_api", detail=domain_step_result.reason or domain_step_result.status)
+        elif not self.orchestration_config["enabled"]:
+            domain_api_result = self.source_selector.fetch_domain_data(
+                finance_query, domain_api_domain, timing_recorder=timing_recorder
+            )
+        else:
+            tracer.skip("domain_api", "领域数据查询", detail="计划未启用领域数据")
+
         if domain_api_result and domain_api_result.get("handled"):
             tracer.end("domain_api", detail="已获取领域数据")
-        else:
+        elif domain_step is not None:
             tracer.end("domain_api", detail="无需领域数据", status="skipped")
 
         should_continue = domain_api_result.get("continue_search", False) if domain_api_result else False
@@ -623,9 +1030,20 @@ Always answer in the same language as the user's question."""
         if domain_api_result and domain_api_result.get("handled") and domain_api_result.get("answer") and not should_continue:
             tracer.begin("domain_answer", "组织领域回答")
             response = self._handle_domain_api(
-                query, domain, sources, enhanced_query,
+                query, domain_api_domain, sources, enhanced_query,
                 domain_api_result, has_docs, allow_search, force_search, timing_recorder
             )
+            if self._current_ledger is not None:
+                self._current_ledger.ingest(
+                    response.get("evidence_items") or [],
+                    default_step_id=domain_step.step_id if domain_step else None,
+                )
+                self._current_ledger.apply_limits(max_items=plan.result_budget if plan else total_limit)
+                response["evidence_items"] = [
+                    item for item in self._current_ledger.retained_items() if isinstance(item, dict)
+                ]
+                if self._current_execution_trace is not None:
+                    self._current_execution_trace.record_ledger(self._current_ledger)
             tracer.end("domain_answer", detail=domain_label or str(domain))
             return self._finalize_response(response, timing_recorder)
         
@@ -633,6 +1051,15 @@ Always answer in the same language as the user's question."""
         if not force_search:
             tracer.begin("route", "路由决策")
             decision = self._make_routing_decision(effective_query, timing_recorder)
+            if (
+                not decision.get("needs_search")
+                and self._current_analysis is not None
+                and self._current_analysis.requires_evidence
+            ):
+                decision = dict(decision)
+                decision["needs_search"] = True
+                decision["reason"] = "plan_requires_evidence"
+                decision["direct_answer"] = None
             tracer.end(
                 "route",
                 detail="需要联网检索" if decision["needs_search"] else "无需检索，直接回答",
@@ -660,6 +1087,21 @@ Always answer in the same language as the user's question."""
             tracer.skip("route", "路由决策", detail="已跳过：强制联网")
 
         # Search is needed
+        if (
+            self._current_plan is None
+            or self._current_plan.step_for_kind(PlanStepKind.WEB_SEARCH) is None
+        ):
+            plan = self._prepare_query_plan(
+                needs_evidence=True,
+                has_local_docs=has_docs,
+                domain_hint=domain_label,
+                result_budget=total_limit,
+            )
+            if plan and plan.clarification_required:
+                return self._finalize_response(
+                    self._build_clarification_response(query, has_local_docs=has_docs),
+                    timing_recorder,
+                )
         if not self.search_client:
             tracer.skip("search", "联网检索", detail="搜索不可用，回退本地模式")
             response = self._handle_search_unavailable(
@@ -674,8 +1116,28 @@ Always answer in the same language as the user's question."""
         # Generate keywords
         tracer.begin("keywords", "生成检索词")
         keyword_info = self._generate_keywords(effective_query, timing_recorder)
-        keywords = keyword_info.get("keywords") or [effective_query]
-        search_query = " ".join(keywords).strip() or effective_query
+        keywords = [str(value).strip() for value in (keyword_info.get("keywords") or []) if str(value).strip()]
+        plan_analysis = (
+            self._current_plan.analysis
+            if self._current_plan is not None
+            else self._current_analysis
+        )
+        deterministic_fallback = (
+            deterministic_query_for_plan(plan_analysis)
+            if plan_analysis is not None
+            else effective_query
+        )
+        if not keywords:
+            fallback_query = deterministic_fallback
+            keywords = [fallback_query]
+            keyword_info = dict(keyword_info)
+            keyword_info["fallback_used"] = True
+            keyword_info["fallback_query"] = fallback_query
+        search_query = " ".join(keywords).strip() or deterministic_fallback
+        if self._current_plan is not None:
+            web_step = self._current_plan.step_for_kind(PlanStepKind.WEB_SEARCH)
+            if web_step is not None:
+                web_step.query = search_query
         tracer.end("keywords", detail="、".join(str(k) for k in keywords[:4]))
         
         # Execute search RAG
@@ -694,7 +1156,7 @@ Always answer in the same language as the user's question."""
             freshness=time_constraint.freshness if time_constraint.days else None,
             date_restrict=time_constraint.google_date_restrict if time_constraint.days else None,
             extra_context=domain_api_result.get("answer") if domain_api_result and should_continue else None,
-            domain=domain,
+            domain=domain_api_domain,
             domain_result=domain_api_result,
             enable_domain=bool(domain_api_result and should_continue),
             tracer=tracer,
@@ -718,6 +1180,7 @@ Always answer in the same language as the user's question."""
             "local_docs_present": has_docs,
             "search_allowed": True,
             "domain": domain,
+            "domain_api": domain_api_hint,
             "selected_sources": sources,
             "enhanced_query": enhanced_query,
             "search_total_limit": total_limit,
@@ -983,12 +1446,20 @@ Always answer in the same language as the user's question."""
         """Handle domain-specific API responses."""
         answer = domain_api_result.get("answer", "")
         domain_source = DomainEvidenceSource(self.source_selector)
+        domain_step = (
+            self._current_plan.step_for_kind(PlanStepKind.DOMAIN_API)
+            if self._current_plan is not None
+            else None
+        )
         domain_items = domain_source.retrieve(
             query,
             RetrievalOptions(
                 metadata={
                     "domain": domain,
                     "domain_result": domain_api_result,
+                    "originating_plan_step": domain_step.step_id if domain_step else None,
+                    "source_tier": "authoritative",
+                    "retrieval_kind": "domain_api",
                 }
             ),
         )
@@ -1188,6 +1659,26 @@ Always answer in the same language as the user's question."""
         control.setdefault("evidence_source_types_used", result.get("evidence_source_types_used") or [])
         
         result["control"] = control
+
+        plan = self._current_plan
+        if (
+            plan is not None
+            and plan.analysis.requires_evidence
+            and self._current_verification is None
+        ):
+            self._verify_current_plan(result)
+        if (
+            self.orchestration_config["enforce_verification"]
+            and self._current_verification is not None
+            and self._current_verification.status == VerificationStatus.EVIDENCE_INSUFFICIENT
+            and bool((result.get("control") or {}).get("search_performed"))
+        ):
+            result = self._mark_evidence_insufficient(
+                result,
+                result.setdefault("control", {}),
+                self._current_verification,
+            )
+        self._attach_orchestration_metadata(result)
         
         # Add timing information
         if timing_recorder.enabled:
@@ -1199,6 +1690,7 @@ Always answer in the same language as the user's question."""
                 result["response_times"] = timing_payload
 
         self._record_conversation_turn(result.get("answer", ""))
+        self._record_audit_turn(result)
         return result
 
     # ------------------------------------------------------------------
@@ -1224,6 +1716,30 @@ Always answer in the same language as the user's question."""
             )
         except Exception as exc:  # noqa: BLE001 - recording must never break a response
             print(f"[conversation] record_turn failed: {exc}")
+
+    def _record_audit_turn(self, result: Dict[str, Any]) -> None:
+        """Persist this turn's process audit when enabled (all execution paths)."""
+        settings = getattr(self, "_audit_settings", None)
+        if not settings or getattr(self, "_audit_external", False):
+            return
+        try:
+            tracer = getattr(self, "_current_tracer", None)
+            events = list(getattr(tracer, "events", None) or [])
+            recorder = AuditRecorder(
+                settings.get("dir"),
+                include_answer=bool(settings.get("include_answer", True)),
+                max_files=int(settings.get("max_files", 200)),
+                max_bytes_per_record=int(settings.get("max_bytes_per_record", 65536)),
+            )
+            recorder.record_turn(
+                conversation_id=getattr(self, "_conversation_id", None),
+                query=getattr(self, "_conversation_query", "") or "",
+                allow_search=bool(getattr(self, "_conversation_allow_search", True)),
+                events=events,
+                result=result,
+            )
+        except Exception as exc:  # noqa: BLE001 - audit must never break a response
+            print(f"[audit] record failed: {exc}")
 
     def _classify_followup_intent(self, query: str, recent_turns: List[Dict[str, Any]]) -> str:
         """Classify a follow-up turn as ``continuation`` or ``new_topic``.
@@ -1352,7 +1868,10 @@ Always answer in the same language as the user's question."""
         control.setdefault("judge_source", "human_feedback")
         response["control"] = control
         self._record_conversation_turn(response.get("answer", ""))
-        return self._attach_timing(response, timing_recorder)
+        response = self._attach_timing(response, timing_recorder)
+        self._attach_orchestration_metadata(response)
+        self._record_audit_turn(response)
+        return response
 
     def _attach_timing(self, result: Dict[str, Any], timing_recorder: TimingRecorder) -> Dict[str, Any]:
         """Attach timing payload to a delegated result without double-counting."""
@@ -1540,6 +2059,14 @@ Always answer in the same language as the user's question."""
     ) -> Dict[str, Any]:
         """Run post-check and optionally escalate to ReAct fallback."""
         tracer = ensure_tracer(tracer)
+        plan_outcome = self._verify_current_plan(result)
+        if plan_outcome is not None:
+            control["verification"] = plan_outcome.to_dict()
+            if plan_outcome.status == VerificationStatus.CLARIFICATION_REQUIRED:
+                return self._build_clarification_response(
+                    query,
+                    has_local_docs=bool(control.get("local_docs_present")),
+                )
         postcheck_meta: Dict[str, Any]
         if not self.postcheck_config["enabled"]:
             tracer.skip("postcheck", "质量校验", detail="未启用")
@@ -1560,6 +2087,12 @@ Always answer in the same language as the user's question."""
             control["postcheck"] = postcheck_meta
             control["fallback_triggered"] = False
             control["final_executor"] = "default_pipeline"
+            if (
+                self.orchestration_config["enforce_verification"]
+                and plan_outcome is not None
+                and plan_outcome.status == VerificationStatus.EVIDENCE_INSUFFICIENT
+            ):
+                return self._mark_evidence_insufficient(result, control, plan_outcome)
             return result
 
         verdict = screen_search_answer(
@@ -1590,13 +2123,33 @@ Always answer in the same language as the user's question."""
         control["postcheck"] = postcheck_meta
 
         fallback_enabled = self.postcheck_config["react_fallback"]["enabled"]
-        if not verdict.should_fallback_to_react or not verdict.recoverable or not fallback_enabled:
+        verification_blocks_react = bool(
+            plan_outcome is not None
+            and plan_outcome.status in {
+                VerificationStatus.CLARIFICATION_REQUIRED,
+                VerificationStatus.EVIDENCE_INSUFFICIENT,
+            }
+        )
+        if (
+            not verdict.should_fallback_to_react
+            or not verdict.recoverable
+            or not fallback_enabled
+            or verification_blocks_react
+        ):
             passes = getattr(verdict, "passes_postcheck", True)
             tracer.end("postcheck", detail="通过" if passes else "未通过，保持原答案")
             control["fallback_triggered"] = False
             control["final_executor"] = "default_pipeline"
             if verdict.should_fallback_to_react and not fallback_enabled:
                 control["fallback_reason"] = "react_fallback_disabled"
+            if verification_blocks_react:
+                control["fallback_reason"] = "plan_verification_nonrecoverable"
+            if (
+                self.orchestration_config["enforce_verification"]
+                and plan_outcome is not None
+                and plan_outcome.status == VerificationStatus.EVIDENCE_INSUFFICIENT
+            ):
+                return self._mark_evidence_insufficient(result, control, plan_outcome)
             return result
 
         fallback_orchestrator = self._get_react_fallback_orchestrator()
@@ -1605,6 +2158,12 @@ Always answer in the same language as the user's question."""
             control["fallback_triggered"] = False
             control["fallback_reason"] = "react_fallback_unavailable"
             control["final_executor"] = "default_pipeline"
+            if (
+                self.orchestration_config["enforce_verification"]
+                and plan_outcome is not None
+                and plan_outcome.status == VerificationStatus.EVIDENCE_INSUFFICIENT
+            ):
+                return self._mark_evidence_insufficient(result, control, plan_outcome)
             return result
 
         tracer.end("postcheck", detail="未通过，转入深度检索")
@@ -1644,6 +2203,12 @@ Always answer in the same language as the user's question."""
         )
         max_iterations = self.postcheck_config["react_fallback"]["max_iterations"]
         tracer.end("react", detail=f"最多 {max_iterations} 轮迭代")
+        if self._current_execution_trace is not None:
+            self._current_execution_trace.record_recovery(
+                executor="react_fallback",
+                status="done",
+                reason=verdict.reason,
+            )
         fallback_control = fallback_result.setdefault("control", {})
         fallback_control["postcheck"] = postcheck_meta
         fallback_control["fallback_triggered"] = True

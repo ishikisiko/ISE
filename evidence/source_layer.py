@@ -5,10 +5,13 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from langchain.langchain_support import Document, LangChainVectorStore
 from search.search import SearchClient, SearchHit
+from utils.query_orchestration import canonical_reference
+
+if TYPE_CHECKING:
+    from langchain.langchain_support import Document, LangChainVectorStore
 
 
 class EvidenceSourceType(str, Enum):
@@ -84,7 +87,12 @@ def evidence_items_to_search_hits(items: List[EvidenceItem]) -> List[SearchHit]:
     return hits
 
 
-def evidence_items_to_documents(items: List[EvidenceItem]) -> List[Document]:
+def evidence_items_to_documents(items: List[EvidenceItem]) -> List["Document"]:
+    # Loading ``langchain.langchain_support`` at module import time triggers
+    # the package's orchestration exports.  Keep the conversion dependency at
+    # its use boundary so the standalone evidence contract remains importable.
+    from langchain.langchain_support import Document
+
     docs: List[Document] = []
     for item in items:
         if item.source_type != EvidenceSourceType.LOCAL.value:
@@ -128,6 +136,22 @@ def build_evidence_summary(items: List[EvidenceItem], limit: int = 8) -> str:
     return "\n".join(lines)
 
 
+def _plan_provenance(options: RetrievalOptions) -> Dict[str, Any]:
+    """Copy only plan metadata that downstream fusion and audit may expose."""
+    metadata = options.metadata or {}
+    return {
+        key: metadata[key]
+        for key in (
+            "originating_plan_step",
+            "source_tier",
+            "retrieval_kind",
+            "content_date",
+            "covered_claims",
+        )
+        if metadata.get(key) is not None
+    }
+
+
 class EvidenceSource(ABC):
     source_type: EvidenceSourceType
     source_id: str
@@ -159,7 +183,14 @@ class WebEvidenceSource(EvidenceSource):
         *,
         rank: Optional[int] = None,
         score: Optional[float] = None,
+        provenance: Optional[Dict[str, Any]] = None,
     ) -> EvidenceItem:
+        metadata = {
+            "search_hit": asdict(hit),
+            "display_name": self.display_name,
+            "canonical_reference": canonical_reference(hit.url),
+        }
+        metadata.update(provenance or {})
         return EvidenceItem(
             source_type=self.source_type.value,
             source_id=self.source_id,
@@ -167,13 +198,21 @@ class WebEvidenceSource(EvidenceSource):
             content=hit.snippet or hit.title or hit.url,
             reference=hit.url,
             snippet=hit.snippet or hit.title or hit.url,
-            metadata={"search_hit": asdict(hit), "display_name": self.display_name},
+            metadata=metadata,
             score=score,
             rank=rank,
         )
 
-    def hits_to_items(self, hits: List[SearchHit]) -> List[EvidenceItem]:
-        return [self.hit_to_item(hit, rank=index) for index, hit in enumerate(hits, start=1)]
+    def hits_to_items(
+        self,
+        hits: List[SearchHit],
+        *,
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> List[EvidenceItem]:
+        return [
+            self.hit_to_item(hit, rank=index, provenance=provenance)
+            for index, hit in enumerate(hits, start=1)
+        ]
 
     def retrieve(self, query: str, options: RetrievalOptions) -> List[EvidenceItem]:
         hits = self.search_client.search(
@@ -183,7 +222,7 @@ class WebEvidenceSource(EvidenceSource):
             freshness=options.freshness,
             date_restrict=options.date_restrict,
         )
-        return self.hits_to_items(hits)
+        return self.hits_to_items(hits, provenance=_plan_provenance(options))
 
 
 class LocalEvidenceSource(EvidenceSource):
@@ -220,6 +259,8 @@ class LocalEvidenceSource(EvidenceSource):
         if not self.data_path or not os.path.isdir(self.data_path):
             return None
         if self.vector_store is None:
+            from langchain.langchain_support import LangChainVectorStore
+
             self.vector_store = LangChainVectorStore(
                 model_name=self.embedding_model,
                 chunk_size=self.chunk_size,
@@ -248,7 +289,11 @@ class LocalEvidenceSource(EvidenceSource):
                     content=doc.content,
                     reference=source,
                     snippet=_preview_text(doc.content),
-                    metadata={"source": source},
+                    metadata={
+                        "source": source,
+                        "canonical_reference": canonical_reference(source),
+                        **_plan_provenance(options),
+                    },
                     score=score,
                     rank=index,
                 )
@@ -308,7 +353,9 @@ class DomainEvidenceSource(EvidenceSource):
             "handled": (domain_result or {}).get("handled"),
             "continue_search": (domain_result or {}).get("continue_search"),
             "data": raw_data,
+            "canonical_reference": canonical_reference(reference),
         }
+        payload.update(_plan_provenance(options))
         return [
             EvidenceItem(
                 source_type=self.source_type.value,

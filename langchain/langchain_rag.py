@@ -12,7 +12,7 @@ import time
 import logging
 import re
 from dataclasses import asdict
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
 
 from langchain_core.documents import Document as LCDocument
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -46,8 +46,17 @@ from langchain.langchain_tools import SearchRetriever, WebSearchTool
 from search.search import SearchClient, SearchHit, GoogleSearchClient
 from utils.timing_utils import TimingRecorder
 from utils.workflow_trace import ensure_tracer
+from utils.query_orchestration import (
+    EvidenceLedger,
+    PlanController,
+    PlanStepKind,
+    PlanStepResult,
+    QueryExecutionTrace,
+    QueryPlan,
+    VerificationStatus,
+    verify_evidence_plan,
+)
 from utils.query_config import (
-    TEMPORAL_CHANGE_KEYWORDS,
     TIME_RANGE_CONFIG,
     QUERY_SIMPLIFICATION_PROMPT,
     DEFAULT_CONFIG
@@ -374,6 +383,7 @@ class SearchRAGChain:
         extra_context: Optional[str],
         enable_domain: bool,
         timing_recorder: Optional[TimingRecorder],
+        plan_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[EvidenceItem], Optional[Dict[str, Any]]]:
         """Normalize domain API evidence into unified evidence items."""
         if not (domain_result or extra_context or (enable_domain and self.source_selector)):
@@ -386,6 +396,7 @@ class SearchRAGChain:
                 "domain": domain,
                 "domain_result": domain_result,
                 "extra_context": extra_context,
+                **(plan_metadata or {}),
             },
         )
         items = self.domain_source.retrieve(query, options)
@@ -420,6 +431,10 @@ class SearchRAGChain:
         extra_context: Optional[str] = None,
         enable_domain: bool = False,
         tracer: Optional[Any] = None,
+        query_plan: Optional[QueryPlan] = None,
+        evidence_ledger: Optional[EvidenceLedger] = None,
+        execution_trace: Optional[QueryExecutionTrace] = None,
+        plan_controller: Optional[PlanController] = None,
     ) -> Dict[str, Any]:
         """Retrieve and normalize evidence from enabled first-class sources."""
         tracer = ensure_tracer(tracer)
@@ -430,6 +445,93 @@ class SearchRAGChain:
         fusion_meta: List[Dict[str, Any]] = []
         search_error: Optional[str] = None
         search_warnings: List[str] = []
+        search_timings: List[Dict[str, Any]] = []
+        search_attempts: List[Dict[str, Any]] = []
+        executed_providers: List[str] = []
+
+        domain_step = query_plan.step_for_kind(PlanStepKind.DOMAIN_API) if query_plan else None
+        web_step = query_plan.step_for_kind(PlanStepKind.WEB_SEARCH) if query_plan else None
+        local_step = query_plan.step_for_kind(PlanStepKind.LOCAL_RETRIEVAL) if query_plan else None
+        temporal_step = (
+            query_plan.step_for_kind(PlanStepKind.TEMPORAL_RECOVERY, include_recovery=True)
+            if query_plan
+            else None
+        )
+        if query_plan is not None:
+            enable_domain = bool(enable_domain and domain_step)
+            enable_search = bool(enable_search and web_step)
+            enable_local_docs = bool(enable_local_docs and local_step)
+            if not domain_step:
+                domain_result = None
+                extra_context = None
+
+        def execute_step(
+            step: Optional[Any],
+            executor: Callable[[Any], PlanStepResult],
+        ) -> PlanStepResult:
+            """Run a plan step or preserve the legacy behavior without a plan."""
+            if step is None:
+                return executor(None)
+            if plan_controller is not None:
+                return plan_controller.run_step(step, executor)
+            if execution_trace is not None:
+                execution_trace.begin(step)
+            try:
+                result = executor(step)
+                if not isinstance(result, PlanStepResult):
+                    raise TypeError("Plan executors must return PlanStepResult.")
+            except Exception as exc:  # noqa: BLE001 - retrieval failures are response data
+                result = PlanStepResult(status="error", reason=str(exc))
+            if execution_trace is not None:
+                execution_trace.finish(
+                    step,
+                    status=result.status,
+                    providers=result.providers,
+                    attempts=result.attempts,
+                    item_count=len(result.items),
+                    reason=result.reason,
+                )
+            return result
+
+        def snapshot_provider_state(client: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+            timings_getter = getattr(client, "get_last_timings", None)
+            timings = list(timings_getter() or []) if callable(timings_getter) else []
+            errors_getter = getattr(client, "get_last_errors", None)
+            errors = list(errors_getter() or []) if callable(errors_getter) else []
+            return timings, errors
+
+        def record_provider_state(
+            timings: List[Dict[str, Any]],
+            errors: List[Dict[str, Any]],
+        ) -> tuple[List[str], List[Dict[str, Any]]]:
+            providers: List[str] = []
+            attempts: List[Dict[str, Any]] = []
+            for entry in timings:
+                if not isinstance(entry, dict):
+                    continue
+                provider = str(entry.get("source") or "").strip()
+                if provider and provider not in providers:
+                    providers.append(provider)
+                attempt: Dict[str, Any] = {
+                    "provider": provider or str(entry.get("label") or "search"),
+                    "status": "error" if entry.get("error") else "done",
+                }
+                if entry.get("duration_ms") is not None:
+                    attempt["duration_ms"] = entry.get("duration_ms")
+                if entry.get("fallback"):
+                    attempt["fallback"] = True
+                if entry.get("error"):
+                    attempt["reason"] = str(entry.get("error"))[:160]
+                attempts.append(attempt)
+            for entry in errors:
+                if not isinstance(entry, dict):
+                    continue
+                provider = str(entry.get("source") or "搜索服务")
+                detail = str(entry.get("error") or "未知错误")
+                search_warnings.append(f"{provider} 出现异常：{detail}")
+                if not any(item.get("provider") == provider and item.get("reason") == detail for item in attempts):
+                    attempts.append({"provider": provider, "status": "error", "reason": detail[:160]})
+            return providers, attempts
 
         domain_items, domain_result = self._collect_domain_evidence(
             query,
@@ -438,6 +540,15 @@ class SearchRAGChain:
             extra_context=extra_context,
             enable_domain=enable_domain,
             timing_recorder=timing_recorder,
+            plan_metadata=(
+                {
+                    "originating_plan_step": domain_step.step_id,
+                    "source_tier": "authoritative",
+                    "retrieval_kind": "domain_api",
+                }
+                if domain_step
+                else None
+            ),
         )
         if domain_items:
             active_sources.append(self.domain_source.describe_with_domain(domain or domain_items[0].metadata.get("domain")))
@@ -446,32 +557,102 @@ class SearchRAGChain:
         if enable_search:
             active_sources.append(self.web_source.describe())
             tracer.begin("search", "联网检索", detail=effective_query)
-            search_timings: List[Dict[str, Any]] = []
             hits_count = 0
-            try:
+            per_source_cap = per_source_limit or num_search_results
+
+            def retrieve_web(step: Any) -> PlanStepResult:
+                nonlocal rerank_meta, search_error, search_timings, search_attempts, executed_providers
                 per_source_cap = per_source_limit or num_search_results
                 fetch_limit = num_search_results
                 if self.reranker and hasattr(self.search_client, "clients"):
                     fetch_limit = per_source_cap * len(self.search_client.clients)
+                try:
+                    search_items = self.web_source.retrieve(
+                        effective_query,
+                        RetrievalOptions(
+                            num_results=fetch_limit,
+                            per_source_limit=per_source_cap,
+                            freshness=freshness,
+                            date_restrict=date_restrict,
+                            metadata={
+                                "originating_plan_step": step.step_id if step else None,
+                                "source_tier": "unknown",
+                                "retrieval_kind": "general_search",
+                            },
+                        ),
+                    )
+                    timings, errors = snapshot_provider_state(self.search_client)
+                    search_timings.extend(timings)
+                    providers, attempts = record_provider_state(timings, errors)
+                    executed_providers.extend(provider for provider in providers if provider not in executed_providers)
+                    search_attempts.extend(attempts)
+                    hits = evidence_items_to_search_hits(search_items)
+                    hits, rerank_meta = self._apply_rerank(query, hits, limit=num_search_results)
+                    return PlanStepResult(
+                        items=self.web_source.hits_to_items(
+                            hits,
+                            provenance={
+                                "originating_plan_step": step.step_id if step else None,
+                                "source_tier": "unknown",
+                                "retrieval_kind": "general_search",
+                            },
+                        ),
+                        providers=providers,
+                        attempts=attempts,
+                    )
+                except Exception as exc:  # noqa: BLE001 - preserve search failure in payload
+                    search_error = str(exc)
+                    timings, errors = snapshot_provider_state(self.search_client)
+                    search_timings.extend(timings)
+                    providers, attempts = record_provider_state(timings, errors)
+                    executed_providers.extend(provider for provider in providers if provider not in executed_providers)
+                    search_attempts.extend(attempts)
+                    return PlanStepResult(
+                        status="error",
+                        reason=search_error,
+                        providers=providers,
+                        attempts=attempts,
+                    )
 
-                search_items = self.web_source.retrieve(
-                    effective_query,
-                    RetrievalOptions(
-                        num_results=fetch_limit,
-                        per_source_limit=per_source_cap,
-                        freshness=freshness,
-                        date_restrict=date_restrict,
-                    ),
+            web_result = execute_step(web_step, retrieve_web)
+            web_items = list(web_result.items or [])
+            evidence_items.extend(web_items)
+            hits = evidence_items_to_search_hits(web_items)
+            hits_count = len(hits)
+            if web_result.status in {"error", "blocked", "skipped"} and not search_error:
+                search_error = web_result.reason or web_result.status
+
+            if temporal_step is not None and not search_error:
+                missing_years = self._detect_missing_years(
+                    query,
+                    hits,
+                    temporal_requested=True,
                 )
-                hits = evidence_items_to_search_hits(search_items)
+                if missing_years:
+                    logger.info(
+                        "Insufficient historical data found (missing: %s), performing granular search fallback.",
+                        missing_years,
+                    )
 
-                if self._is_temporal_change_query(query):
-                    missing_years = self._detect_missing_years(query, hits)
-                    if missing_years:
-                        logger.info(
-                            "Insufficient historical data found (missing: %s), performing granular search fallback.",
-                            missing_years,
+                    temporal_providers: List[str] = []
+                    temporal_attempts: List[Dict[str, Any]] = []
+
+                    def collect_temporal_attempts(
+                        timings: List[Dict[str, Any]],
+                        errors: List[Dict[str, Any]],
+                    ) -> None:
+                        providers, attempts = record_provider_state(timings, errors)
+                        search_timings.extend(timings)
+                        search_attempts.extend(attempts)
+                        temporal_attempts.extend(attempts)
+                        temporal_providers.extend(
+                            provider for provider in providers if provider not in temporal_providers
                         )
+                        executed_providers.extend(
+                            provider for provider in providers if provider not in executed_providers
+                        )
+
+                    def retrieve_temporal(step: Any) -> PlanStepResult:
                         granular_hits = self._perform_granular_search_fallback(
                             query,
                             effective_query,
@@ -481,29 +662,27 @@ class SearchRAGChain:
                             date_restrict,
                             timing_recorder,
                             missing_years=missing_years,
+                            attempt_collector=collect_temporal_attempts,
                         )
-                        hits.extend(granular_hits)
+                        return PlanStepResult(
+                            items=self.web_source.hits_to_items(
+                                granular_hits,
+                                provenance={
+                                    "originating_plan_step": step.step_id if step else None,
+                                    "source_tier": "unknown",
+                                    "retrieval_kind": "temporal_recovery",
+                                },
+                            ),
+                            providers=temporal_providers,
+                            attempts=temporal_attempts,
+                        )
 
-                hits, rerank_meta = self._apply_rerank(query, hits, limit=num_search_results)
-                hits_count = len(hits)
-                evidence_items.extend(self.web_source.hits_to_items(hits))
-            except Exception as exc:
-                search_error = str(exc)
-            finally:
-                timings_getter = getattr(self.search_client, "get_last_timings", None)
-                if callable(timings_getter):
-                    search_timings = list(timings_getter() or [])
-                    if timing_recorder:
-                        timing_recorder.extend_search_timings(search_timings)
+                    temporal_result = execute_step(temporal_step, retrieve_temporal)
+                    evidence_items.extend(temporal_result.items or [])
+                    hits_count = len(evidence_items_to_search_hits(evidence_items))
 
-            get_last_errors = getattr(self.search_client, "get_last_errors", None)
-            if callable(get_last_errors):
-                errors = get_last_errors() or []
-                for item in errors:
-                    source = str(item.get("source") or "搜索服务")
-                    detail = str(item.get("error") or "未知错误")
-                    search_warnings.append(f"{source} 出现异常：{detail}")
-
+            if timing_recorder and search_timings:
+                timing_recorder.extend_search_timings(search_timings)
             if search_error:
                 tracer.error("search", detail="检索异常")
             else:
@@ -528,15 +707,46 @@ class SearchRAGChain:
         if enable_local_docs and self.local_source.is_available():
             tracer.begin("local", "本地文档检索")
             active_sources.append(self.local_source.describe())
-            local_items = self.local_source.retrieve(
-                query,
-                RetrievalOptions(num_results=num_retrieved_docs),
-            )
-            evidence_items.extend(local_items)
-            tracer.end("local", detail=f"{len(local_items)} 个片段")
+
+            def retrieve_local(step: Any) -> PlanStepResult:
+                items = self.local_source.retrieve(
+                    query,
+                    RetrievalOptions(
+                        num_results=num_retrieved_docs,
+                        metadata={
+                            "originating_plan_step": step.step_id if step else None,
+                            "source_tier": "local",
+                            "retrieval_kind": "local_retrieval",
+                        },
+                    ),
+                )
+                return PlanStepResult(items=items, providers=[self.local_source.source_id])
+
+            local_result = execute_step(local_step, retrieve_local)
+            evidence_items.extend(local_result.items or [])
+            if local_result.status in {"error", "blocked", "skipped"}:
+                tracer.error("local", detail=local_result.reason or local_result.status)
+            else:
+                tracer.end("local", detail=f"{len(local_result.items)} 个片段")
 
         tracer.begin("rerank", "证据重排融合")
         evidence_items, fusion_meta = self._dedupe_and_rank_evidence(evidence_items)
+        if evidence_ledger is not None:
+            evidence_ledger.ingest(evidence_items)
+            evidence_ledger.apply_limits(
+                max_items=query_plan.result_budget if query_plan else num_search_results,
+            )
+            evidence_items = evidence_ledger.retained_items()
+            fusion_meta.extend(
+                {
+                    "reference": entry.canonical_reference,
+                    "decision": entry.decision,
+                    "reason": entry.reason,
+                }
+                for entry in evidence_ledger.entries
+            )
+            if execution_trace is not None:
+                execution_trace.record_ledger(evidence_ledger)
         tracer.end("rerank", detail=f"保留 {len(evidence_items)} 条证据")
         return {
             "effective_query": effective_query,
@@ -548,6 +758,10 @@ class SearchRAGChain:
             "rerank_meta": rerank_meta,
             "fusion_meta": fusion_meta,
             "domain_result": domain_result,
+            "search_provider_trace": {
+                "executed": executed_providers,
+                "attempts": search_attempts,
+            },
         }
     
     def _format_search_hits(self, hits: List[SearchHit]) -> str:
@@ -632,11 +846,6 @@ class SearchRAGChain:
         except Exception as exc:
             return hits, [{"error": str(exc)}]
 
-    def _is_temporal_change_query(self, query: str) -> bool:
-        """Check if query is related to temporal changes."""
-        query_lower = query.lower()
-        return any(keyword in query_lower for keyword in TEMPORAL_CHANGE_KEYWORDS)
-
     def _check_google_client_availability(self) -> Optional[Any]:
         """Check availability of Google search client."""
         # Check if search_client is CombinedSearchClient with clients
@@ -662,7 +871,13 @@ class SearchRAGChain:
         years_found = set(re.findall(year_pattern, combined_text))
         return years_found
 
-    def _detect_missing_years(self, query: str, hits: List[SearchHit]) -> List[str]:
+    def _detect_missing_years(
+        self,
+        query: str,
+        hits: List[SearchHit],
+        *,
+        temporal_requested: bool = False,
+    ) -> List[str]:
         """Detect which years from the specified time range are missing in the search results."""
         query_lower = query.lower()
         
@@ -679,8 +894,9 @@ class SearchRAGChain:
                 coverage_threshold = config["coverage_threshold"]
                 break
         
-        # Also check if it's a temporal change query
-        if not is_time_query and self._is_temporal_change_query(query):
+        # The caller can only set this after the plan selected temporal
+        # coverage.  Do not revive the old broad keyword-triggered behavior.
+        if temporal_requested:
             is_time_query = True
         
         if not is_time_query:
@@ -715,13 +931,28 @@ class SearchRAGChain:
         freshness: Optional[str],
         date_restrict: Optional[str],
         timing_recorder: Optional[TimingRecorder],
-        missing_years: Optional[List[str]] = None
+        missing_years: Optional[List[str]] = None,
+        attempt_collector: Optional[Callable[[List[Dict[str, Any]], List[Dict[str, Any]]], None]] = None,
     ) -> List[SearchHit]:
         """Perform granular search for historical data."""
         
         granular_hits = []
         google_client = self._check_google_client_availability()
         active_client = google_client if google_client else self.search_client
+
+        def run_granular_search(search_text: str, **kwargs: Any) -> List[SearchHit]:
+            """Capture every request before a later year query resets client state."""
+            try:
+                return active_client.search(search_text, **kwargs) or []
+            finally:
+                timings_getter = getattr(active_client, "get_last_timings", None)
+                timings = list(timings_getter() or []) if callable(timings_getter) else []
+                errors_getter = getattr(active_client, "get_last_errors", None)
+                errors = list(errors_getter() or []) if callable(errors_getter) else []
+                if attempt_collector is not None:
+                    attempt_collector(timings, errors)
+                elif timing_recorder is not None and timings:
+                    timing_recorder.extend_search_timings(timings)
         
         # Determine years to search
         if missing_years:
@@ -813,7 +1044,7 @@ class SearchRAGChain:
                                     "freshness": None,
                                     "date_restrict": None,
                                 }
-                                sq_hits = active_client.search(sq, **search_kwargs)
+                                sq_hits = run_granular_search(sq, **search_kwargs)
                                 granular_hits.extend(sq_hits)
                                 logger.info(f"Stock query '{sq}' found {len(sq_hits)} hits.")
                             except Exception as e:
@@ -841,7 +1072,7 @@ class SearchRAGChain:
                             if google_client:
                                 pass
                             
-                            year_hits = active_client.search(year_query, **search_kwargs)
+                            year_hits = run_granular_search(year_query, **search_kwargs)
                             granular_hits.extend(year_hits)
                             time.sleep(1)  # Avoid rate limits
                         except Exception as e:
@@ -859,7 +1090,7 @@ class SearchRAGChain:
                 if google_client:
                     pass
                     
-                year_hits = active_client.search(year_query, **search_kwargs)
+                year_hits = run_granular_search(year_query, **search_kwargs)
                 logger.info(f"Year {year} search found {len(year_hits)} hits.")
                 granular_hits.extend(year_hits)
                 time.sleep(1)  # Avoid rate limits
@@ -890,6 +1121,10 @@ class SearchRAGChain:
         domain_result: Optional[Dict[str, Any]] = None,
         enable_domain: bool = False,
         tracer: Optional[Any] = None,
+        query_plan: Optional[QueryPlan] = None,
+        evidence_ledger: Optional[EvidenceLedger] = None,
+        execution_trace: Optional[QueryExecutionTrace] = None,
+        plan_controller: Optional[PlanController] = None,
     ) -> Dict[str, Any]:
         """Answer a query using search + local docs RAG pipeline."""
         tracer = ensure_tracer(tracer)
@@ -909,11 +1144,53 @@ class SearchRAGChain:
             extra_context=extra_context,
             enable_domain=enable_domain,
             tracer=tracer,
+            query_plan=query_plan,
+            evidence_ledger=evidence_ledger,
+            execution_trace=execution_trace,
+            plan_controller=plan_controller,
         )
         evidence_items: List[EvidenceItem] = retrieval["evidence_items"]
         search_hits = evidence_items_to_search_hits(evidence_items)
         retrieved_docs = evidence_items_to_documents(evidence_items)
         domain_items = [item for item in evidence_items if item.source_type == "domain"]
+
+        # A planned authority/comparison query with no acceptable retained
+        # evidence must not spend another expensive model call producing an
+        # unsupported draft. The orchestrator turns this typed preflight into
+        # the compatible final control state and user-facing insufficiency.
+        preflight = None
+        if query_plan is not None and evidence_ledger is not None:
+            preflight = verify_evidence_plan(query_plan, evidence_ledger)
+            if preflight.status == VerificationStatus.EVIDENCE_INSUFFICIENT:
+                payload: Dict[str, Any] = {
+                    "query": query,
+                    "answer": "",
+                    "search_hits": [asdict(hit) for hit in search_hits],
+                    "retrieved_docs": [asdict(doc) for doc in retrieved_docs],
+                    "llm_raw": None,
+                    "rerank": retrieval["rerank_meta"] or None,
+                    "fusion": retrieval["fusion_meta"] or None,
+                    "evidence_items": [item.to_dict() for item in evidence_items],
+                    "evidence_summary": build_evidence_summary(evidence_items),
+                    "evidence_sources_active": retrieval["active_sources"],
+                    "evidence_sources_used": retrieval["used_sources"],
+                    "evidence_source_types_active": sorted(
+                        {item["source_type"] for item in retrieval["active_sources"]}
+                    ),
+                    "evidence_source_types_used": sorted(
+                        {item["source_type"] for item in retrieval["used_sources"]}
+                    ),
+                    "search_provider_trace": retrieval.get(
+                        "search_provider_trace",
+                        {"executed": [], "attempts": []},
+                    ),
+                    "verification_precheck": preflight.to_dict(),
+                }
+                if retrieval["search_error"]:
+                    payload["search_error"] = retrieval["search_error"]
+                if retrieval["search_warnings"]:
+                    payload["search_warnings"] = retrieval["search_warnings"]
+                return payload
 
         has_retrieval_context = bool(evidence_items)
         if has_retrieval_context:
@@ -1032,6 +1309,10 @@ class SearchRAGChain:
             "evidence_sources_used": retrieval["used_sources"],
             "evidence_source_types_active": sorted({item["source_type"] for item in retrieval["active_sources"]}),
             "evidence_source_types_used": sorted({item["source_type"] for item in retrieval["used_sources"]}),
+            "search_provider_trace": retrieval.get(
+                "search_provider_trace",
+                {"executed": [], "attempts": []},
+            ),
         }
         
         if retrieval["search_error"]:

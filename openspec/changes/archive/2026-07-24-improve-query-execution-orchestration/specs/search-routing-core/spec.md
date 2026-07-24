@@ -1,21 +1,4 @@
-# search-routing-core Specification
-
-## Purpose
-Define the shared routing core used by the default search pipeline across CLI and API entrypoints.
-
-## Requirements
-### Requirement: System SHALL use a unified routing core for default search handling
-系统 SHALL 为默认搜索主链路提供统一的查询路由核心，用于处理 small talk 判定、时间约束解析、领域分类、搜索决策和关键词生成。
-
-#### Scenario: Default CLI query uses shared routing core
-- **WHEN** CLI 通过默认主编排器处理查询
-- **THEN** 系统 SHALL 使用统一路由核心完成查询判定与搜索前决策
-- **AND** 系统 SHALL NOT 依赖一套与 Web 端分离的 legacy 路由实现
-
-#### Scenario: Default API query uses shared routing core
-- **WHEN** Web API 通过默认主编排器处理查询
-- **THEN** 系统 SHALL 使用与 CLI 默认主链路相同的统一路由核心
-- **AND** small talk、direct answer、domain routing 和 search routing 的语义 SHALL 保持一致
+## MODIFIED Requirements
 
 ### Requirement: Routing core SHALL produce deterministic routing outputs
 统一路由核心 SHALL 输出结构化且可复用的 `QueryAnalysis` 和 `QueryPlan` 或等价结果，至少包括是否需要搜索、领域执行提示、实体和约束摘要、证据策略、可执行步骤以及关键词或等价查询信息。
@@ -34,6 +17,8 @@ Define the shared routing core used by the default search pipeline across CLI an
 - **WHEN** 关键词生成发生模板、调用或解析错误，或返回空结果
 - **THEN** 系统 SHALL 在分析或 trace 中记录失败
 - **AND** 系统 SHALL 依据 `QueryPlan` 使用确定性后备查询而不是静默退化为不受约束的原始检索
+
+## ADDED Requirements
 
 ### Requirement: Routing core SHALL preserve constraints across downstream stages
 系统 SHALL 让后续来源选择、检索、融合和 post-check 消费同一分析约束，而不是在各阶段重复使用独立关键词逻辑。

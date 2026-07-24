@@ -1,21 +1,4 @@
-# unified-rag-execution Specification
-
-## Purpose
-Define the single primary RAG execution layer used by the default orchestrator for local, search, and hybrid execution.
-
-## Requirements
-### Requirement: Default pipeline SHALL use a single primary RAG execution layer
-系统 SHALL 为默认主编排器提供单一主 RAG 执行层，用于处理 local RAG、search RAG 以及 search+local 的混合执行，而不是长期并行维护两套主执行实现。
-
-#### Scenario: Default search path uses unified execution layer
-- **WHEN** 默认主编排器判定需要执行搜索增强回答
-- **THEN** 系统 SHALL 使用统一主 RAG 执行层完成搜索结果整合、可选本地文档检索和答案生成
-- **AND** 系统 SHALL NOT 在默认路径上并行依赖一套独立的 legacy SearchRAG 主实现
-
-#### Scenario: Search disabled path uses unified local execution semantics
-- **WHEN** 查询在搜索关闭的条件下执行
-- **THEN** 系统 SHALL 使用统一主执行层中的 local-only 语义处理本地文档检索或 direct fallback
-- **AND** CLI 与 API 的该路径行为 SHALL 保持一致
+## MODIFIED Requirements
 
 ### Requirement: Unified execution layer SHALL preserve required specialized search behavior
 统一主 RAG 执行层 SHALL 通过 `QueryPlan` 和证据策略保留所需的专门检索能力，并 SHALL 将专门行为作为受预算限制、可追溯的计划步骤执行。
@@ -34,6 +17,8 @@ Define the single primary RAG execution layer used by the default orchestrator f
 - **WHEN** 外部搜索不可用但本地文档或 direct answer 仍可用
 - **THEN** 系统 SHALL 使用统一主执行层定义的回退语义生成结果
 - **AND** 返回结构 SHALL 明确记录搜索不可用而非 silently dropping the failure
+
+## ADDED Requirements
 
 ### Requirement: Unified execution SHALL enforce plan budgets and replan only for declared gaps
 系统 SHALL 在查询、结果、时间和恢复次数预算内执行计划，并仅在验证或证据账本声明可恢复缺口时追加步骤。

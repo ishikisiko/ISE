@@ -1039,24 +1039,22 @@ class CombinedSearchClient(SearchClient):
         return list(self._last_errors)
     
     def _is_temporal_change_query(self, query: str) -> bool:
-        """检测查询是否与时间变化领域相关"""
-        temporal_change_keywords = [
-            # 教育排名相关
-            "大学", "高校", "学院", "学校", "排名", "QS", "THE", "ARWU", "US News",
-            "university", "college", "ranking", "rankings", "education", "higher education",
-            "香港中文大學", "香港科技大學", "香港大學", "CUHK", "HKUST", "HKU",
-            "香港中文大学", "香港科技大学", "香港大学",
-            # 时间变化相关
-            "最近10年", "过去10年", "10年", "十年", "历年", "历史", "变化", "趋势", "发展",
-            "10 years", "decade", "historical", "trend", "development", "evolution",
-            "对比", "比较", "变化趋势", "时间序列", "年度", "逐年",
-            "comparison", "compare", "trend over time", "time series", "yearly", "year by year",
-            # 其他可能的时间变化查询
-            "增长", "下降", "波动", "变化率", "增长率", "涨跌",
-            "growth", "decline", "fluctuation", "rate of change", "growth rate", "rise and fall"
-        ]
-        query_lower = query.lower()
-        return any(keyword in query_lower for keyword in temporal_change_keywords)
+        """Retain legacy ranking refinement only for explicit time requests.
+
+        The plan-aware RAG path owns temporal expansion.  This compatibility
+        refinement must not interpret a bare comparison, ranking, company, or
+        university word as a request for historical behavior.
+        """
+        return bool(
+            re.search(
+                r"(?:过去|最近|近)\s*(?:\d+|一|两|三|四|五|六|七|八|九|十)+\s*(?:年|个月|月|天|周)"
+                r"|(?:历年|历史|趋势|逐年|时间序列)"
+                r"|\b(?:last|past|over\s+the\s+last)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:years?|months?|weeks?|days?)\b"
+                r"|\b(?:historical|history|trend|time\s+series)\b",
+                query,
+                re.IGNORECASE,
+            )
+        )
     
     def _filter_and_rank_temporal_change_results(self, results: List[SearchHit], query: str) -> List[SearchHit]:
         """针对时间变化领域的搜索结果进行过滤和排序"""

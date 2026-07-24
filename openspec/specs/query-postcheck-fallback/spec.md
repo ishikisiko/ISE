@@ -4,30 +4,30 @@
 Define the default pipeline post-check stage and the rules for escalating to ReAct fallback with compatible evidence context and fallback metadata.
 ## Requirements
 ### Requirement: Default pipeline SHALL run post-check before returning search answers
-系统 SHALL 在统一默认搜索主链路生成首答后执行统一的 post-check 阶段，再决定是直接返回首答还是升级到补救路径。
+系统 SHALL 在有证据计划的默认搜索主链路生成首答后执行 plan-aware 验证，再决定直接返回、执行受限恢复、要求澄清或返回证据不足状态。
 
-#### Scenario: Unified default pipeline search answer passes post-check
-- **WHEN** 统一默认搜索主链路生成首答且 post-check 判定该回答满足需求
+#### Scenario: Search answer satisfies the plan
+- **WHEN** 默认搜索主链路生成首答且验证判定其满足计划约束和证据策略
 - **THEN** 系统 SHALL 直接返回首答
-- **AND** 返回结果 SHALL 记录 post-check verdict 和最终执行路径为默认主链路
+- **AND** 返回结果 SHALL 记录验证 verdict 和最终执行路径为默认主链路
 
-#### Scenario: Non-search paths can skip post-check
-- **WHEN** 查询走 small talk、直接回答、纯领域 API 直出或其他未进入统一搜索主链路的路径
-- **THEN** 系统 SHALL 支持跳过或短路 post-check
-- **AND** 返回结果 SHALL 明确记录未执行完整 post-check 的原因
+#### Scenario: Non-search paths can skip full verification
+- **WHEN** 查询走 small talk、直接回答、纯 local-only 或纯领域 API 直出等没有证据计划的路径
+- **THEN** 系统 SHALL 支持跳过或短路完整 plan-aware 验证
+- **AND** 返回结果 SHALL 明确记录未执行完整验证的原因
 
 ### Requirement: Post-check SHALL use rule-based screening before LLM judging
-系统 SHALL 先使用规则筛选识别明显失败或高风险回答，再决定是否调用 LLM judge。
+系统 SHALL 先使用规则将 draft answer、证据账本和 `QueryPlan` 对照，以识别缺失约束、覆盖不足、来源策略失败或其他高风险状态，再决定是否调用 LLM judge。
 
-#### Scenario: Hard rule failure triggers judge candidate state
-- **WHEN** 回答存在时间约束未覆盖、比较对象缺失、未支撑的具体数字、明显证据不足或其他预定义硬信号
-- **THEN** 系统 SHALL 将该回答标记为 post-check 高风险候选
-- **AND** 系统 SHALL 将命中的规则和对应原因写入 post-check 元数据
+#### Scenario: Plan constraint failure produces a typed verdict
+- **WHEN** 回答遗漏比较成员、时间范围、要求的来源层级、数值支持或其他计划约束
+- **THEN** 系统 SHALL 产生对应的 failure types 和 missing constraints
+- **AND** verdict SHALL 标明该失败是可恢复、需要澄清还是证据不足
 
-#### Scenario: No high-risk rule hit skips judge
-- **WHEN** 回答未命中任何需要进一步审查的规则
-- **THEN** 系统 SHALL 允许跳过 LLM judge
-- **AND** 系统 SHALL 直接将该回答视为通过 post-check
+#### Scenario: No structural rule failure is found
+- **WHEN** 回答和证据账本满足全部计划约束
+- **THEN** 系统 SHALL 将回答标记为规则通过
+- **AND** 系统 SHALL 仅按配置和风险条件调用可选 LLM judge
 
 ### Requirement: LLM judge SHALL return a structured verdict
 系统 SHALL 使用结构化输出的 LLM judge 判断回答是否满足 query 的最低完成条件，并决定是否适合 fallback 到 ReAct。
@@ -72,3 +72,16 @@ Define the default pipeline post-check stage and the rules for escalating to ReA
 #### Scenario: Returned from ReAct fallback
 - **WHEN** 系统触发 ReAct fallback 并返回 fallback 结果
 - **THEN** `control` SHALL 包含 post-check verdict、fallback reason 和 `final_executor=react_fallback`
+
+### Requirement: Verification SHALL direct bounded recovery or clarification from the plan
+系统 SHALL 根据 typed verification outcome 决定后续动作，且不得以无约束重复检索掩盖证据缺口。
+
+#### Scenario: Recoverable evidence gap remains within budget
+- **WHEN** verdict 识别到可由一个计划允许的受限步骤补齐的证据缺口，且预算尚未耗尽
+- **THEN** 系统 SHALL 执行该恢复步骤并重新验证
+- **AND** trace SHALL 记录恢复依据和结果
+
+#### Scenario: Critical ambiguity blocks recovery
+- **WHEN** verdict 识别到关键实体或约束歧义，且无法安全形成恢复步骤
+- **THEN** 系统 SHALL 返回 `clarification_required` 或等价状态
+- **AND** 系统 SHALL NOT 使用更多无约束网页搜索代替澄清

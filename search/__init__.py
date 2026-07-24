@@ -13,6 +13,18 @@ from .search import (
     FallbackSearchClient,
 )
 from .rerank import BaseReranker, Qwen3Reranker, RerankedHit
+from .reference_fetch import (
+    FIRECRAWL_SCRAPE_URL,
+    PARALLEL_EXTRACT_URL,
+    FirecrawlScrapeClient,
+    ParallelExtractClient,
+    ReferenceContent,
+    ReferenceExtraction,
+    ReferenceExtractor,
+    ReferenceExtractorRouter,
+    ReferenceFailure,
+    build_reference_extractors,
+)
 
 try:
     from .source_selector import IntelligentSourceSelector
@@ -36,6 +48,16 @@ __all__ = [
     "PrioritySearchClient",
     "CombinedSearchClient",
     "FallbackSearchClient",
+    "FIRECRAWL_SCRAPE_URL",
+    "PARALLEL_EXTRACT_URL",
+    "FirecrawlScrapeClient",
+    "ParallelExtractClient",
+    "ReferenceContent",
+    "ReferenceExtraction",
+    "ReferenceExtractor",
+    "ReferenceExtractorRouter",
+    "ReferenceFailure",
+    "build_reference_extractors",
     "BaseReranker",
     "Qwen3Reranker",
     "RerankedHit",

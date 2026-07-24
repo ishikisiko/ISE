@@ -1,8 +1,5 @@
-# evidence-fusion-pipeline Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change unify-evidence-sources. Update Purpose after archive.
-## Requirements
 ### Requirement: Default pipeline SHALL retrieve evidence through the unified EvidenceSource layer
 系统 SHALL 在默认主链路中根据 `QueryPlan` 通过统一来源层收集网页、领域和本地证据，并将每个结果归一化为可进入证据账本的 `EvidenceItem`。
 
@@ -34,18 +31,7 @@ TBD - created by archiving change unify-evidence-sources. Update Purpose after a
 - **THEN** 系统 SHALL 执行对应的受限计划步骤并进行统一后处理
 - **AND** 系统 SHALL NOT 从原始关键词隐式发起该专门行为
 
-### Requirement: Domain evidence SHALL support both direct answer and fusion modes
-系统 SHALL 允许领域 API 证据在适合直出时继续直接回答，同时在需要补检索或补证据时进入统一 fusion pipeline。
-
-#### Scenario: Domain API can short-circuit when no additional evidence is needed
-- **WHEN** 领域 API 已返回足以直接回答且无需继续搜索的结果
-- **THEN** 系统 SHALL 继续允许领域路径直接返回答案
-- **AND** 系统 SHALL 不要求所有领域查询都必须进入统一 fusion pipeline
-
-#### Scenario: Domain API enters fusion when additional evidence is needed
-- **WHEN** 领域 API 返回需要继续搜索、继续补证据或与本地文档联合判断的结果
-- **THEN** 系统 SHALL 将领域证据归一化为 `EvidenceItem` 并送入统一 fusion pipeline
-- **AND** 最终回答 SHALL 能整合领域与非领域来源的证据
+## ADDED Requirements
 
 ### Requirement: Evidence ledger SHALL report constraint coverage and retention decisions
 系统 SHALL 为每个最终或被拒绝的证据记录其覆盖的计划约束、来源层级以及保留、合并或拒绝原因。
@@ -59,4 +45,3 @@ TBD - created by archiving change unify-evidence-sources. Update Purpose after a
 - **WHEN** 证据与计划相关但不满足来源权威性、时间覆盖或其他接受策略
 - **THEN** 系统 SHALL 在账本中标记其受限或被拒绝状态
 - **AND** 验证阶段 SHALL 不将其计为满足该约束的证据
-

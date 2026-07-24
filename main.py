@@ -25,6 +25,8 @@ from orchestrators.smart_orchestrator import SmartSearchOrchestrator
 from utils.chunking import resolve_chunk_settings
 from utils.config_validation import configured_value
 from utils.temperature_config import get_temperature_for_task
+from utils.audit_log import AuditRecorder, resolve_audit_settings
+from utils.workflow_trace import WorkflowTracer
 
 # Import LangChain components for optional use
 try:
@@ -405,6 +407,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Conversation id for multi-turn follow-ups. Omit to start a new conversation; the generated id is printed for reuse.",
     )
+    parser.add_argument(
+        "--audit",
+        choices=["off", "file"],
+        default=None,
+        help="Process audit: 'file' persists per-turn workflow records to runtime/audit/, 'off' disables even if config enables it. Omit to follow config audit.enabled.",
+    )
     return parser.parse_args()
 
 
@@ -749,8 +757,22 @@ def main() -> None:
     
     show_timings = args.pretty
 
+    audit_settings = resolve_audit_settings(config, args.audit)
+    audit_active = bool(audit_settings.get("enabled"))
+
     # Check if legacy orchestrator should be used (LangChain is now the default)
     use_legacy = getattr(args, 'use_legacy', False)
+    audit_supported = not use_legacy and LANGCHAIN_AVAILABLE
+    if audit_active and not audit_supported:
+        print(
+            "[audit] legacy orchestrator has no tracing instrumentation; "
+            "audit disabled for this run",
+            file=sys.stderr,
+        )
+        audit_active = False
+    if audit_active:
+        # Collect timings for the persisted record without changing --pretty output.
+        show_timings = True
     
     if use_legacy:
         # Use legacy SmartSearchOrchestrator
@@ -869,16 +891,46 @@ def main() -> None:
     # Resolve conversation id: reuse provided, else mint a new one.
     conversation_id = args.conversation_id or f"cli-{uuid.uuid4().hex[:12]}"
 
-    result = orchestrator.answer(
-        args.query,
-        num_search_results=args.num_results,
-        num_retrieved_docs=args.num_results,
-        max_tokens=args.max_tokens,
-        temperature=effective_temperature,
-        allow_search=allow_search,
-        conversation_id=conversation_id,
-    )
+    answer_kwargs: Dict[str, Any] = {
+        "num_search_results": args.num_results,
+        "num_retrieved_docs": args.num_results,
+        "max_tokens": args.max_tokens,
+        "temperature": effective_temperature,
+        "allow_search": allow_search,
+    }
+    audit_tracer: Optional[WorkflowTracer] = None
+    if not use_legacy and LANGCHAIN_AVAILABLE:
+        answer_kwargs["conversation_id"] = conversation_id
+        if audit_active:
+            audit_tracer = WorkflowTracer()
+            answer_kwargs["tracer"] = audit_tracer
+            # The CLI owns the write for this run; the orchestrator still
+            # collects timings but must not write a duplicate record.
+            answer_kwargs["audit_mode"] = "external"
+        elif args.audit == "off":
+            # A CLI opt-out must suppress a config-enabled orchestrator hook.
+            answer_kwargs["audit_mode"] = "off"
+
+    result = orchestrator.answer(args.query, **answer_kwargs)
     result.setdefault("conversation_id", conversation_id)
+
+    if audit_active and audit_tracer is not None:
+        try:
+            recorder = AuditRecorder(
+                audit_settings["dir"],
+                include_answer=bool(audit_settings["include_answer"]),
+                max_files=int(audit_settings["max_files"]),
+                max_bytes_per_record=int(audit_settings["max_bytes_per_record"]),
+            )
+            recorder.record_turn(
+                conversation_id=conversation_id,
+                query=args.query,
+                allow_search=allow_search,
+                events=list(audit_tracer.events),
+                result=result,
+            )
+        except Exception as exc:  # noqa: BLE001 - audit must never break CLI output
+            print(f"[audit] record failed: {exc}", file=sys.stderr)
 
     # Check if there are any errors or warnings
     has_error = result.get("llm_error") is not None
@@ -887,7 +939,7 @@ def main() -> None:
     no_answer = result.get("answer") is None
 
     # If there are errors/warnings or no answer, output full JSON
-    timings_payload = result.get("response_times") if show_timings else None
+    timings_payload = result.get("response_times") if args.pretty else None
 
     if has_error or has_warning or no_answer:
         if args.pretty:
@@ -899,7 +951,7 @@ def main() -> None:
         print(result["answer"])
         if not args.conversation_id:
             print(f"\n[conversation_id] {conversation_id}（使用 --conversation-id {conversation_id} 继续追问）")
-        if show_timings and isinstance(timings_payload, dict):
+        if args.pretty and isinstance(timings_payload, dict):
             print("\n[响应时间]")
             total_ms = timings_payload.get("total_ms")
             if isinstance(total_ms, (int, float)):

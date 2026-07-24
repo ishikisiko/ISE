@@ -8,6 +8,24 @@
         "history_window": 5,
         "max_threads": 200
     },
+    "audit": {
+        "_comment": "Audit files contain queries and, by default, answers. They are retained under gitignored runtime/audit; set include_answer false or lower max_files for more restrictive handling.",
+        "enabled": false,
+        "dir": "runtime/audit",
+        "include_answer": true,
+        "max_files": 200,
+        "max_bytes_per_record": 65536
+    },
+    "orchestration": {
+        "_comment": "Shared analysis, bounded evidence plan, ledger, and verification. LLM analysis remains opt-in; insufficient planned evidence returns an explicit result rather than an unsupported factual draft.",
+        "enabled": true,
+        "enforce_verification": true,
+        "llm_analysis": false,
+        "query_budget": 3,
+        "result_budget": 8,
+        "time_budget_ms": 20000,
+        "recovery_budget": 1
+    },
     "postcheck": {
         "enabled": false,
         "log_verdicts": false,
@@ -87,6 +105,21 @@
         "timeout": 30,
         "mode": "fast",
         "max_chars_per_result": 1500
+    },
+    "parellel2": {
+        "_comment": "Parallel Extract for selected public URLs. The runtime also accepts the legacy bare API-key string already used by existing config.json files.",
+        "api_key": "YOUR_PARALLEL_API_KEY_HERE",
+        "base_url": "https://api.parallel.ai/v1/extract",
+        "timeout": 45,
+        "full_content": false
+    },
+    "firecrawl2": {
+        "_comment": "Firecrawl Scrape fallback for selected public URLs. The runtime also accepts the legacy bare API-key string already used by existing config.json files.",
+        "api_key": "YOUR_FIRECRAWL_API_KEY_HERE",
+        "base_url": "https://api.firecrawl.dev/v2/scrape",
+        "timeout": 45,
+        "only_main_content": true,
+        "only_clean_content": false
     },
     "FINNHUB_API_KEY": "",
     "SPORTSDB_API_KEY": "",
