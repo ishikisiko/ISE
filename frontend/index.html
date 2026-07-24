@@ -8,75 +8,92 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
 </head>
 <body>
-    <header class="topbar">
-        <div class="topbar-inner">
-            <div class="brand">
-                <span class="brand-mark">ISE</span>
-                <span class="brand-sub">智能检索引擎</span>
-            </div>
-            <span id="topbar-model" class="topbar-model" title="当前模型"></span>
+    <aside id="sidebar" class="sidebar" aria-label="会话列表">
+        <div class="sidebar-head">
+            <button type="button" id="new-conv-btn" class="new-conv-btn" title="新建会话">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14"/>
+                </svg>
+                <span>新建会话</span>
+            </button>
+            <button type="button" id="sidebar-close" class="sidebar-close" title="收起侧栏" aria-label="收起侧栏">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M15 18l-6-6 6-6"/>
+                </svg>
+            </button>
         </div>
-    </header>
+        <div id="conv-list" class="conv-list" role="list" aria-live="polite"></div>
+        <div id="conv-empty" class="conv-empty" hidden>暂无历史会话</div>
+    </aside>
 
-    <main id="thread" class="thread" aria-live="polite"></main>
-
-    <div class="composer-dock">
-        <form id="composer" class="composer" autocomplete="off">
-            <div id="chip-row" class="chip-row" aria-live="polite"></div>
-
-            <div class="composer-box">
-                <textarea
-                    id="query"
-                    name="query"
-                    rows="1"
-                    placeholder="提出任何问题…"
-                    required
-                ></textarea>
-                <div class="composer-actions">
-                    <button type="button" id="attach-btn" class="icon-btn" title="上传文档或图片" aria-label="上传文档或图片">
-                        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l8.57-8.57A4 4 0 1118 8.84l-8.59 8.57a2 2 0 01-2.83-2.83l8.49-8.48"/>
+    <div id="app-main" class="app-main">
+        <header class="topbar">
+            <div class="topbar-inner">
+                <div class="brand">
+                    <button type="button" id="sidebar-toggle" class="sidebar-toggle" title="展开/收起侧栏" aria-label="展开/收起侧栏">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M3 6h18M3 12h18M3 18h18"/>
                         </svg>
                     </button>
-                    <button type="submit" id="send-btn" class="send-btn" title="发送" aria-label="发送">
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <path d="M12 19V5M5 12l7-7 7 7"/>
+                    <span class="brand-mark">ISE</span>
+                    <span class="brand-sub">智能检索引擎</span>
+                </div>
+                <span id="topbar-model" class="topbar-model" title="当前模型"></span>
+            </div>
+        </header>
+
+        <main id="thread" class="thread" aria-live="polite"></main>
+
+        <div class="composer-dock">
+            <form id="composer" class="composer" autocomplete="off">
+                <div id="chip-row" class="chip-row" aria-live="polite"></div>
+
+                <div class="composer-box">
+                    <textarea
+                        id="query"
+                        name="query"
+                        rows="1"
+                        placeholder="提出任何问题…"
+                        required
+                    ></textarea>
+                    <div class="composer-actions">
+                        <button type="button" id="attach-btn" class="icon-btn" title="上传文档或图片" aria-label="上传文档或图片">
+                            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l8.57-8.57A4 4 0 1118 8.84l-8.59 8.57a2 2 0 01-2.83-2.83l8.49-8.48"/>
+                            </svg>
+                        </button>
+                        <button type="submit" id="send-btn" class="send-btn" title="发送" aria-label="发送">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M12 19V5M5 12l7-7 7 7"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="toolbar">
+                    <button type="button" id="search-pill" class="pill is-on" aria-pressed="true">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
                         </svg>
+                        <span>联网</span>
+                    </button>
+
+                    <div class="pill-select" title="模型选择">
+                        <select id="model" name="model" aria-label="模型选择">
+                            <option value="">默认模型</option>
+                        </select>
+                    </div>
+
+                    <button type="button" id="settings-btn" class="pill" aria-expanded="false" aria-controls="settings-panel">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
+                            <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
+                            <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
+                            <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>
+                        </svg>
+                        <span>参数</span>
                     </button>
                 </div>
-            </div>
-
-            <div class="toolbar">
-                <button type="button" id="search-pill" class="pill is-on" aria-pressed="true">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
-                    </svg>
-                    <span>联网</span>
-                </button>
-
-                <button type="button" id="new-session-pill" class="pill" title="开启新会话，清除当前上下文">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M12 5v14M5 12h14"/>
-                    </svg>
-                    <span>新会话</span>
-                </button>
-
-                <div class="pill-select" title="模型选择">
-                    <select id="model" name="model" aria-label="模型选择">
-                        <option value="">默认模型</option>
-                    </select>
-                </div>
-
-                <button type="button" id="settings-btn" class="pill" aria-expanded="false" aria-controls="settings-panel">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
-                        <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
-                        <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
-                        <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>
-                    </svg>
-                    <span>参数</span>
-                </button>
-            </div>
 
             <section id="settings-panel" class="settings" hidden aria-label="检索参数设置">
                 <div class="settings-grid">
@@ -106,6 +123,18 @@
                             <label class="num-field">
                                 <span>参考链接</span>
                                 <input type="number" id="limit-reference" min="1" max="20" value="5" inputmode="numeric">
+                            </label>
+                        </div>
+                        <div class="field-row">
+                            <label class="num-field">
+                                <span>搜索深度</span>
+                                <select id="search-depth">
+                                    <option value="auto">默认</option>
+                                    <option value="basic">basic</option>
+                                    <option value="advanced">advanced</option>
+                                    <option value="fast">fast</option>
+                                    <option value="ultra-fast">ultra-fast</option>
+                                </select>
                             </label>
                         </div>
                     </fieldset>

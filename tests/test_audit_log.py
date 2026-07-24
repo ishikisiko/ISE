@@ -167,6 +167,36 @@ def test_recorder_caps_large_structured_metadata(tmp_path: Path) -> None:
     assert len(raw_line.encode("utf-8")) <= 512
 
 
+def test_recorder_can_keep_full_result_without_retention_limits(tmp_path: Path) -> None:
+    recorder = AuditRecorder(
+        str(tmp_path),
+        include_full_result=True,
+        max_files=0,
+        max_bytes_per_record=0,
+    )
+    path = Path(
+        recorder.record_turn(
+            conversation_id="complete",
+            query="store every observable result field",
+            allow_search=True,
+            result={
+                "answer": "full answer",
+                "search_hits": [{"title": "source", "snippet": "complete"}],
+                "deep": {"one": {"two": {"three": {"four": {"five": "kept"}}}}},
+                "authorization": "must-not-be-written",
+            },
+        )
+    )
+
+    record = _read_records(path)[0]
+    assert "truncated" not in record
+    assert record["result"]["search_hits"] == [
+        {"title": "source", "snippet": "complete"}
+    ]
+    assert record["result"]["deep"]["one"]["two"]["three"]["four"]["five"] == "kept"
+    assert "authorization" not in record["result"]
+
+
 def test_recorder_appends_and_evicts_oldest_conversation_file(tmp_path: Path) -> None:
     recorder = AuditRecorder(str(tmp_path), max_files=2)
     first_path = Path(
@@ -427,5 +457,8 @@ def test_config_example_documents_disabled_audit_defaults() -> None:
     assert config["audit"]["enabled"] is False
     assert config["audit"]["dir"] == "runtime/audit"
     assert config["audit"]["include_answer"] is True
+    assert config["audit"]["include_full_result"] is False
     assert config["audit"]["max_files"] == 200
     assert config["audit"]["max_bytes_per_record"] == 65536
+    assert config["server_logging"]["enabled"] is False
+    assert config["server_logging"]["dir"] == "runtime/server"

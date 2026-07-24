@@ -6,9 +6,11 @@ from main import build_search_client
 from search.search import (
     BraveSearchClient,
     BrightDataSERPClient,
+    CombinedSearchClient,
     FirecrawlSearchClient,
     ParallelSearchClient,
     TavilySearchClient,
+    apply_search_depth_override,
 )
 from server import app
 
@@ -98,6 +100,13 @@ def test_brave_search_falls_back_to_secondary_and_records_usage(monkeypatch, tmp
     assert lines[0]["success"] is False
     assert lines[1]["success"] is True
     assert lines[1]["fallback_used"] is True
+    call_records = client.get_last_call_records()
+    assert [(record["slot"], record["status"]) for record in call_records] == [
+        ("primary", "error"),
+        ("secondary", "done"),
+    ]
+    assert call_records[1]["result_count"] == 1
+    assert call_records[1]["results"][0]["url"] == "https://brave.example/result"
 
 
 def test_firecrawl_search_uses_v2_web_results(monkeypatch):
@@ -224,3 +233,87 @@ def test_api_rejects_legacy_serp_source():
     assert response.status_code == 400
     payload = response.get_json()
     assert "Unsupported search source" in payload["error"]
+
+
+def test_apply_search_depth_override_sets_nested_tavily_clients():
+    tavily = TavilySearchClient(api_key="tavily-key")
+    firecrawl = FirecrawlSearchClient(api_key="firecrawl-key")
+    combined = CombinedSearchClient([tavily, firecrawl])
+
+    applied = apply_search_depth_override(combined, "ADVANCED")
+
+    assert applied == "advanced"
+    assert tavily.search_depth == "advanced"
+    assert firecrawl.search_depth == 3
+
+
+def test_apply_search_depth_override_ignores_invalid_and_none():
+    tavily = TavilySearchClient(api_key="tavily-key", search_depth="basic")
+
+    assert apply_search_depth_override(tavily, "nonsense") is None
+    assert apply_search_depth_override(tavily, None) is None
+    assert apply_search_depth_override(tavily, "") is None
+    # Existing value is untouched when the override is invalid.
+    assert tavily.search_depth == "basic"
+
+
+def test_apply_search_depth_override_noop_without_depth_provider():
+    brave = BraveSearchClient(primary_api_key="brave-key")
+    assert apply_search_depth_override(brave, "advanced") is None
+
+
+def test_tavily_search_honors_overridden_depth(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(json_data={"results": []})
+
+    monkeypatch.setattr("search.search.requests.post", fake_post)
+    client = TavilySearchClient(api_key="tavily-key")
+    apply_search_depth_override(client, "ultra-fast")
+    client.search("query")
+
+    assert captured["json"]["search_depth"] == "ultra-fast"
+
+
+def test_firecrawl_search_depth_disabled_by_default(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(json_data={"success": True, "data": {"web": []}})
+
+    monkeypatch.setattr("search.search.requests.post", fake_post)
+    FirecrawlSearchClient(api_key="firecrawl-key").search("query")
+
+    assert "scrapeOptions" not in captured["json"]
+
+
+def test_firecrawl_search_sends_scrape_options_when_depth_configured(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(json_data={"success": True, "data": {"web": []}})
+
+    monkeypatch.setattr("search.search.requests.post", fake_post)
+    client = FirecrawlSearchClient(api_key="firecrawl-key", search_depth="advanced")
+    client.search("query")
+
+    assert captured["json"]["scrapeOptions"] == {"search_depth": 3}
+
+
+def test_apply_search_depth_override_overrides_firecrawl(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(json_data={"success": True, "data": {"web": []}})
+
+    monkeypatch.setattr("search.search.requests.post", fake_post)
+    client = FirecrawlSearchClient(api_key="firecrawl-key")
+    assert apply_search_depth_override(client, "fast") == "fast"
+    client.search("query")
+
+    assert captured["json"]["scrapeOptions"] == {"search_depth": 1}

@@ -12,8 +12,14 @@ from .source_layer import (
     describe_used_sources,
     evidence_items_to_documents,
     evidence_items_to_search_hits,
+    has_indexable_local_documents,
     normalize_reference_label,
     source_identity_label,
+)
+from .source_tiering import (
+    classify_web_source_tier,
+    normalize_entity_stem,
+    registrable_domain,
 )
 
 __all__ = [
@@ -25,9 +31,13 @@ __all__ = [
     "RetrievalOptions",
     "WebEvidenceSource",
     "build_evidence_summary",
+    "classify_web_source_tier",
     "describe_used_sources",
     "evidence_items_to_documents",
     "evidence_items_to_search_hits",
+    "has_indexable_local_documents",
     "normalize_reference_label",
+    "normalize_entity_stem",
+    "registrable_domain",
     "source_identity_label",
 ]

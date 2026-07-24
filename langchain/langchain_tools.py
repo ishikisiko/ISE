@@ -205,6 +205,7 @@ def create_search_tool_from_config(config: Dict[str, Any]) -> Optional[WebSearch
                         or "https://api.firecrawl.dev/v2/search"
                     ),
                     timeout=int(firecrawl_cfg.get("timeout", 30)),
+                    search_depth=firecrawl_cfg.get("search_depth"),
                 )
             )
         except Exception as exc:

@@ -7,15 +7,26 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from typing import Any, Dict, List, Mapping, Optional, Sequence
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
 
+from bs4 import BeautifulSoup
 from utils.config_validation import configured_value
 
 
 PARALLEL_EXTRACT_URL = "https://api.parallel.ai/v1/extract"
 FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape"
+TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"
+
+# Realistic desktop UA so plain-HTTP documentation/pricing pages do not gate
+# the primary direct fetch behind a bot check. Mirrors the same approach used
+# by the opencode webfetch-style "direct fetch" path.
+_DEFAULT_DIRECT_FETCH_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_MAX_DIRECT_FETCH_REDIRECTS = 5
 
 
 @dataclass
@@ -51,6 +62,12 @@ class ReferenceExtraction:
     failures: List[ReferenceFailure] = field(default_factory=list)
     request_id: Optional[str] = None
     attempts: List[Dict[str, Any]] = field(default_factory=list)
+
+    def trace_records(self) -> List[Dict[str, Any]]:
+        """Return page-level audit facts without serializing extracted content."""
+        from utils.retrieval_trace import extraction_trace_records
+
+        return extraction_trace_records(self)
 
 
 def _normalize_urls(urls: Sequence[str] | str, *, max_urls: int) -> List[str]:
@@ -510,6 +527,325 @@ class FirecrawlScrapeClient(ReferenceExtractor):
         return extraction
 
 
+class TavilyExtractClient(ReferenceExtractor):
+    """Adapter for Tavily's selected URL Extract API."""
+
+    source_id = "tavily_extract"
+    display_name = "Tavily Extract"
+    max_urls = 20
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = TAVILY_EXTRACT_URL,
+        timeout: int = 45,
+        extract_depth: str = "basic",
+        format: str = "markdown",
+        chunks_per_source: Optional[int] = None,
+    ) -> None:
+        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        normalized_depth = str(extract_depth or "basic").strip().lower()
+        self.extract_depth = (
+            normalized_depth if normalized_depth in {"basic", "advanced"} else "basic"
+        )
+        normalized_format = str(format or "markdown").strip().lower()
+        self.format = (
+            normalized_format if normalized_format in {"markdown", "text"} else "markdown"
+        )
+        self.chunks_per_source = _coerce_positive_int(chunks_per_source)
+
+    def extract(
+        self,
+        urls: Sequence[str] | str,
+        *,
+        objective: Optional[str] = None,
+    ) -> ReferenceExtraction:
+        normalized_urls = _normalize_urls(urls, max_urls=self.max_urls)
+        self._last_timings = []
+        started_at = time.perf_counter()
+        payload: Dict[str, Any] = {
+            "urls": normalized_urls,
+            "extract_depth": self.extract_depth,
+            "format": self.format,
+            "timeout": min(max(self.timeout, 1), 60),
+        }
+        normalized_objective = _safe_optional_text(objective)
+        if normalized_objective:
+            payload["query"] = normalized_objective
+            chunks = self.chunks_per_source or 3
+            payload["chunks_per_source"] = min(max(chunks, 1), 5)
+
+        try:
+            response = requests.post(
+                self.base_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            body = response.json()
+        except (requests.RequestException, ValueError):
+            extraction = ReferenceExtraction(
+                provider=self.source_id,
+                failures=[
+                    ReferenceFailure(
+                        provider=self.source_id,
+                        requested_url=url,
+                        error_type="request_failed",
+                    )
+                    for url in normalized_urls
+                ],
+            )
+            self._record_timing(
+                started_at,
+                contents=0,
+                failures=len(extraction.failures),
+                error_type="request_failed",
+            )
+            return extraction
+
+        if not isinstance(body, dict):
+            extraction = ReferenceExtraction(
+                provider=self.source_id,
+                failures=[
+                    ReferenceFailure(
+                        provider=self.source_id,
+                        requested_url=url,
+                        error_type="invalid_response",
+                    )
+                    for url in normalized_urls
+                ],
+            )
+            self._record_timing(
+                started_at,
+                contents=0,
+                failures=len(extraction.failures),
+                error_type="invalid_response",
+            )
+            return extraction
+
+        extraction = ReferenceExtraction(
+            provider=self.source_id,
+            request_id=_safe_optional_text(body.get("request_id")),
+        )
+        for entry in body.get("results") or []:
+            if not isinstance(entry, dict):
+                continue
+            requested_url = str(entry.get("url") or "").strip()
+            content = str(entry.get("raw_content") or "").strip()
+            if not requested_url or not content:
+                continue
+            extraction.contents.append(
+                ReferenceContent(
+                    provider=self.source_id,
+                    requested_url=_safe_reference_url(requested_url),
+                    url=_safe_reference_url(requested_url),
+                    content=content,
+                    metadata={
+                        "request_id": extraction.request_id,
+                    },
+                )
+            )
+
+        for entry in body.get("failed_results") or []:
+            if not isinstance(entry, dict):
+                continue
+            requested_url = str(entry.get("url") or "").strip()
+            if not requested_url:
+                continue
+            error_message = str(entry.get("error") or "").strip()
+            extraction.failures.append(
+                ReferenceFailure(
+                    provider=self.source_id,
+                    requested_url=_safe_reference_url(requested_url),
+                    error_type=(error_message or "provider_error")[:200],
+                )
+            )
+
+        successful_urls = {item.requested_url for item in extraction.contents}
+        failed_urls = {item.requested_url for item in extraction.failures}
+        for url in normalized_urls:
+            safe_url = _safe_reference_url(url)
+            if safe_url not in successful_urls and safe_url not in failed_urls:
+                extraction.failures.append(
+                    ReferenceFailure(
+                        provider=self.source_id,
+                        requested_url=safe_url,
+                        error_type="empty_content",
+                    )
+                )
+
+        self._record_timing(
+            started_at,
+            contents=len(extraction.contents),
+            failures=len(extraction.failures),
+            error_type="empty_content" if not extraction.contents else None,
+        )
+        return extraction
+
+
+class DirectFetchClient(ReferenceExtractor):
+    """Zero-config primary extractor: plain HTTP GET + main-text extraction.
+
+    No API key, no JavaScript rendering, no proxy. Best for static official
+    documentation / pricing pages. When it cannot return usable content (such
+    as a bot check, JavaScript-only page, or non-HTML response), the router
+    falls through to configured provider-managed extract APIs.
+    """
+
+    source_id = "direct_fetch"
+    display_name = "Direct Fetch"
+    max_urls = 20
+
+    def __init__(
+        self,
+        *,
+        timeout: int = 30,
+        max_chars: Optional[int] = None,
+        user_agent: Optional[str] = None,
+        enabled: bool = True,
+    ) -> None:
+        # Bypass ReferenceExtractor.__init__ on purpose: this adapter needs no
+        # API key. We still satisfy the timing/identity contract used by the
+        # router and the base class helpers.
+        self.api_key = ""
+        self.base_url = ""
+        self.timeout = max(5, int(timeout))
+        self.max_chars = _coerce_positive_int(max_chars)
+        self.enabled = bool(enabled)
+        self.user_agent = (
+            str(user_agent or "").strip() or _DEFAULT_DIRECT_FETCH_UA
+        )
+        self._last_timings: List[Dict[str, Any]] = []
+
+    def extract(
+        self,
+        urls: Sequence[str] | str,
+        *,
+        objective: Optional[str] = None,
+    ) -> ReferenceExtraction:
+        _ = objective
+        normalized_urls = _normalize_urls(urls, max_urls=self.max_urls)
+        self._last_timings = []
+        extraction = ReferenceExtraction(provider=self.source_id)
+        if not self.enabled:
+            return extraction
+        started_at = time.perf_counter()
+        for url in normalized_urls:
+            content_text, title, error_type = self._fetch_and_extract(url)
+            safe_url = _safe_reference_url(url)
+            if error_type or not content_text:
+                extraction.failures.append(
+                    ReferenceFailure(
+                        provider=self.source_id,
+                        requested_url=safe_url,
+                        error_type=error_type or "empty_content",
+                    )
+                )
+                continue
+            extraction.contents.append(
+                ReferenceContent(
+                    provider=self.source_id,
+                    requested_url=safe_url,
+                    url=safe_url,
+                    title=title or "",
+                    content=content_text,
+                )
+            )
+        self._record_timing(
+            started_at,
+            contents=len(extraction.contents),
+            failures=len(extraction.failures),
+            error_type=None if extraction.contents else "empty_content",
+        )
+        return extraction
+
+    def _fetch_and_extract(
+        self,
+        url: str,
+    ) -> tuple[str, str, Optional[str]]:
+        """Return (text, title, error_type). error_type is None on success."""
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8",
+        }
+        request_url = url
+        response = None
+        for _ in range(_MAX_DIRECT_FETCH_REDIRECTS + 1):
+            try:
+                response = requests.get(
+                    request_url,
+                    headers=headers,
+                    timeout=self.timeout,
+                    allow_redirects=False,
+                )
+            except requests.RequestException:
+                return "", "", "request_failed"
+
+            if not 300 <= response.status_code < 400:
+                break
+
+            location = response.headers.get("Location")
+            if not location:
+                return "", "", f"http_{response.status_code}"
+            redirect_url = urljoin(request_url, location)
+            try:
+                _normalize_urls(redirect_url, max_urls=1)
+            except ValueError:
+                return "", "", "unsafe_redirect"
+            request_url = redirect_url
+        else:
+            return "", "", "too_many_redirects"
+
+        if response is None:
+            return "", "", "request_failed"
+        if response.status_code >= 400:
+            return "", "", f"http_{response.status_code}"
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if content_type and "html" not in content_type and "xml" not in content_type:
+            # PDFs / images / JSON feeds are out of scope for this static extractor.
+            return "", "", "non_html"
+        try:
+            soup = BeautifulSoup(response.content, "lxml")
+        except Exception:  # noqa: BLE001 - malformed markup should not crash the chain
+            return "", "", "parse_failed"
+        title = self._extract_title(soup)
+        text = self._extract_main_text(soup)
+        if not text:
+            return "", title or "", "empty_content"
+        if self.max_chars is not None and len(text) > self.max_chars:
+            text = text[: self.max_chars]
+        return text, title, None
+
+    @staticmethod
+    def _extract_title(soup: "BeautifulSoup") -> str:
+        if soup.title and soup.title.string:
+            return soup.title.string.strip()
+        first_heading = soup.find(["h1", "h2"])
+        if first_heading:
+            return first_heading.get_text(strip=True)
+        return ""
+
+    @staticmethod
+    def _extract_main_text(soup: "BeautifulSoup") -> str:
+        for tag in soup(
+            ["script", "style", "noscript", "nav", "footer", "header", "aside",
+             "form", "svg", "button", "iframe", "template"]
+        ):
+            tag.decompose()
+        container = soup.find("main") or soup.find("article") or soup
+        raw_text = container.get_text(separator="\n", strip=True)
+        lines = [line.strip() for line in raw_text.splitlines()]
+        # Drop boilerplate whitespace and overly long runs of nav-like noise.
+        kept = [line for line in lines if line and len(line) > 1]
+        return "\n".join(kept)
+
+
 class ReferenceExtractorRouter:
     """Try configured extractors in order for each selected URL."""
 
@@ -521,12 +857,47 @@ class ReferenceExtractorRouter:
         urls: Sequence[str] | str,
         *,
         objective: Optional[str] = None,
+        tracer: Optional[Any] = None,
+        trace_step_prefix: str = "extract_api",
     ) -> ReferenceExtraction:
         normalized_urls = _normalize_urls(urls, max_urls=20)
         result = ReferenceExtraction(provider="reference_router")
+        trace_position = 0
         for url in normalized_urls:
             for extractor in self.extractors:
-                provider_result = extractor.extract([url], objective=objective)
+                try:
+                    provider_result = extractor.extract([url], objective=objective)
+                except Exception:  # noqa: BLE001 - a failed provider must not block fallback
+                    provider_result = ReferenceExtraction(
+                        provider=extractor.source_id,
+                        failures=[
+                            ReferenceFailure(
+                                provider=extractor.source_id,
+                                requested_url=_safe_reference_url(url),
+                                error_type="extractor_error",
+                            )
+                        ],
+                    )
+                if tracer is not None:
+                    from utils.retrieval_trace import emit_extraction_call_step
+
+                    timings_getter = getattr(extractor, "get_last_timings", None)
+                    timings = list(timings_getter() or []) if callable(timings_getter) else []
+                    duration_ms = next(
+                        (
+                            entry.get("duration_ms")
+                            for entry in reversed(timings)
+                            if isinstance(entry, dict) and entry.get("duration_ms") is not None
+                        ),
+                        None,
+                    )
+                    trace_position += 1
+                    emit_extraction_call_step(
+                        tracer,
+                        provider_result,
+                        step_id=f"{trace_step_prefix}_{trace_position}",
+                        duration_ms=duration_ms,
+                    )
                 content = next(
                     (
                         item
@@ -574,14 +945,52 @@ def _provider_settings(
     return {}
 
 
+def _direct_fetch_settings(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Read the primary direct-fetch settings from its nested runtime block.
+
+    ``directFetch`` lives under ``orchestration`` in the documented config.
+    The top-level lookup remains for compatibility with early adopters of the
+    adapter, and an explicit nested ``enabled: false`` must win over that
+    legacy setting.
+    """
+    orchestration = config.get("orchestration")
+    sources: List[Mapping[str, Any]] = []
+    if isinstance(orchestration, Mapping):
+        sources.append(orchestration)
+    sources.append(config)
+
+    for source in sources:
+        for key in ("directFetch", "direct_fetch"):
+            value = source.get(key)
+            if isinstance(value, Mapping):
+                return dict(value)
+            if isinstance(value, bool):
+                return {"enabled": value}
+    return {}
+
+
 def build_reference_extractors(config: Mapping[str, Any]) -> List[ReferenceExtractor]:
     """Build selected-page extractors from compatible runtime configuration."""
 
     extractors: List[ReferenceExtractor] = []
 
+    direct_settings = _direct_fetch_settings(config)
+    direct_enabled = _coerce_bool(direct_settings.get("enabled", True), True)
+    if direct_enabled:
+        # Prefer a local, zero-key HTTP fetch for static pages. The router tries
+        # configured extraction APIs only when this client cannot produce text.
+        extractors.append(
+            DirectFetchClient(
+                timeout=_coerce_positive_int(direct_settings.get("timeout"), 30) or 30,
+                max_chars=direct_settings.get("max_chars_per_page"),
+                user_agent=direct_settings.get("user_agent"),
+                enabled=True,
+            )
+        )
+
     parallel_settings = _provider_settings(
         config,
-        ("parellel2", "parallel2", "parallelExtract"),
+        ("parellel2", "parallel2", "parallelExtract", "parallelSearch"),
     )
     parallel_key = configured_value(parallel_settings.get("api_key"))
     if parallel_key:
@@ -602,7 +1011,7 @@ def build_reference_extractors(config: Mapping[str, Any]) -> List[ReferenceExtra
 
     firecrawl_settings = _provider_settings(
         config,
-        ("firecrawl2", "firecrawlScrape"),
+        ("firecrawl2", "firecrawlScrape", "firecrawlSearch"),
     )
     firecrawl_key = configured_value(firecrawl_settings.get("api_key"))
     if firecrawl_key:
@@ -624,6 +1033,27 @@ def build_reference_extractors(config: Mapping[str, Any]) -> List[ReferenceExtra
                     False,
                 ),
                 max_age_ms=firecrawl_settings.get("max_age_ms"),
+            )
+        )
+
+    tavily_settings = _provider_settings(
+        config,
+        ("tavily2", "tavilyExtract", "tavilySearch"),
+    )
+    tavily_key = configured_value(tavily_settings.get("api_key"))
+    if tavily_key:
+        extractors.append(
+            TavilyExtractClient(
+                api_key=tavily_key,
+                base_url=(
+                    tavily_settings.get("base_url")
+                    or tavily_settings.get("endpoint")
+                    or TAVILY_EXTRACT_URL
+                ),
+                timeout=_coerce_positive_int(tavily_settings.get("timeout"), 45) or 45,
+                extract_depth=str(tavily_settings.get("extract_depth") or "basic"),
+                format=str(tavily_settings.get("format") or "markdown"),
+                chunks_per_source=tavily_settings.get("chunks_per_source"),
             )
         )
 

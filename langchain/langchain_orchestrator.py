@@ -29,7 +29,7 @@ from evidence import DomainEvidenceSource, RetrievalOptions, build_evidence_summ
 from langchain.langchain_rag import LocalRAGChain, NullSearchClient, SearchRAGChain
 from langchain.postcheck import PostcheckVerdict, merge_judge_verdict, screen_search_answer
 from langchain.langchain_support import Document, LangChainVectorStore
-from search.search import SearchClient, SearchHit
+from search.search import SearchClient, SearchHit, apply_search_depth_override
 from search.source_selector import IntelligentSourceSelector
 from utils.time_parser import TimeConstraint, parse_time_constraint
 from utils.search_routing import coerce_bool, extract_json_object, is_small_talk_query, normalize_sources
@@ -52,6 +52,7 @@ from utils.query_orchestration import (
     build_query_plan,
     deterministic_query_for_plan,
     merge_optional_analysis,
+    reformulate_query_for_recovery,
     verify_evidence_plan,
 )
 
@@ -236,6 +237,21 @@ Always answer in the same language as the user's question."""
     @staticmethod
     def _normalize_orchestration_config(config: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize rollout controls without making optional analysis mandatory."""
+        raw_recovery_budget = config.get("recovery_budget", 1)
+        try:
+            recovery_budget = max(0, int(1 if raw_recovery_budget is None else raw_recovery_budget))
+        except (TypeError, ValueError):
+            recovery_budget = 1
+        recovery_config = config.get("reformulation_recovery") or {}
+        if isinstance(recovery_config, bool):
+            recovery_config = {"enabled": recovery_config}
+        if not isinstance(recovery_config, dict):
+            recovery_config = {}
+        max_attempts = recovery_config.get("max_attempts", recovery_budget)
+        try:
+            max_attempts = max(1, int(max_attempts))
+        except (TypeError, ValueError):
+            max_attempts = max(1, recovery_budget)
         return {
             "enabled": bool(config.get("enabled", True)),
             "enforce_verification": bool(config.get("enforce_verification", True)),
@@ -243,7 +259,11 @@ Always answer in the same language as the user's question."""
             "query_budget": max(1, int(config.get("query_budget", 3) or 3)),
             "result_budget": max(1, int(config.get("result_budget", 8) or 8)),
             "time_budget_ms": max(1000, int(config.get("time_budget_ms", 20000) or 20000)),
-            "recovery_budget": max(0, int(config.get("recovery_budget", 1) or 1)),
+            "recovery_budget": recovery_budget,
+            "reformulation_recovery": {
+                "enabled": bool(recovery_config.get("enabled", True)),
+                "max_attempts": max_attempts,
+            },
         }
 
     def _initialize_orchestration(
@@ -260,6 +280,7 @@ Always answer in the same language as the user's question."""
         self._current_plan_controller = None
         self._current_verification = None
         self._current_execution_trace = None
+        self._recovery_terminal_reason: Optional[str] = None
         if not self.orchestration_config["enabled"]:
             return
 
@@ -337,6 +358,12 @@ Always answer in the same language as the user's question."""
             return None
         if domain_hint and str(domain_hint).lower() != "general":
             analysis.domain_hint = str(domain_hint)
+        recovery_config = self.orchestration_config["reformulation_recovery"]
+        recovery_budget = (
+            self.orchestration_config["recovery_budget"]
+            if recovery_config["enabled"]
+            else 0
+        )
         plan = build_query_plan(
             analysis,
             has_local_docs=has_local_docs,
@@ -344,7 +371,7 @@ Always answer in the same language as the user's question."""
             query_budget=self.orchestration_config["query_budget"],
             result_budget=result_budget or self.orchestration_config["result_budget"],
             time_budget_ms=self.orchestration_config["time_budget_ms"],
-            recovery_budget=self.orchestration_config["recovery_budget"],
+            recovery_budget=recovery_budget,
             registry=self._policy_registry,
         )
         self._current_plan = plan
@@ -391,6 +418,16 @@ Always answer in the same language as the user's question."""
                 status=VerificationStatus.EVIDENCE_INSUFFICIENT,
                 missing_constraints=list(outcome.missing_constraints),
                 failure_types=list(outcome.failure_types) + ["search_unavailable"],
+                recoverable=False,
+                next_action="return_insufficient",
+                rule_hits=list(outcome.rule_hits),
+            )
+        terminal_reason = getattr(self, "_recovery_terminal_reason", None)
+        if terminal_reason and outcome.status != VerificationStatus.COMPLETE:
+            outcome = VerificationOutcome(
+                status=VerificationStatus.EVIDENCE_INSUFFICIENT,
+                missing_constraints=list(outcome.missing_constraints),
+                failure_types=list(dict.fromkeys(list(outcome.failure_types) + [terminal_reason])),
                 recoverable=False,
                 next_action="return_insufficient",
                 rule_hits=list(outcome.rule_hits),
@@ -459,6 +496,14 @@ Always answer in the same language as the user's question."""
         control["evidence_insufficient"] = True
         result["control"] = control
         return result
+
+    @staticmethod
+    def _has_limited_evidence_answer(result: Dict[str, Any]) -> bool:
+        """Keep a qualified non-empty answer distinct from an unsupported draft."""
+        return bool(
+            str(result.get("answer") or "").strip()
+            and result.get("answer_basis") == "limited_evidence"
+        )
 
     def _attach_orchestration_metadata(self, result: Dict[str, Any]) -> None:
         """Add bounded plan facts without altering compatibility result fields."""
@@ -756,6 +801,9 @@ Always answer in the same language as the user's question."""
         evidence_ledger: Optional[EvidenceLedger] = None,
         execution_trace: Optional[QueryExecutionTrace] = None,
         plan_controller: Optional[PlanController] = None,
+        enable_local_docs: Optional[bool] = None,
+        web_step_kind: PlanStepKind = PlanStepKind.WEB_SEARCH,
+        enable_temporal_recovery: bool = True,
     ) -> Optional[Dict[str, Any]]:
         pipeline = self._get_primary_rag(snapshot, tracer=tracer)
         if not pipeline:
@@ -776,7 +824,7 @@ Always answer in the same language as the user's question."""
             max_tokens=max_tokens,
             temperature=temperature,
             enable_search=enable_search,
-            enable_local_docs=bool(snapshot),
+            enable_local_docs=bool(snapshot) if enable_local_docs is None else bool(enable_local_docs),
             reference_limit=reference_limit,
             freshness=freshness,
             date_restrict=date_restrict,
@@ -790,7 +838,161 @@ Always answer in the same language as the user's question."""
             evidence_ledger=evidence_ledger,
             execution_trace=execution_trace,
             plan_controller=plan_controller,
+            web_step_kind=web_step_kind,
+            enable_temporal_recovery=enable_temporal_recovery,
         )
+
+    def _terminalize_recovery_outcome(
+        self,
+        outcome: VerificationOutcome,
+        reason: str,
+    ) -> VerificationOutcome:
+        """Turn a blocked recovery action into the deterministic final state."""
+        terminal = VerificationOutcome(
+            status=VerificationStatus.EVIDENCE_INSUFFICIENT,
+            missing_constraints=list(outcome.missing_constraints),
+            failure_types=list(dict.fromkeys(list(outcome.failure_types) + [reason])),
+            recoverable=False,
+            next_action="return_insufficient",
+            rule_hits=list(outcome.rule_hits),
+        )
+        self._recovery_terminal_reason = reason
+        self._current_verification = terminal
+        if self._current_execution_trace is not None:
+            self._current_execution_trace.record_verification(terminal)
+        return terminal
+
+    def _run_reformulation_recovery(
+        self,
+        *,
+        result: Dict[str, Any],
+        query: str,
+        snapshot: Optional[tuple],
+        num_retrieved_docs: int,
+        max_tokens: int,
+        temperature: float,
+        timing_recorder: Optional[TimingRecorder],
+        num_search_results: int,
+        per_source_limit: Optional[int],
+        reference_limit: Optional[int],
+        freshness: Optional[str],
+        date_restrict: Optional[str],
+        tracer: Optional[Any],
+    ) -> Dict[str, Any]:
+        """Consume typed recover actions through one bounded web re-search loop."""
+        plan = self._current_plan
+        ledger = self._current_ledger
+        controller = self._current_plan_controller
+        trace = self._current_execution_trace
+        recovery_config = self.orchestration_config["reformulation_recovery"]
+        if not (plan and ledger and controller and recovery_config["enabled"]):
+            return result
+
+        recovery_step = plan.step_for_kind(
+            PlanStepKind.QUERY_REFORMULATION,
+            include_recovery=True,
+        )
+        if recovery_step is None:
+            return result
+
+        outcome = self._verify_current_plan(result)
+        attempt = 0
+        max_attempts = min(plan.recovery_budget, recovery_config["max_attempts"])
+        while outcome is not None and outcome.next_action == "recover" and outcome.recoverable:
+            if attempt >= max_attempts:
+                if trace is not None:
+                    trace.record_recovery(
+                        executor="query_reformulation",
+                        status="skipped",
+                        reason="recovery_budget_exhausted",
+                    )
+                self._terminalize_recovery_outcome(outcome, "recovery_budget_exhausted")
+                break
+
+            blocked = controller.can_run(recovery_step)
+            if blocked:
+                if trace is not None:
+                    trace.record_recovery(
+                        executor="query_reformulation",
+                        status="skipped",
+                        reason=blocked,
+                    )
+                self._terminalize_recovery_outcome(outcome, blocked)
+                break
+
+            reformulated_query = reformulate_query_for_recovery(
+                plan.analysis,
+                outcome.missing_constraints,
+            )
+            if not reformulated_query:
+                if trace is not None:
+                    trace.record_recovery(
+                        executor="query_reformulation",
+                        status="skipped",
+                        reason="empty_reformulation_query",
+                    )
+                self._terminalize_recovery_outcome(outcome, "empty_reformulation_query")
+                break
+
+            attempt += 1
+            recovery_step.query = reformulated_query
+            trace_step_id = f"recovery_{attempt}"
+            active_tracer = ensure_tracer(tracer)
+            active_tracer.begin(trace_step_id, "改写检索恢复", detail=reformulated_query)
+            if trace is not None:
+                trace.record_recovery(
+                    executor="query_reformulation",
+                    status="active",
+                    query=reformulated_query,
+                )
+            recovered = self._run_primary_rag(
+                query=query,
+                snapshot=snapshot,
+                num_retrieved_docs=num_retrieved_docs,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timing_recorder=timing_recorder,
+                enable_search=True,
+                num_search_results=num_search_results,
+                per_source_limit=per_source_limit,
+                reference_limit=reference_limit,
+                search_query=reformulated_query,
+                freshness=freshness,
+                date_restrict=date_restrict,
+                tracer=active_tracer,
+                query_plan=plan,
+                evidence_ledger=ledger,
+                execution_trace=trace,
+                plan_controller=controller,
+                enable_local_docs=False,
+                web_step_kind=PlanStepKind.QUERY_REFORMULATION,
+                enable_temporal_recovery=False,
+            )
+            if not recovered:
+                active_tracer.end(trace_step_id, detail="检索不可用", status="error")
+                if trace is not None:
+                    trace.record_recovery(
+                        executor="query_reformulation",
+                        status="error",
+                        query=reformulated_query,
+                        reason="search_unavailable",
+                    )
+                self._terminalize_recovery_outcome(outcome, "search_unavailable")
+                break
+
+            result = recovered
+            outcome = self._verify_current_plan(result)
+            status = "complete" if outcome and outcome.status == VerificationStatus.COMPLETE else "continued"
+            active_tracer.end(trace_step_id, detail=status)
+            if trace is not None:
+                trace.record_recovery(
+                    executor="query_reformulation",
+                    status=status,
+                    query=reformulated_query,
+                    reason=outcome.status.value if outcome is not None else None,
+                )
+
+        return result
 
     def answer(
         self,
@@ -808,6 +1010,7 @@ Always answer in the same language as the user's question."""
         conversation_id: Optional[str] = None,
         tracer: Optional[Any] = None,
         audit_mode: Optional[str] = None,
+        search_depth: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Answer a query using intelligent routing.
         
@@ -846,6 +1049,11 @@ Always answer in the same language as the user's question."""
 
         timing_recorder = TimingRecorder(enabled=self.show_timings or audit_active)
         timing_recorder.start()
+
+        # Per-request search_depth override (Tavily + Firecrawl).
+        applied_search_depth = apply_search_depth_override(
+            self.search_client, search_depth
+        )
 
         # Conversation bookkeeping (per-request instance; orchestrator is built fresh)
         self._conversation_id = conversation_id
@@ -1138,7 +1346,14 @@ Always answer in the same language as the user's question."""
             web_step = self._current_plan.step_for_kind(PlanStepKind.WEB_SEARCH)
             if web_step is not None:
                 web_step.query = search_query
-        tracer.end("keywords", detail="、".join(str(k) for k in keywords[:4]))
+        if keyword_info.get("fallback_used"):
+            error = " ".join(str(keyword_info.get("error") or "").split())[:160]
+            detail = f"fallback_used: {fallback_query}"
+            if error:
+                detail += f" | error: {error}"
+            tracer.end("keywords", detail=detail)
+        else:
+            tracer.end("keywords", detail="、".join(str(k) for k in keywords[:4]))
         
         # Execute search RAG
         result = self._run_primary_rag(
@@ -1168,6 +1383,22 @@ Always answer in the same language as the user's question."""
                 tracer=tracer,
             )
             return self._finalize_response(response, timing_recorder)
+
+        result = self._run_reformulation_recovery(
+            result=result,
+            query=query,
+            snapshot=snapshot,
+            num_retrieved_docs=num_retrieved_docs,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timing_recorder=timing_recorder,
+            num_search_results=total_limit,
+            per_source_limit=per_source_limit,
+            reference_limit=reference_limit,
+            freshness=time_constraint.freshness if time_constraint.days else None,
+            date_restrict=time_constraint.google_date_restrict if time_constraint.days else None,
+            tracer=tracer,
+        )
         
         # Add control metadata
         control = {
@@ -1185,7 +1416,10 @@ Always answer in the same language as the user's question."""
             "enhanced_query": enhanced_query,
             "search_total_limit": total_limit,
             "search_per_source_limit": per_source_limit,
+            "search_depth": applied_search_depth,
             "force_search_enabled": force_search,
+            "answer_basis": result.get("answer_basis"),
+            "limited_evidence_fallback": bool(result.get("limited_evidence_fallback")),
         }
         
         if time_constraint.days:
@@ -1672,6 +1906,7 @@ Always answer in the same language as the user's question."""
             and self._current_verification is not None
             and self._current_verification.status == VerificationStatus.EVIDENCE_INSUFFICIENT
             and bool((result.get("control") or {}).get("search_performed"))
+            and not self._has_limited_evidence_answer(result)
         ):
             result = self._mark_evidence_insufficient(
                 result,
@@ -1689,15 +1924,19 @@ Always answer in the same language as the user's question."""
                 timing_payload["领域智能类型"] = domain if domain and domain.lower() != "general" else "无"
                 result["response_times"] = timing_payload
 
-        self._record_conversation_turn(result.get("answer", ""))
+        self._record_conversation_turn(result)
         self._record_audit_turn(result)
         return result
 
     # ------------------------------------------------------------------
     # Conversation resume
     # ------------------------------------------------------------------
-    def _record_conversation_turn(self, answer: str) -> None:
-        """Persist this turn to the conversation record (all execution paths)."""
+    def _record_conversation_turn(self, result: Dict[str, Any]) -> None:
+        """Persist this turn to the conversation record (all execution paths).
+
+        The full ``result`` is stored so the sidebar can fully restore the turn
+        (workflow metadata, sources, retrieved docs, timings and warnings).
+        """
         cid = getattr(self, "_conversation_id", None)
         if not cid:
             return
@@ -1710,9 +1949,10 @@ Always answer in the same language as the user's question."""
             mgr.record_turn(
                 cid,
                 getattr(self, "_conversation_query", ""),
-                answer or "",
+                result.get("answer", "") or "",
                 getattr(self, "_current_time_constraint", None),
                 topic_reset=getattr(self, "_topic_reset", False),
+                result=result if isinstance(result, dict) else None,
             )
         except Exception as exc:  # noqa: BLE001 - recording must never break a response
             print(f"[conversation] record_turn failed: {exc}")
@@ -1728,6 +1968,7 @@ Always answer in the same language as the user's question."""
             recorder = AuditRecorder(
                 settings.get("dir"),
                 include_answer=bool(settings.get("include_answer", True)),
+                include_full_result=bool(settings.get("include_full_result", False)),
                 max_files=int(settings.get("max_files", 200)),
                 max_bytes_per_record=int(settings.get("max_bytes_per_record", 65536)),
             )
@@ -2060,6 +2301,9 @@ Always answer in the same language as the user's question."""
         """Run post-check and optionally escalate to ReAct fallback."""
         tracer = ensure_tracer(tracer)
         plan_outcome = self._verify_current_plan(result)
+        limited_evidence_answer = self._has_limited_evidence_answer(result)
+        if result.get("answer_basis"):
+            control["answer_basis"] = result["answer_basis"]
         if plan_outcome is not None:
             control["verification"] = plan_outcome.to_dict()
             if plan_outcome.status == VerificationStatus.CLARIFICATION_REQUIRED:
@@ -2091,6 +2335,7 @@ Always answer in the same language as the user's question."""
                 self.orchestration_config["enforce_verification"]
                 and plan_outcome is not None
                 and plan_outcome.status == VerificationStatus.EVIDENCE_INSUFFICIENT
+                and not limited_evidence_answer
             ):
                 return self._mark_evidence_insufficient(result, control, plan_outcome)
             return result
@@ -2148,6 +2393,7 @@ Always answer in the same language as the user's question."""
                 self.orchestration_config["enforce_verification"]
                 and plan_outcome is not None
                 and plan_outcome.status == VerificationStatus.EVIDENCE_INSUFFICIENT
+                and not limited_evidence_answer
             ):
                 return self._mark_evidence_insufficient(result, control, plan_outcome)
             return result
@@ -2162,6 +2408,7 @@ Always answer in the same language as the user's question."""
                 self.orchestration_config["enforce_verification"]
                 and plan_outcome is not None
                 and plan_outcome.status == VerificationStatus.EVIDENCE_INSUFFICIENT
+                and not limited_evidence_answer
             ):
                 return self._mark_evidence_insufficient(result, control, plan_outcome)
             return result

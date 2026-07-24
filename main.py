@@ -187,6 +187,7 @@ def build_search_client(
                             or "https://api.firecrawl.dev/v2/search"
                         ),
                         timeout=int(firecrawl_cfg.get("timeout", 30)),
+                        search_depth=firecrawl_cfg.get("search_depth"),
                     )
                 )
             except Exception as exc:
@@ -412,6 +413,12 @@ def parse_args() -> argparse.Namespace:
         choices=["off", "file"],
         default=None,
         help="Process audit: 'file' persists per-turn workflow records to runtime/audit/, 'off' disables even if config enables it. Omit to follow config audit.enabled.",
+    )
+    parser.add_argument(
+        "--search-depth",
+        type=str,
+        default=None,
+        help="Per-query Tavily search depth override: basic, advanced, fast, or ultra-fast. Omit to use the configured default.",
     )
     return parser.parse_args()
 
@@ -901,6 +908,8 @@ def main() -> None:
     audit_tracer: Optional[WorkflowTracer] = None
     if not use_legacy and LANGCHAIN_AVAILABLE:
         answer_kwargs["conversation_id"] = conversation_id
+        if args.search_depth:
+            answer_kwargs["search_depth"] = args.search_depth
         if audit_active:
             audit_tracer = WorkflowTracer()
             answer_kwargs["tracer"] = audit_tracer
@@ -919,6 +928,7 @@ def main() -> None:
             recorder = AuditRecorder(
                 audit_settings["dir"],
                 include_answer=bool(audit_settings["include_answer"]),
+                include_full_result=bool(audit_settings.get("include_full_result")),
                 max_files=int(audit_settings["max_files"]),
                 max_bytes_per_record=int(audit_settings["max_bytes_per_record"]),
             )

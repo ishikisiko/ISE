@@ -293,6 +293,40 @@ python main.py "精简一点，只要三个要点" --conversation-id <printed-id
 
 Set `conversation.enabled=false` in `config.json` to fall back to stateless single-turn behaviour.
 
+### Durable Server Logs
+
+Enable both blocks below when a web deployment must retain every observable
+answer request and process message. A value of `0` disables the audit record
+size and file-count limits.
+
+```json
+{
+  "audit": {
+    "enabled": true,
+    "dir": "runtime/audit",
+    "include_answer": true,
+    "include_full_result": true,
+    "max_files": 0,
+    "max_bytes_per_record": 0
+  },
+  "server_logging": {
+    "enabled": true,
+    "dir": "runtime/server",
+    "capture_stdio": true,
+    "include_request_payload": true,
+    "include_response_payload": true
+  }
+}
+```
+
+`runtime/server/` contains `server.log`, `stdout.log`, `stderr.log`,
+`access.jsonl`, and a complete event stream for each answer request under
+`requests/<request-id>.jsonl`. Each request stream records the received
+payload, normalized context, every workflow event, final response, and error
+tracebacks. `runtime/audit/<conversation-id>.jsonl` retains the final
+per-conversation record. Both directories are gitignored. Credential-like
+fields and URL query strings are redacted before JSONL records are written.
+
 ## Search Quality Evaluation
 
 You can evaluate retrieval quality in two steps:

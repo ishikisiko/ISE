@@ -14,6 +14,31 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 import requests
 
 
+TAVILY_SEARCH_DEPTHS = frozenset({"advanced", "basic", "fast", "ultra-fast"})
+FIRECRAWL_DEPTH_MAP = {"ultra-fast": 1, "fast": 1, "basic": 2, "advanced": 3}
+
+
+def _coerce_firecrawl_depth(value: Any) -> Optional[int]:
+    """Normalize a Firecrawl search_depth config value to a positive int.
+
+    Accepts a unified level name (fast/basic/advanced/ultra-fast) or a raw int.
+    Returns ``None`` when unset or unrecognized so the payload stays unchanged.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return max(1, value)
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in FIRECRAWL_DEPTH_MAP:
+            return FIRECRAWL_DEPTH_MAP[key]
+        try:
+            return max(1, int(key))
+        except ValueError:
+            return None
+    return None
+
+
 @dataclass
 class SearchHit:
     title: str
@@ -29,15 +54,84 @@ class SearchClient:
 
     def __init__(self) -> None:
         self._last_timings: List[Dict[str, Any]] = []
+        self._last_call_records: List[Dict[str, Any]] = []
 
     def _reset_timings(self) -> None:
         self._last_timings = []
+        self._last_call_records = []
 
     def _append_timing(self, payload: Dict[str, Any]) -> None:
         self._last_timings.append(payload)
 
     def get_last_timings(self) -> List[Dict[str, Any]]:
         return list(self._last_timings)
+
+    def _append_call_record(
+        self,
+        *,
+        query: str,
+        duration_ms: float,
+        hits: Optional[List[SearchHit]] = None,
+        error: Optional[str] = None,
+        source: Optional[str] = None,
+        label: Optional[str] = None,
+        fallback: bool = False,
+        slot: Optional[str] = None,
+    ) -> None:
+        """Retain a compact per-request snapshot before callers merge results."""
+        normalized_hits = list(hits or [])
+        record: Dict[str, Any] = {
+            "source": str(source or self.source_id),
+            "label": str(label or self.display_name),
+            "query": str(query or "")[:1000],
+            "duration_ms": round(float(duration_ms), 2),
+            "status": "error" if error else "done",
+            "result_count": len(normalized_hits),
+            "results": [
+                {
+                    "title": str(hit.title or ""),
+                    "url": str(hit.url or ""),
+                    "snippet": str(hit.snippet or ""),
+                }
+                for hit in normalized_hits
+            ],
+        }
+        if error:
+            record["error"] = str(error)[:400]
+        if fallback:
+            record["fallback"] = True
+        if slot:
+            record["slot"] = str(slot)
+        self._last_call_records.append(record)
+
+    def _extend_call_records(
+        self,
+        records: List[Dict[str, Any]],
+        *,
+        fallback: bool = False,
+    ) -> None:
+        """Copy child snapshots without converting merged output into evidence."""
+        for raw in records:
+            if not isinstance(raw, dict):
+                continue
+            record = dict(raw)
+            results = raw.get("results")
+            if isinstance(results, list):
+                record["results"] = [dict(item) for item in results if isinstance(item, dict)]
+            if fallback:
+                record["fallback"] = True
+            self._last_call_records.append(record)
+
+    def get_last_call_records(self) -> List[Dict[str, Any]]:
+        """Return the actual provider-call snapshots from the latest search."""
+        records: List[Dict[str, Any]] = []
+        for raw in self._last_call_records:
+            record = dict(raw)
+            results = raw.get("results")
+            if isinstance(results, list):
+                record["results"] = [dict(item) for item in results if isinstance(item, dict)]
+            records.append(record)
+        return records
 
     def _is_valid_search_result(self, title: str, url: str, snippet: str) -> bool:
         """Filter out invalid or irrelevant search results."""
@@ -138,6 +232,7 @@ class _JsonPostSearchClient(SearchClient):
         self._reset_timings()
         start = time.perf_counter()
         error_message: Optional[str] = None
+        hits: List[SearchHit] = []
         try:
             limit = max(1, min(int(per_source_limit or num_results), self.max_results))
             request_payload = self._build_payload(
@@ -165,7 +260,6 @@ class _JsonPostSearchClient(SearchClient):
                 message = payload.get("error") or payload.get("message") or "request failed"
                 raise RuntimeError(f"{self.display_name} search failed: {message}")
 
-            hits: List[SearchHit] = []
             seen_urls: Set[str] = set()
             for entry in self._result_entries(payload):
                 if not isinstance(entry, dict):
@@ -204,6 +298,12 @@ class _JsonPostSearchClient(SearchClient):
             if error_message:
                 timing["error"] = error_message
             self._append_timing(timing)
+            self._append_call_record(
+                query=query,
+                duration_ms=timing["duration_ms"],
+                hits=hits,
+                error=error_message,
+            )
 
 
 class FirecrawlSearchClient(_JsonPostSearchClient):
@@ -218,8 +318,10 @@ class FirecrawlSearchClient(_JsonPostSearchClient):
         *,
         base_url: str = "https://api.firecrawl.dev/v2/search",
         timeout: int = 30,
+        search_depth: Any = None,
     ) -> None:
         super().__init__(api_key, base_url=base_url, timeout=timeout)
+        self.search_depth = _coerce_firecrawl_depth(search_depth)
 
     def _build_payload(
         self,
@@ -230,7 +332,10 @@ class FirecrawlSearchClient(_JsonPostSearchClient):
         date_restrict: Optional[str],
     ) -> Dict[str, Any]:
         _ = (freshness, date_restrict)
-        return {"query": query, "limit": limit, "sources": ["web"]}
+        payload: Dict[str, Any] = {"query": query, "limit": limit, "sources": ["web"]}
+        if self.search_depth is not None:
+            payload["scrapeOptions"] = {"search_depth": self.search_depth}
+        return payload
 
     def _result_entries(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         data = payload.get("data") or {}
@@ -261,9 +366,8 @@ class TavilySearchClient(_JsonPostSearchClient):
         search_depth: str = "basic",
     ) -> None:
         super().__init__(api_key, base_url=base_url, timeout=timeout)
-        allowed_depths = {"advanced", "basic", "fast", "ultra-fast"}
         normalized_depth = str(search_depth or "basic").strip().lower()
-        self.search_depth = normalized_depth if normalized_depth in allowed_depths else "basic"
+        self.search_depth = normalized_depth if normalized_depth in TAVILY_SEARCH_DEPTHS else "basic"
 
     @staticmethod
     def _time_range(value: Optional[str]) -> Optional[str]:
@@ -500,6 +604,7 @@ class BrightDataSERPClient(SearchClient):
         self._reset_timings()
         start = time.perf_counter()
         error_message: Optional[str] = None
+        hits: List[SearchHit] = []
         try:
             _ = (freshness, date_restrict)
             limit = max(1, int(per_source_limit or num_results))
@@ -535,7 +640,8 @@ class BrightDataSERPClient(SearchClient):
                         return hits
 
             html_text = self._extract_response_text(response)
-            return self._extract_hits_from_html(html_text, limit)
+            hits = self._extract_hits_from_html(html_text, limit)
+            return hits
         except Exception as exc:
             if error_message is None:
                 error_message = str(exc)
@@ -550,6 +656,12 @@ class BrightDataSERPClient(SearchClient):
             if error_message:
                 timing_payload["error"] = error_message
             self._append_timing(timing_payload)
+            self._append_call_record(
+                query=query,
+                duration_ms=timing_payload["duration_ms"],
+                hits=hits,
+                error=error_message,
+            )
 
 
 class BraveUsageRecorder:
@@ -758,6 +870,15 @@ class BraveSearchClient(SearchClient):
                 if slot != "primary":
                     timing_payload["fallback"] = True
                 self._append_timing(timing_payload)
+                self._append_call_record(
+                    query=query,
+                    duration_ms=timing_payload["duration_ms"],
+                    hits=hits,
+                    source=self.source_id,
+                    label=timing_payload["label"],
+                    fallback=slot != "primary",
+                    slot=slot,
+                )
                 return hits
             except Exception as exc:
                 error_message = str(exc)
@@ -781,6 +902,15 @@ class BraveSearchClient(SearchClient):
                 if slot != "primary":
                     timing_payload["fallback"] = True
                 self._append_timing(timing_payload)
+                self._append_call_record(
+                    query=query,
+                    duration_ms=timing_payload["duration_ms"],
+                    error=error_message,
+                    source=self.source_id,
+                    label=timing_payload["label"],
+                    fallback=slot != "primary",
+                    slot=slot,
+                )
                 continue
 
         return []
@@ -808,11 +938,13 @@ class FallbackSearchClient(SearchClient):
         self._reset_timings()
         start = time.perf_counter()
         error_message: Optional[str] = None
+        hits: List[SearchHit] = []
         try:
             if not self.static_results:
                 raise RuntimeError("No search backend configured. Provide a search API key or static results.")
             limit = max(1, int(per_source_limit or num_results))
-            return self.static_results[:limit]
+            hits = self.static_results[:limit]
+            return hits
         except Exception as exc:
             error_message = str(exc)
             raise
@@ -826,6 +958,12 @@ class FallbackSearchClient(SearchClient):
             if error_message:
                 payload["error"] = error_message
             self._append_timing(payload)
+            self._append_call_record(
+                query=query,
+                duration_ms=payload["duration_ms"],
+                hits=hits,
+                error=error_message,
+            )
 
 
 
@@ -877,6 +1015,7 @@ class GoogleSearchClient(SearchClient):
         self._reset_timings()
         start = time.perf_counter()
         error_message: Optional[str] = None
+        hits: List[SearchHit] = []
         try:
             limit = max(1, min(int(per_source_limit or num_results), 10))  # Google API max is 10 per request
             params = {
@@ -914,7 +1053,6 @@ class GoogleSearchClient(SearchClient):
                 raise RuntimeError("Google Search returned non-JSON payload") from exc
 
             items = payload.get("items") or []
-            hits: List[SearchHit] = []
             for entry in items[:limit]:
                 if not isinstance(entry, dict):
                     continue
@@ -946,6 +1084,12 @@ class GoogleSearchClient(SearchClient):
             if error_message:
                 payload["error"] = error_message
             self._append_timing(payload)
+            self._append_call_record(
+                query=query,
+                duration_ms=payload["duration_ms"],
+                hits=hits,
+                error=error_message,
+            )
 
 
 class CombinedSearchClient(SearchClient):
@@ -1013,9 +1157,33 @@ class CombinedSearchClient(SearchClient):
                     self._last_errors.append({"source": label, "error": str(exc)})
                     timing_payload["error"] = str(exc)
                     self._append_timing(timing_payload)
+                    records_getter = getattr(client, "get_last_call_records", None)
+                    child_records = list(records_getter() or []) if callable(records_getter) else []
+                    if child_records:
+                        self._extend_call_records(child_records)
+                    else:
+                        self._append_call_record(
+                            query=query,
+                            duration_ms=duration_ms,
+                            error=str(exc),
+                            source=timing_payload["source"],
+                            label=label,
+                        )
                     continue
 
                 self._append_timing(timing_payload)
+                records_getter = getattr(client, "get_last_call_records", None)
+                child_records = list(records_getter() or []) if callable(records_getter) else []
+                if child_records:
+                    self._extend_call_records(child_records)
+                else:
+                    self._append_call_record(
+                        query=query,
+                        duration_ms=duration_ms,
+                        hits=chunk,
+                        source=timing_payload["source"],
+                        label=label,
+                    )
                 hits.extend(chunk)
 
         deduped: List[SearchHit] = []
@@ -1185,7 +1353,10 @@ class PrioritySearchClient(SearchClient):
         total_limit = max(1, int(num_results))
         per_source = max(1, int(per_source_limit or total_limit))
 
-        for client in self.clients:
+        for position, client in enumerate(self.clients):
+            fallback = position > 0
+            label = getattr(client, "display_name", type(client).__name__)
+            source = getattr(client, "source_id", type(client).__name__.lower())
             try:
                 chunk = client.search(
                     query,
@@ -1196,11 +1367,34 @@ class PrioritySearchClient(SearchClient):
                 ) or []
             except Exception as exc:
                 self._last_errors.append(
-                    {"source": getattr(client, "display_name", type(client).__name__), "error": str(exc)}
+                    {"source": label, "error": str(exc)}
                 )
                 timings_getter = getattr(client, "get_last_timings", None)
+                timings: List[Dict[str, Any]] = []
                 if callable(timings_getter):
-                    self._last_timings.extend(timings_getter())
+                    timings = list(timings_getter() or [])
+                    self._last_timings.extend(timings)
+                records_getter = getattr(client, "get_last_call_records", None)
+                child_records = list(records_getter() or []) if callable(records_getter) else []
+                if child_records:
+                    self._extend_call_records(child_records, fallback=fallback)
+                else:
+                    duration_ms = next(
+                        (
+                            entry.get("duration_ms")
+                            for entry in reversed(timings)
+                            if isinstance(entry, dict) and entry.get("duration_ms") is not None
+                        ),
+                        0.0,
+                    )
+                    self._append_call_record(
+                        query=query,
+                        duration_ms=float(duration_ms or 0.0),
+                        error=str(exc),
+                        source=source,
+                        label=str(label),
+                        fallback=fallback,
+                    )
                 continue
 
             timings_getter = getattr(client, "get_last_timings", None)
@@ -1210,6 +1404,28 @@ class PrioritySearchClient(SearchClient):
             error_getter = getattr(client, "get_last_errors", None)
             if callable(error_getter):
                 self._last_errors.extend(error_getter() or [])
+
+            records_getter = getattr(client, "get_last_call_records", None)
+            child_records = list(records_getter() or []) if callable(records_getter) else []
+            if child_records:
+                self._extend_call_records(child_records, fallback=fallback)
+            else:
+                duration_ms = next(
+                    (
+                        entry.get("duration_ms")
+                        for entry in reversed(self._last_timings)
+                        if isinstance(entry, dict) and entry.get("duration_ms") is not None
+                    ),
+                    0.0,
+                )
+                self._append_call_record(
+                    query=query,
+                    duration_ms=float(duration_ms or 0.0),
+                    hits=chunk,
+                    source=source,
+                    label=str(label),
+                    fallback=fallback,
+                )
 
             deduped: List[SearchHit] = []
             seen: Set[str] = set()
@@ -1228,3 +1444,38 @@ class PrioritySearchClient(SearchClient):
 
     def get_last_errors(self) -> List[Dict[str, str]]:
         return list(self._last_errors)
+
+
+def apply_search_depth_override(
+    client: Any,
+    search_depth: Optional[str],
+) -> Optional[str]:
+    """Apply a per-request search_depth override to depth-aware providers.
+
+    Walks ``CombinedSearchClient``/``PrioritySearchClient`` trees and sets the
+    override on every supported client: ``TavilySearchClient`` (native depth
+    string) and ``FirecrawlSearchClient`` (mapped to an integer under
+    ``scrapeOptions``). Other providers are unaffected. Returns the normalized
+    depth when at least one provider accepted it, otherwise ``None``.
+    """
+    normalized = str(search_depth or "").strip().lower() or None
+    if normalized is None or normalized not in TAVILY_SEARCH_DEPTHS:
+        return None
+
+    stack: List[Any] = [client]
+    visited: Set[int] = set()
+    applied = False
+    while stack:
+        node = stack.pop()
+        if node is None or id(node) in visited:
+            continue
+        visited.add(id(node))
+        for sub in getattr(node, "clients", None) or []:
+            stack.append(sub)
+        if isinstance(node, TavilySearchClient):
+            node.search_depth = normalized
+            applied = True
+        elif isinstance(node, FirecrawlSearchClient):
+            node.search_depth = FIRECRAWL_DEPTH_MAP[normalized]
+            applied = True
+    return normalized if applied else None

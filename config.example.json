@@ -9,12 +9,21 @@
         "max_threads": 200
     },
     "audit": {
-        "_comment": "Audit files contain queries and, by default, answers. They are retained under gitignored runtime/audit; set include_answer false or lower max_files for more restrictive handling.",
+        "_comment": "Audit files contain queries and, by default, answers. Set include_full_result true and both limits to 0 for full durable query records; credentials and URL query strings remain redacted.",
         "enabled": false,
         "dir": "runtime/audit",
         "include_answer": true,
+        "include_full_result": false,
         "max_files": 200,
         "max_bytes_per_record": 65536
+    },
+    "server_logging": {
+        "_comment": "Set enabled true to persist stdout, stderr, Flask/Werkzeug logs, HTTP access records, and per-request workflow events under a gitignored directory.",
+        "enabled": false,
+        "dir": "runtime/server",
+        "capture_stdio": true,
+        "include_request_payload": true,
+        "include_response_payload": true
     },
     "orchestration": {
         "_comment": "Shared analysis, bounded evidence plan, ledger, and verification. LLM analysis remains opt-in; insufficient planned evidence returns an explicit result rather than an unsupported factual draft.",
@@ -24,7 +33,42 @@
         "query_budget": 3,
         "result_budget": 8,
         "time_budget_ms": 20000,
-        "recovery_budget": 1
+        "recovery_budget": 1,
+        "reformulation_recovery": {
+            "_comment": "Deterministic re-search for authority, comparison, and no-evidence gaps. Set enabled false to keep the legacy single-retrieval behavior.",
+            "enabled": true,
+            "max_attempts": 1
+        },
+        "official_domains": {
+            "_comment": "Optional entity-stem to official registrable-domain aliases. Alias matches are tiered official before first-party stem matching.",
+            "glm": ["zhipu.cn", "bigmodel.cn", "open.bigmodel.cn"],
+            "kimi": ["moonshot.cn", "kimi.com", "platform.moonshot.cn"],
+            "openai": ["openai.com", "platform.openai.com"],
+            "anthropic": ["anthropic.com", "docs.anthropic.com"],
+            "claude": ["anthropic.com", "docs.anthropic.com"],
+            "gemini": ["google.com", "ai.google.dev"],
+            "deepseek": ["deepseek.com", "platform.deepseek.com"],
+            "minimax": ["minimaxi.com", "platform.minimaxi.com"],
+            "fable": ["fable.ai"],
+            "fireworks": ["fireworks.ai", "docs.fireworks.ai"],
+            "together": ["together.ai"],
+            "langchain": ["langchain.com", "python.langchain.com"],
+            "pytorch": ["pytorch.org"],
+            "react": ["react.dev"],
+            "nextjs": ["nextjs.org", "nextjs.com"]
+        },
+        "official_page_extraction": {
+            "_comment": "Fetch full page content from official/first-party search hits. DirectFetch runs first; Parallel/Firecrawl/Tavily Extract APIs run only when it cannot return usable content. Set enabled false to keep snippet-only evidence.",
+            "enabled": true,
+            "max_urls": 4,
+            "max_chars_per_page": 4000
+        },
+        "directFetch": {
+            "_comment": "Preferred zero-API-key extractor for selected public pages: plain HTTP GET plus bs4 main-text extraction. Extract APIs are used only after this fetch fails or returns no usable content. No JS rendering.",
+            "enabled": true,
+            "timeout": 30,
+            "max_chars_per_page": 20000
+        }
     },
     "postcheck": {
         "enabled": false,
@@ -91,7 +135,8 @@
     "firecrawlSearch": {
         "api_key": "YOUR_FIRECRAWL_API_KEY_HERE",
         "base_url": "https://api.firecrawl.dev/v2/search",
-        "timeout": 30
+        "timeout": 30,
+        "search_depth": null
     },
     "tavilySearch": {
         "api_key": "YOUR_TAVILY_API_KEY_HERE",
@@ -120,6 +165,14 @@
         "timeout": 45,
         "only_main_content": true,
         "only_clean_content": false
+    },
+    "tavily2": {
+        "_comment": "Tavily Extract fallback for selected public URLs. The runtime also accepts the legacy bare API-key string already used by existing config.json files.",
+        "api_key": "YOUR_TAVILY_API_KEY_HERE",
+        "base_url": "https://api.tavily.com/extract",
+        "timeout": 45,
+        "extract_depth": "basic",
+        "format": "markdown"
     },
     "FINNHUB_API_KEY": "",
     "SPORTSDB_API_KEY": "",

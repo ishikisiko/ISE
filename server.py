@@ -6,10 +6,15 @@ import os
 import queue
 import sys
 import threading
+import time
+import traceback
+import uuid
 from functools import lru_cache
 from typing import Any, Dict, Generator, Optional, List
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, g, jsonify, request
+from werkzeug.serving import run_simple
+from werkzeug.serving import WSGIRequestHandler
 from werkzeug.utils import secure_filename
 
 # Add project directory to path for imports
@@ -18,6 +23,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from main import build_search_client, build_reranker
 from utils.chunking import resolve_chunk_settings
 from utils.config_validation import configured_value
+from utils.server_logging import (
+    QueryAuditLog,
+    configure_process_logging,
+    resolve_server_logging_settings,
+    write_access_event,
+)
 from utils.temperature_config import get_temperature_for_task
 from utils.workflow_trace import WorkflowTracer
 from langchain.langchain_llm import create_chat_model
@@ -34,6 +45,94 @@ app = Flask(__name__, static_folder=os.path.join(base_dir, "frontend"), static_u
 UPLOAD_FOLDER = os.path.join(base_dir, 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+
+def _server_logging_settings() -> Dict[str, Any]:
+    """Read optional web logging settings without affecting API availability."""
+    override = app.config.get("SERVER_LOGGING_SETTINGS")
+    if isinstance(override, dict):
+        return resolve_server_logging_settings({"server_logging": override})
+    if app.config.get("TESTING"):
+        return resolve_server_logging_settings(None)
+    try:
+        return resolve_server_logging_settings(load_base_config())
+    except Exception:
+        return resolve_server_logging_settings(None)
+
+
+def _request_metadata() -> Dict[str, Any]:
+    """Capture request facts for audit records; redaction happens at write time."""
+    return {
+        "method": request.method,
+        "path": request.path,
+        "query_string": request.query_string.decode("utf-8", errors="replace"),
+        "remote_addr": request.remote_addr,
+        "content_type": request.content_type,
+        # The audit sanitizer keeps ordinary header values while dropping only
+        # credential-shaped names such as Authorization and Cookie.
+        "header_values": dict(request.headers),
+    }
+
+
+def _new_query_audit(endpoint: str, payload: Any) -> QueryAuditLog:
+    """Start a durable query event stream before validation begins."""
+    audit = QueryAuditLog(
+        _server_logging_settings(),
+        endpoint=endpoint,
+        request_id=getattr(g, "request_id", None),
+    )
+    audit.record(
+        "request_received",
+        request=_request_metadata(),
+        request_payload=payload,
+    )
+    return audit
+
+
+@app.before_request
+def _begin_access_log() -> None:
+    g.request_id = uuid.uuid4().hex
+    g.request_started_at = time.perf_counter()
+
+
+@app.after_request
+def _persist_access_log(response: Response) -> Response:
+    request_id = getattr(g, "request_id", None)
+    started_at = getattr(g, "request_started_at", None)
+    duration_ms = (
+        round((time.perf_counter() - started_at) * 1000, 1)
+        if isinstance(started_at, float)
+        else None
+    )
+    write_access_event(
+        _server_logging_settings(),
+        event="http_response",
+        request_id=request_id,
+        request=_request_metadata(),
+        status_code=response.status_code,
+        duration_ms=duration_ms,
+        response_content_type=response.content_type,
+        response_content_length=response.calculate_content_length(),
+    )
+    if request_id:
+        response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.teardown_request
+def _persist_unhandled_request_error(error: Optional[BaseException]) -> None:
+    if error is None:
+        return
+    write_access_event(
+        _server_logging_settings(),
+        event="http_exception",
+        request_id=getattr(g, "request_id", None),
+        request=_request_metadata(),
+        error=str(error),
+        traceback="".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        ),
+    )
 
 
 class ConfigurationError(RuntimeError):
@@ -415,6 +514,80 @@ def delete_file(filename):
 
 
 
+# ---------------------------------------------------------------------------
+# Conversation management (sidebar)
+# ---------------------------------------------------------------------------
+def _conversation_manager():
+    """Return the process-level ConversationManager singleton."""
+    from orchestrators.conversation_store import get_conversation_manager
+    return get_conversation_manager()
+
+
+@app.route("/api/conversations")
+def list_conversations() -> Any:
+    """List persisted conversations for the sidebar, newest first."""
+    try:
+        mgr = _conversation_manager()
+        conversations = mgr.list_conversations()
+        enabled = mgr.enabled
+    except Exception as exc:  # noqa: BLE001 - never 500 the sidebar
+        print(f"[server] list_conversations failed: {exc}")
+        conversations, enabled = [], False
+    return jsonify({"conversations": conversations, "enabled": enabled})
+
+
+@app.route("/api/conversations/<conversation_id>")
+def get_conversation(conversation_id: str) -> Any:
+    """Return the full turn history for a conversation."""
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return jsonify({"error": "conversation_id is required"}), 400
+    title = None
+    try:
+        mgr = _conversation_manager()
+        turns = mgr.get_all_turns(cid)
+        title = mgr.get_conversation_title(cid)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[server] get_conversation failed: {exc}")
+        turns = []
+    return jsonify({
+        "conversation_id": cid,
+        "title": title,
+        "turns": turns,
+    })
+
+
+@app.route("/api/conversations/<conversation_id>", methods=["DELETE"])
+def delete_conversation(conversation_id: str) -> Any:
+    """Delete a conversation (checkpoint, turns, and custom title)."""
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return jsonify({"error": "conversation_id is required"}), 400
+    try:
+        _conversation_manager().delete_checkpoint(cid)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[server] delete_conversation failed: {exc}")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"message": "Conversation deleted"})
+
+
+@app.route("/api/conversations/<conversation_id>/title", methods=["PUT", "POST"])
+def rename_conversation(conversation_id: str) -> Any:
+    """Set or clear a custom title for a conversation."""
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return jsonify({"error": "conversation_id is required"}), 400
+    payload = request.get_json(silent=True) or {}
+    title = (payload.get("title") or "").strip()
+    mgr = _conversation_manager()
+    if not title:
+        mgr.clear_conversation_title(cid)
+        return jsonify({"conversation_id": cid, "title": None, "custom_title": False})
+    if not mgr.set_conversation_title(cid, title):
+        return jsonify({"error": "Failed to rename conversation"}), 500
+    return jsonify({"conversation_id": cid, "title": title, "custom_title": True})
+
+
 
 def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and normalize an answer request payload.
@@ -481,6 +654,9 @@ def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
     if reference_limit is None and fallback_display_value is not None:
         reference_limit = _coerce_positive_int(fallback_display_value, "search_source_display_limit")
 
+    search_depth_raw = str(payload.get("search_depth") or "").strip().lower()
+    search_depth = search_depth_raw or None
+
     default_total = legacy_num if legacy_num is not None else 5
     if total_limit is None:
         total_limit = default_total
@@ -513,6 +689,7 @@ def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
         "per_source_limit": per_source_limit,
         "num_retrieved_docs": num_retrieved_docs,
         "reference_limit": reference_limit,
+        "search_depth": search_depth,
         "temperature": temperature,
         "max_tokens": int(payload.get("max_tokens")) if payload.get("max_tokens") else 5000,
         "chunk_size": payload.get("chunk_size"),
@@ -555,6 +732,7 @@ def _execute_answer_unlocked(ctx: Dict[str, Any], tracer: Optional[WorkflowTrace
         allow_search=ctx["allow_search"],
         reference_limit=ctx["reference_limit"],
         force_search=ctx["force_search"],
+        search_depth=ctx.get("search_depth"),
         images=ctx["images"],
         conversation_id=ctx.get("conversation_id"),
         tracer=tracer,
@@ -580,21 +758,40 @@ def _execute_answer_unlocked(ctx: Dict[str, Any], tracer: Optional[WorkflowTrace
 @app.post("/api/answer")
 def answer() -> Any:
     payload: Dict[str, Any] = request.get_json(silent=True) or {}
+    audit = _new_query_audit("/api/answer", payload)
 
     try:
         ctx = _prepare_answer_context(payload)
     except PayloadError as exc:
+        audit.record(
+            "validation_error",
+            error=str(exc),
+            status_code=exc.status,
+        )
         return jsonify({"error": str(exc)}), exc.status
+    audit.record("context_prepared", context=ctx)
+
+    tracer = WorkflowTracer()
+    tracer.on_event(
+        lambda event: audit.record("workflow_step", workflow_event=event)
+    )
 
     try:
-        result = _execute_answer(ctx)
+        result = _execute_answer(ctx, tracer=tracer)
     except ConfigurationError as exc:
+        audit.record("configuration_error", error=str(exc), status_code=500)
         return jsonify({"error": str(exc)}), 500
     except Exception as exc:  # pragma: no cover - propagate runtime issues
-        import traceback
         error_msg = str(exc).encode('utf-8', errors='replace').decode('utf-8')
+        traceback_text = traceback.format_exc()
         print(f"[server] Pipeline execution error: {error_msg}")
-        print(traceback.format_exc())
+        print(traceback_text)
+        audit.record(
+            "pipeline_error",
+            error=error_msg,
+            traceback=traceback_text,
+            status_code=500,
+        )
         return jsonify({"error": f"Pipeline execution failed: {error_msg}"}), 500
 
     # Log answer length
@@ -607,6 +804,7 @@ def answer() -> Any:
         print(f"[server] Serialization successful")
     except Exception as exc:
         print(f"[server] Failed to serialize result: {exc}")
+        audit.record("serialization_error", error=str(exc), status_code=500)
         return jsonify({"error": "响应数据序列化失败"}), 500
 
     # Try to create JSON to verify it works
@@ -615,8 +813,11 @@ def answer() -> Any:
         print(f"[server] JSON creation successful, size: {len(test_json)} bytes")
     except Exception as exc:
         print(f"[server] JSON creation failed: {exc}")
+        audit.record("json_creation_error", error=str(exc), status_code=500)
         return jsonify({"error": f"JSON序列化失败: {str(exc)}"}), 500
 
+    audit.record("response_ready", response_payload=result, status_code=200)
+    audit.record("request_complete", status_code=200)
     return jsonify(result)
 
 
@@ -631,54 +832,90 @@ def answer_stream() -> Any:
       event: done   — marks the end of the stream
     """
     payload: Dict[str, Any] = request.get_json(silent=True) or {}
+    audit = _new_query_audit("/api/answer/stream", payload)
 
     try:
         ctx = _prepare_answer_context(payload)
     except PayloadError as exc:
+        audit.record(
+            "validation_error",
+            error=str(exc),
+            status_code=exc.status,
+        )
         return jsonify({"error": str(exc)}), exc.status
+    audit.record("context_prepared", context=ctx)
 
     def generate() -> Generator[str, None, None]:
         events: "queue.Queue[Any]" = queue.Queue()
         tracer = WorkflowTracer()
-        tracer.on_event(lambda event: events.put(("step", event)))
+
+        def persist_and_queue_step(event: Dict[str, Any]) -> None:
+            audit.record("workflow_step", workflow_event=event)
+            events.put(("step", event))
+
+        tracer.on_event(persist_and_queue_step)
         holder: Dict[str, Any] = {}
+        completed = False
 
         def run() -> None:
             try:
                 holder["result"] = _execute_answer(ctx, tracer=tracer)
             except Exception as exc:  # pragma: no cover - propagate runtime issues
-                import traceback
                 error_msg = str(exc).encode("utf-8", errors="replace").decode("utf-8")
+                traceback_text = traceback.format_exc()
                 print(f"[server] Stream pipeline error: {error_msg}")
-                print(traceback.format_exc())
+                print(traceback_text)
                 holder["error"] = error_msg
+                audit.record(
+                    "pipeline_error",
+                    error=error_msg,
+                    traceback=traceback_text,
+                    status_code=500,
+                )
             finally:
                 events.put(None)
 
-        worker = threading.Thread(target=run, daemon=True)
-        worker.start()
+        try:
+            worker = threading.Thread(target=run, daemon=True)
+            worker.start()
 
-        while True:
-            item = events.get()
-            if item is None:
-                break
-            kind, data = item
-            yield f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            while True:
+                item = events.get()
+                if item is None:
+                    break
+                kind, data = item
+                yield f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
 
-        if "error" in holder:
-            yield f"event: error\ndata: {json.dumps({'error': holder['error']}, ensure_ascii=False)}\n\n"
-        else:
-            try:
-                result = ensure_json_serializable(holder["result"])
-            except Exception as exc:
-                yield f"event: error\ndata: {json.dumps({'error': f'响应数据序列化失败: {exc}'}, ensure_ascii=False)}\n\n"
+            if "error" in holder:
+                error_payload = {"error": holder["error"]}
+                audit.record("response_error", response_payload=error_payload, status_code=500)
+                yield f"event: error\ndata: {json.dumps(error_payload, ensure_ascii=False)}\n\n".encode("utf-8")
             else:
-                yield f"event: result\ndata: {json.dumps(result, ensure_ascii=False)}\n\n"
-        yield "event: done\ndata: {}\n\n"
+                try:
+                    result = ensure_json_serializable(holder["result"])
+                except Exception as exc:
+                    error_payload = {"error": f"响应数据序列化失败: {exc}"}
+                    audit.record(
+                        "serialization_error",
+                        error=str(exc),
+                        response_payload=error_payload,
+                        status_code=500,
+                    )
+                    yield f"event: error\ndata: {json.dumps(error_payload, ensure_ascii=False)}\n\n".encode("utf-8")
+                else:
+                    audit.record("response_ready", response_payload=result, status_code=200)
+                    yield f"event: result\ndata: {json.dumps(result, ensure_ascii=False)}\n\n".encode("utf-8")
+            audit.record("request_complete", status_code=200)
+            completed = True
+            yield b"event: done\ndata: {}\n\n"
+        finally:
+            if not completed:
+                audit.record("stream_closed_before_complete")
 
     return Response(
         generate(),
         mimetype="text/event-stream",
+        direct_passthrough=True,
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -687,6 +924,31 @@ def answer_stream() -> Any:
     )
 
 
+class StreamingRequestHandler(WSGIRequestHandler):
+    """HTTP/1.1 handler so SSE chunks flush incrementally.
+
+    Werkzeug's dev server defaults to HTTP/1.0, which disables chunked
+    transfer encoding and forces clients to buffer the whole response until
+    the connection closes — making live step streaming appear batched. HTTP/1.1
+    enables per-chunk framing so each workflow step reaches the browser as it
+    happens.
+    """
+
+    protocol_version = "HTTP/1.1"
+
+
 if __name__ == "__main__":
     app.config['JSON_AS_ASCII'] = False  # 允许UTF-8字符
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), debug=False)
+    try:
+        configure_process_logging(_server_logging_settings())
+    except Exception as exc:  # noqa: BLE001 - logging must not prevent startup
+        print(f"[server] Failed to enable persistent logging: {exc}")
+    run_simple(
+        os.environ.get("HOST", "0.0.0.0"),
+        int(os.environ.get("PORT", "8000")),
+        app,
+        threaded=True,
+        request_handler=StreamingRequestHandler,
+        use_reloader=False,
+        use_debugger=False,
+    )

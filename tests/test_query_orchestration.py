@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from evidence import EvidenceItem
 from langchain.langchain_orchestrator import LangChainOrchestrator
 from search.search import SearchClient, SearchHit
 from utils.audit_log import build_audit_record
+from utils.workflow_trace import WorkflowTracer
 from utils.query_orchestration import (
     EvidenceLedger,
     PlanController,
@@ -24,7 +26,9 @@ from utils.query_orchestration import (
     VerificationStatus,
     analyze_query,
     build_query_plan,
+    deterministic_query_for_plan,
     merge_optional_analysis,
+    reformulate_query_for_recovery,
     verify_evidence_plan,
 )
 
@@ -76,6 +80,23 @@ class _MultiProviderSearchStub(_SearchStub):
         return list(self._last_errors)
 
 
+class _QueryAwareSearchStub(_SearchStub):
+    def __init__(self, responses: dict[str, list[SearchHit]], *, delay: float = 0.0) -> None:
+        super().__init__([])
+        self.responses = responses
+        self.calls: list[str] = []
+        self.delay = delay
+
+    def search(self, query: str, num_results: int = 5, **kwargs: Any) -> list[SearchHit]:
+        self.calls.append(query)
+        if self.delay:
+            time.sleep(self.delay)
+        self._reset_timings()
+        self._append_timing({"source": "brave", "label": "Brave", "duration_ms": 1.0})
+        key = "official" if "official" in query.casefold() else "initial"
+        return list(self.responses.get(key, [])[:num_results])
+
+
 def test_evidence_package_imports_in_a_fresh_process_without_a_cycle() -> None:
     completed = subprocess.run(
         [
@@ -100,6 +121,19 @@ class _LLMStub:
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
         return type("Response", (), {"content": "draft answer", "response_metadata": {}})()
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self.invoke(*args, **kwargs)
+
+
+class _CapturingLLM(_LLMStub):
+    def __init__(self, content: str = "draft answer") -> None:
+        self.content = content
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        return type("Response", (), {"content": self.content, "response_metadata": {}})()
 
 
 class _GeneralSelector:
@@ -322,14 +356,16 @@ def test_verifier_returns_each_typed_outcome() -> None:
         == VerificationStatus.CLARIFICATION_REQUIRED
     )
 
-    insufficient_plan = build_query_plan(
+    recoverable_non_temporal = build_query_plan(
         analyze_query("fable5 api价格", allow_search=True),
         has_local_docs=False,
     )
-    assert (
-        verify_evidence_plan(insufficient_plan, EvidenceLedger(insufficient_plan)).status
-        == VerificationStatus.EVIDENCE_INSUFFICIENT
+    non_temporal_outcome = verify_evidence_plan(
+        recoverable_non_temporal,
+        EvidenceLedger(recoverable_non_temporal),
     )
+    assert non_temporal_outcome.status == VerificationStatus.RECOVERABLE_GAP
+    assert non_temporal_outcome.missing_constraints == ["no_evidence"]
 
     recoverable_plan = build_query_plan(
         analyze_query("fable5 过去三年价格趋势", allow_search=True),
@@ -519,10 +555,15 @@ def test_default_orchestrator_exposes_plan_trace_and_enforces_when_configured(mo
     result = orchestrator.answer("对比fable5 api价格和glm5.2,kimik3")
     control = result["control"]
 
-    assert result["answer"].startswith("当前检索到的证据不足")
+    assert result["answer"].startswith("draft answer")
     assert control["keyword_generation"]["fallback_used"] is True
     assert control["verification"]["status"] == "evidence_insufficient"
-    assert [step["kind"] for step in control["query_plan"]["steps"]] == ["web_search"]
+    assert [step["kind"] for step in control["query_plan"]["steps"]] == [
+        "web_search",
+        "query_reformulation",
+    ]
+    assert control["answer_basis"] == "limited_evidence"
+    assert any(event["kind"] == "recovery" for event in control["execution_trace"]["events"])
     assert control["execution_trace"]["executed"] == ["brave"]
     assert control["providers"] == {
         "configured": ["brave"],
@@ -591,3 +632,364 @@ def test_flask_response_preserves_additive_orchestration_control(monkeypatch) ->
     assert control["query_plan"]["steps"][0]["kind"] == "web_search"
     assert control["execution_trace"]["executed"] == ["brave"]
     assert control["verification"]["status"] == "complete"
+
+
+def test_non_temporal_gaps_are_recoverable_until_the_recovery_budget_is_spent() -> None:
+    plan = build_query_plan(
+        analyze_query("对比fable5 api价格和glm5.2,kimik3", allow_search=True),
+        has_local_docs=False,
+        recovery_budget=1,
+    )
+    reformulation = plan.step_for_kind(
+        PlanStepKind.QUERY_REFORMULATION,
+        include_recovery=True,
+    )
+    assert reformulation is not None
+
+    no_evidence = verify_evidence_plan(plan, EvidenceLedger(plan))
+    assert no_evidence.status == VerificationStatus.RECOVERABLE_GAP
+    assert no_evidence.next_action == "recover"
+    assert "no_evidence" in no_evidence.missing_constraints
+
+    authority_ledger = EvidenceLedger(plan)
+    authority_ledger.ingest(
+        [_item("https://third.example/fable", "fable5 api pricing", tier="unknown")]
+    )
+    authority_ledger.apply_limits()
+    authority_gap = verify_evidence_plan(plan, authority_ledger)
+    assert authority_gap.status == VerificationStatus.RECOVERABLE_GAP
+    assert "authority" in authority_gap.missing_constraints
+
+    exhausted = build_query_plan(
+        analyze_query("fable5 api价格", allow_search=True),
+        has_local_docs=False,
+        recovery_budget=0,
+    )
+    exhausted_outcome = verify_evidence_plan(exhausted, EvidenceLedger(exhausted))
+    assert exhausted_outcome.status == VerificationStatus.EVIDENCE_INSUFFICIENT
+    assert "recovery_budget_exhausted" in exhausted_outcome.failure_types
+
+
+def test_deterministic_fallback_and_reformulation_preserve_intent_cues() -> None:
+    analysis = analyze_query("对比fable5 api价格和glm5.2,kimik3", allow_search=True)
+
+    fallback = deterministic_query_for_plan(analysis)
+    authority_rewrite = reformulate_query_for_recovery(
+        analysis,
+        ["comparison:glm5.2", "authority", "no_evidence"],
+    )
+    comparison_rewrite = reformulate_query_for_recovery(
+        analysis,
+        ["comparison:glm5.2"],
+    )
+
+    assert "pricing" in fallback
+    assert "official" in authority_rewrite
+    assert "glm5.2" in comparison_rewrite
+    assert "pricing" in comparison_rewrite
+    assert "fable5" not in comparison_rewrite
+
+
+def test_rag_assigns_web_tiers_from_plan_entities_and_aliases() -> None:
+    plan = build_query_plan(
+        analyze_query("glm5.2 api价格", allow_search=True),
+        has_local_docs=False,
+    )
+    ledger = EvidenceLedger(plan)
+    chain = SearchRAGChain(
+        llm=_LLMStub(),
+        search_client=_SearchStub(
+            [SearchHit("GLM pricing", "https://docs.zhipu.cn/pricing", "glm5.2 pricing")]
+        ),
+        config={"orchestration": {"official_domains": {"glm": ["zhipu.cn"]}}},
+        data_path=None,
+    )
+
+    chain._retrieve_evidence(
+        "glm5.2 api价格",
+        search_query="glm5.2 pricing",
+        num_search_results=3,
+        per_source_limit=3,
+        num_retrieved_docs=1,
+        enable_search=True,
+        enable_local_docs=False,
+        freshness=None,
+        date_restrict=None,
+        timing_recorder=None,
+        query_plan=plan,
+        evidence_ledger=ledger,
+        execution_trace=QueryExecutionTrace(),
+        plan_controller=PlanController(plan, QueryExecutionTrace()),
+    )
+
+    assert ledger.entries[0].source_tier == "official"
+
+
+def test_limited_evidence_generates_a_qualified_answer_but_empty_ledger_does_not() -> None:
+    plan = build_query_plan(
+        analyze_query("fable5 api价格", allow_search=True),
+        has_local_docs=False,
+        recovery_budget=0,
+    )
+    limited_llm = _CapturingLLM("qualified answer")
+    limited_chain = SearchRAGChain(
+        llm=limited_llm,
+        search_client=_SearchStub(
+            [SearchHit("third party", "https://third.example/fable", "fable5 pricing")]
+        ),
+        data_path=None,
+    )
+    limited_ledger = EvidenceLedger(plan)
+    limited_result = limited_chain.answer(
+        "fable5 api价格",
+        search_query="fable5 pricing",
+        enable_search=True,
+        enable_local_docs=False,
+        query_plan=plan,
+        evidence_ledger=limited_ledger,
+        execution_trace=QueryExecutionTrace(),
+        plan_controller=PlanController(plan, QueryExecutionTrace()),
+    )
+
+    assert limited_result["answer"].startswith("qualified answer")
+    assert limited_result["answer_basis"] == "limited_evidence"
+    assert len(limited_llm.calls) == 1
+    messages = limited_llm.calls[0][0][0]
+    assert "authority tier" in messages[0].content
+
+    blank_limited = SearchRAGChain(
+        llm=_CapturingLLM(""),
+        search_client=_SearchStub(
+            [SearchHit("third party", "https://third.example/fable", "fable5 pricing")]
+        ),
+        data_path=None,
+    ).answer(
+        "fable5 api价格",
+        search_query="fable5 pricing",
+        enable_search=True,
+        enable_local_docs=False,
+        query_plan=plan,
+        evidence_ledger=EvidenceLedger(plan),
+        execution_trace=QueryExecutionTrace(),
+        plan_controller=PlanController(plan, QueryExecutionTrace()),
+    )
+    assert blank_limited["limited_evidence_fallback"] is True
+    assert "权威性标准" in blank_limited["answer"]
+
+    empty_llm = _CapturingLLM()
+    empty_chain = SearchRAGChain(
+        llm=empty_llm,
+        search_client=_SearchStub([]),
+        data_path=None,
+    )
+    empty_result = empty_chain.answer(
+        "fable5 api价格",
+        search_query="fable5 pricing",
+        enable_search=True,
+        enable_local_docs=False,
+        query_plan=plan,
+        evidence_ledger=EvidenceLedger(plan),
+        execution_trace=QueryExecutionTrace(),
+        plan_controller=PlanController(plan, QueryExecutionTrace()),
+    )
+
+    assert empty_result["answer"] == ""
+    assert empty_result["answer_basis"] == "no_evidence"
+    assert empty_llm.calls == []
+
+    direct_plan = build_query_plan(
+        analyze_query("Explain RAG", allow_search=False),
+        has_local_docs=False,
+        needs_evidence=False,
+    )
+    direct_llm = _CapturingLLM("direct local-only answer")
+    direct_result = SearchRAGChain(
+        llm=direct_llm,
+        search_client=_SearchStub([]),
+        data_path=None,
+    ).answer(
+        "Explain RAG",
+        enable_search=False,
+        enable_local_docs=False,
+        query_plan=direct_plan,
+        evidence_ledger=EvidenceLedger(direct_plan),
+        execution_trace=QueryExecutionTrace(),
+        plan_controller=PlanController(direct_plan, QueryExecutionTrace()),
+    )
+    assert direct_result["answer"] == "direct local-only answer"
+    assert len(direct_llm.calls) == 1
+
+
+def _recovery_orchestrator(
+    search_client: SearchClient,
+    *,
+    recovery_budget: int = 1,
+    time_budget_ms: int = 20000,
+    reformulation_enabled: bool = True,
+) -> LangChainOrchestrator:
+    orchestrator = LangChainOrchestrator(
+        llm=_LLMStub(),
+        routing_llm=_LLMStub(),
+        classifier_llm=_LLMStub(),
+        search_client=search_client,
+        source_selector=_GeneralSelector(),
+        requested_search_sources=["brave"],
+        active_search_sources=["brave"],
+        configured_search_sources=["brave"],
+        config={
+            "orchestration": {
+                "enforce_verification": True,
+                "query_budget": 3,
+                "recovery_budget": recovery_budget,
+                "time_budget_ms": time_budget_ms,
+                "reformulation_recovery": {"enabled": reformulation_enabled},
+                "official_domains": {"fable": ["fable.ai"]},
+            }
+        },
+    )
+    orchestrator._make_routing_decision = lambda *args, **kwargs: {
+        "needs_search": True,
+        "reason": "test",
+    }
+    orchestrator._generate_keywords = lambda *args, **kwargs: {"keywords": ["fable5 pricing"]}
+    return orchestrator
+
+
+def test_orchestrator_reformulates_and_merges_evidence_across_iterations() -> None:
+    search = _QueryAwareSearchStub(
+        {
+            "initial": [SearchHit("third party", "https://third.example/fable", "fable5 pricing")],
+            "official": [SearchHit("official pricing", "https://fable.ai/pricing", "fable5 pricing")],
+        }
+    )
+    result = _recovery_orchestrator(search).answer("fable5 api价格")
+    control = result["control"]
+
+    assert len(search.calls) == 2
+    assert "official" in search.calls[1]
+    assert control["verification"]["status"] == "complete"
+    assert control["evidence_coverage"]["entries"] == 2
+    recovery_events = [
+        event for event in control["execution_trace"]["events"] if event["kind"] == "recovery"
+    ]
+    assert any(event.get("query", "").find("official") >= 0 for event in recovery_events)
+
+
+def test_orchestrator_stops_reformulation_when_budget_or_time_is_exhausted(monkeypatch) -> None:
+    always_limited = _QueryAwareSearchStub(
+        {
+            "initial": [SearchHit("third party", "https://third.example/fable", "fable5 pricing")],
+            "official": [SearchHit("third party", "https://third.example/fable-2", "fable5 pricing")],
+        }
+    )
+    exhausted_result = _recovery_orchestrator(always_limited).answer("fable5 api价格")
+    exhausted_control = exhausted_result["control"]
+    assert len(always_limited.calls) == 2
+    assert exhausted_control["verification"]["status"] == "evidence_insufficient"
+    assert "recovery_budget_exhausted" in exhausted_control["verification"]["failure_types"]
+    assert exhausted_control["answer_basis"] == "limited_evidence"
+
+    original_can_run = PlanController.can_run
+
+    def block_reformulation(self: PlanController, step: QueryPlanStep) -> str | None:
+        if step.kind == PlanStepKind.QUERY_REFORMULATION:
+            return "time_budget_exhausted"
+        return original_can_run(self, step)
+
+    monkeypatch.setattr(PlanController, "can_run", block_reformulation)
+    time_limited = _QueryAwareSearchStub(
+        {"initial": [SearchHit("third party", "https://third.example/fable", "fable5 pricing")]}
+    )
+    time_result = _recovery_orchestrator(time_limited).answer("fable5 api价格")
+    assert len(time_limited.calls) == 1
+    assert "time_budget_exhausted" in time_result["control"]["verification"]["failure_types"]
+
+
+def test_reformulation_recovery_can_be_disabled_without_a_second_search() -> None:
+    search = _QueryAwareSearchStub(
+        {
+            "initial": [SearchHit("third party", "https://third.example/fable", "fable5 pricing")],
+            "official": [SearchHit("official", "https://fable.ai/pricing", "fable5 pricing")],
+        }
+    )
+
+    result = _recovery_orchestrator(
+        search,
+        reformulation_enabled=False,
+    ).answer("fable5 api价格")
+
+    assert len(search.calls) == 1
+    assert [step["kind"] for step in result["control"]["query_plan"]["steps"]] == ["web_search"]
+    assert not any(
+        event["kind"] == "recovery"
+        for event in result["control"]["execution_trace"]["events"]
+    )
+
+
+def test_keyword_failure_trace_reports_fallback_and_preserves_pricing_intent() -> None:
+    orchestrator = _recovery_orchestrator(
+        _SearchStub([SearchHit("official", "https://fable.ai/pricing", "fable5 pricing")])
+    )
+    orchestrator._generate_keywords = lambda *args, **kwargs: {
+        "keywords": [],
+        "error": "routing model unavailable",
+    }
+    tracer = WorkflowTracer()
+    result = orchestrator.answer("fable5 api价格", tracer=tracer)
+
+    keyword_event = next(event for event in tracer.events if event["id"] == "keywords" and event["status"] == "done")
+    assert "fallback_used" in keyword_event["detail"]
+    assert "routing model unavailable" in keyword_event["detail"]
+    assert "pricing" in result["control"]["keyword_generation"]["fallback_query"]
+
+
+def test_empty_local_directory_skips_embedding_initialization(monkeypatch, tmp_path: Path) -> None:
+    import langchain.langchain_rag as rag_module
+
+    tracer = WorkflowTracer()
+
+    def fail_vector_store(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("empty directories must not load embeddings")
+
+    monkeypatch.setattr(rag_module, "LangChainVectorStore", fail_vector_store)
+    chain = SearchRAGChain(
+        llm=_LLMStub(),
+        search_client=_SearchStub([]),
+        data_path=str(tmp_path),
+        tracer=tracer,
+    )
+
+    assert chain.vector_store is None
+    assert any(
+        event["id"] == "local_index" and event["status"] == "skipped"
+        for event in tracer.events
+    )
+
+
+def test_local_document_snapshot_change_rebuilds_primary_pipeline(monkeypatch, tmp_path: Path) -> None:
+    import langchain.langchain_orchestrator as orchestrator_module
+
+    created: list[dict[str, Any]] = []
+
+    class _PrimaryRagStub:
+        def __init__(self, **kwargs: Any) -> None:
+            created.append(kwargs)
+
+    monkeypatch.setattr(orchestrator_module, "SearchRAGChain", _PrimaryRagStub)
+    orchestrator = LangChainOrchestrator(
+        llm=_LLMStub(),
+        routing_llm=_LLMStub(),
+        classifier_llm=_LLMStub(),
+        search_client=_SearchStub([]),
+        source_selector=_GeneralSelector(),
+        data_path=str(tmp_path),
+    )
+
+    empty_snapshot = orchestrator._snapshot_local_docs()
+    orchestrator._get_primary_rag(empty_snapshot)
+    (tmp_path / "note.md").write_text("new indexable document", encoding="utf-8")
+    populated_snapshot = orchestrator._snapshot_local_docs()
+    orchestrator._get_primary_rag(populated_snapshot)
+
+    assert empty_snapshot != populated_snapshot
+    assert len(created) == 2

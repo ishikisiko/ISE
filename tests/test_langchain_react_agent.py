@@ -18,6 +18,7 @@ from langchain.postcheck import merge_judge_verdict, screen_search_answer
 from orchestrators.react_agent_orchestrator import ReactAgentOrchestrator
 from search.search import SearchClient, SearchHit
 from utils.time_parser import parse_time_constraint
+from utils.workflow_trace import WorkflowTracer
 
 
 class StubSearchClient(SearchClient):
@@ -638,7 +639,8 @@ def test_react_agent_orchestrator_langgraph_loop_status_metadata():
         max_iterations=4,
         config={"reactAgent": {"engine": "langgraph"}},
     )
-    result = orchestrator.answer("苹果和微软的区别")
+    tracer = WorkflowTracer()
+    result = orchestrator.answer("苹果和微软的区别", tracer=tracer)
 
     control = result["control"]
     assert control["loop_status"] == "succeeded"
@@ -649,6 +651,14 @@ def test_react_agent_orchestrator_langgraph_loop_status_metadata():
     assert control["max_iterations"] == 4
     assert control["fallback_triggered"] is False
     assert "decision" in control
+    assert control["react_trace"]
+    assert control["react_trace_truncated"] is False
+    assert any(event["id"] == "react_tool_1_1" for event in control["react_trace"])
+    assert any(event["id"] == "react_tool_1_1" for event in tracer.events)
+    outer_event = next(
+        event for event in tracer.events if event["id"] == "react_loop" and event["status"] == "done"
+    )
+    assert "items" not in outer_event
     assert result["answer"]
 
 

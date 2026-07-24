@@ -17,6 +17,7 @@ from orchestrators.react_loop_graph import (
     langgraph_available,
     normalize_evaluation_config,
 )
+from utils.workflow_trace import WorkflowTracer
 
 pytestmark = pytest.mark.skipif(not langgraph_available(), reason="langgraph not installed")
 
@@ -91,6 +92,7 @@ def make_runner(
     judge_llm=None,
     query: str = "苹果和微软的区别",
     fallback_context: Optional[Dict[str, Any]] = None,
+    tracer: Optional[Any] = None,
 ) -> ReactLoopGraphRunner:
     return ReactLoopGraphRunner(
         llm=NativeScriptedChatModel(replies=replies),
@@ -100,6 +102,7 @@ def make_runner(
         judge_llm=judge_llm,
         query=query,
         fallback_context=fallback_context,
+        tracer=tracer,
     )
 
 
@@ -114,6 +117,7 @@ class TestTerminationSemantics:
         assert result["loop_status"] == "succeeded"
         assert result["answer"]
         assert result["iterations"] >= 2
+        assert result["trace_events"]
 
     def test_exhausted_at_max_iterations(self):
         tools = [FakeTools.make("web_search", ["全新证据A", "全新证据B", "全新证据C", "全新证据D"])]
@@ -301,6 +305,254 @@ class TestShimMode:
         )
         result = runner.run("苹果和微软的区别")
         assert result["loop_status"] in ("exhausted", "succeeded")
+
+    def test_xml_function_markup_is_normalized_into_tool_call(self):
+        tools = [
+            FakeTools.make(
+                "web_search",
+                ["2025年苹果和微软分别公布财报，苹果相比微软更强，而微软同时领先，" * 6],
+            )
+        ]
+        tracer = WorkflowTracer()
+        final_answer = "2025年苹果相比微软更强，而微软同时领先，两者分别发展，" + "数据对比明显，" * 16
+        runner = ReactLoopGraphRunner(
+            llm=ScriptedChatModel(
+                replies=[
+                    "<function>web_search</function><query>Apple Microsoft pricing</query>",
+                    '{"action": "final", "answer": "' + final_answer + '"}',
+                ]
+            ),
+            tools=tools,
+            max_iterations=4,
+            query="苹果和微软的区别",
+            tracer=tracer,
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "succeeded"
+        assert "<function>" not in result["answer"]
+        tool_event = next(
+            event
+            for event in tracer.events
+            if event["id"] == "react_tool_1_1" and event["status"] == "done"
+        )
+        assert {item["label"]: item["value"] for item in tool_event["items"]}["查询"] == "Apple Microsoft pricing"
+
+    def test_malformed_function_markup_is_not_returned_as_answer(self):
+        tracer = WorkflowTracer()
+        runner = ReactLoopGraphRunner(
+            llm=ScriptedChatModel(replies=["<function>web_search</function>"]),
+            tools=[FakeTools.make("web_search", ["unused"])],
+            max_iterations=1,
+            query="苹果和微软的区别",
+            tracer=tracer,
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "exhausted"
+        assert "<function>" not in result["answer"]
+        assert result["verdicts"][-1]["reason"] == "invalid_tool_request"
+        invalid_event = next(
+            event
+            for event in tracer.events
+            if event["id"] == "react_invalid_tool_1" and event["status"] == "error"
+        )
+        assert invalid_event["status"] == "error"
+
+    def test_process_narration_is_not_returned_as_answer(self):
+        tracer = WorkflowTracer()
+        narration = "让我直接查看智谱官方定价文档，然后获取具体价格数据。"
+        runner = make_runner(
+            [narration],
+            [],
+            max_iterations=1,
+            fallback_context={"missing_constraints": ["comparison"], "failure_types": []},
+            tracer=tracer,
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "exhausted"
+        assert result["answer"] == "迭代次数用尽，未能获得完整答案。"
+        assert narration not in result["answer"]
+        assert result["verdicts"][-1]["reason"] == "process_narration"
+        invalid_event = next(
+            event
+            for event in tracer.events
+            if event["id"] == "react_invalid_final_1" and event["status"] == "error"
+        )
+        assert "智谱官方" not in str(invalid_event)
+
+    def test_process_narration_retries_for_a_direct_answer(self):
+        narration = "好的，我明白。我会继续检索并搜索官方定价资料。"
+        answer = "这是面向用户的最终答案，包含已验证的价格信息。"
+        runner = make_runner([narration, answer], [], max_iterations=2, query="简单问题")
+
+        result = runner.run("简单问题")
+
+        assert result["loop_status"] == "succeeded"
+        assert result["answer"] == answer
+        assert [verdict["reason"] for verdict in result["verdicts"]] == [
+            "process_narration",
+            "constraints_satisfied",
+        ]
+
+
+class TestWorkflowTrace:
+    def test_search_api_records_are_emitted_under_the_react_tool_call(self):
+        class SearchTool:
+            name = "web_search"
+            description = "test search"
+
+            def invoke(self, args):
+                return "1. Pricing\n   URL: https://example.com/pricing\n   Pricing evidence"
+
+            def get_last_search_api_calls(self):
+                return [
+                    {
+                        "source": "brave",
+                        "label": "Brave Search",
+                        "query": "pricing token=hidden",
+                        "duration_ms": 8.0,
+                        "status": "done",
+                        "result_count": 1,
+                        "results": [
+                            {
+                                "title": "Pricing",
+                                "url": "https://example.com/pricing?token=hidden",
+                                "snippet": "Pricing evidence",
+                            }
+                        ],
+                    }
+                ]
+
+        tracer = WorkflowTracer()
+        runner = make_runner(
+            [
+                _tool_call("web_search", {"query": "pricing"}),
+                "苹果和微软的公开价格信息已经分别覆盖，并完成了直接对比。" * 6,
+            ],
+            [SearchTool()],
+            tracer=tracer,
+        )
+
+        runner.run("苹果和微软的区别")
+
+        event = next(
+            event
+            for event in tracer.events
+            if event["id"] == "react_search_api_1_1_1" and event["status"] == "done"
+        )
+        assert event["record_kind"] == "search_results"
+        assert event["records"][0]["url"] == "https://example.com/pricing"
+        assert "hidden" not in str(event)
+
+    def test_trace_projection_is_bounded_and_keeps_terminal_events(self):
+        tracer = WorkflowTracer()
+        runner = make_runner(["unused"], [], tracer=tracer)
+        for index in range(25):
+            step_id = f"react_tool_1_{index}"
+            tracer.begin(step_id, "工具调用")
+            tracer.end(step_id, detail=f"完成 {index}")
+
+        events, truncated = runner._trace_events()
+
+        assert truncated is True
+        assert len(events) == 40
+        assert events[0]["id"] == "react_tool_1_0"
+        assert events[-1]["detail"] == "完成 24"
+
+    def test_iteration_tool_and_verdict_events_are_safe_and_ordered(self):
+        tracer = WorkflowTracer()
+        evidence = (
+            "1. 2025年苹果和微软分别公布财报，苹果相比微软更强，而微软同时领先。\n\n"
+            "2. 两家公司的公开数据对比完整。"
+        )
+        runner = make_runner(
+            [
+                _tool_call("web_search", {"query": "Apple Microsoft pricing"}),
+                "2025年苹果相比微软更强，而微软同时领先，" * 6,
+            ],
+            [FakeTools.make("web_search", [evidence])],
+            tracer=tracer,
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "succeeded"
+        ids = [event["id"] for event in tracer.events]
+        assert ids.index("react_iteration_1") < ids.index("react_tool_1_1")
+        assert ids.index("react_tool_1_1") < ids.index("react_evaluate_1")
+
+        tool_event = next(
+            event
+            for event in tracer.events
+            if event["id"] == "react_tool_1_1" and event["status"] == "done"
+        )
+        assert tool_event["detail"] == "完成 · 返回 2 条结果"
+        tool_items = {item["label"]: item["value"] for item in tool_event["items"]}
+        assert tool_items == {"查询": "Apple Microsoft pricing", "结果": "2 条"}
+
+        verdict_event = next(
+            event
+            for event in tracer.events
+            if event["id"] == "react_evaluate_1" and event["status"] == "done"
+        )
+        verdict_items = {item["label"]: item["value"] for item in verdict_event["items"]}
+        assert verdict_items["判定"] == "继续检索"
+        assert verdict_items["新证据"] == "是"
+        iteration_event = next(
+            event
+            for event in tracer.events
+            if event["id"] == "react_iteration_1" and event["status"] == "done"
+        )
+        assert iteration_event["detail"] == "本轮完成"
+        assert "items" not in iteration_event
+        final_verdict_event = next(
+            event
+            for event in tracer.events
+            if event["id"] == "react_evaluate_2" and event["status"] == "done"
+        )
+        final_verdict_items = {item["label"]: item["value"] for item in final_verdict_event["items"]}
+        assert final_verdict_items["新证据"] == "否"
+        assert result["trace_events"]
+        assert result["trace_truncated"] is False
+
+    def test_textual_tool_error_is_traced_and_redacted(self):
+        tracer = WorkflowTracer()
+        runner = make_runner(
+            [
+                _tool_call("web_search", {"query": "first"}, "c1"),
+                _tool_call("web_search", {"query": "second"}, "c2"),
+            ],
+            [
+                FakeTools.make(
+                    "web_search",
+                    [
+                        "Search failed: token=top-secret https://example.com/search?token=top-secret",
+                        "Search failed: token=top-secret https://example.com/search?token=top-secret",
+                    ],
+                )
+            ],
+            max_iterations=3,
+            evaluation_config={"tool_error_threshold": 2},
+            tracer=tracer,
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "unrecoverable"
+        failed_event = next(
+            event
+            for event in tracer.events
+            if event["id"] == "react_tool_1_1" and event["status"] == "error"
+        )
+        serialized = str(failed_event)
+        assert "top-secret" not in serialized
+        assert "?token" not in serialized
+        assert {item["label"]: item["value"] for item in failed_event["items"]}["结果"] == "调用失败"
 
 
 class TestConfig:

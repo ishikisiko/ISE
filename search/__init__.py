@@ -11,11 +11,14 @@ from .search import (
     PrioritySearchClient,
     TavilySearchClient,
     FallbackSearchClient,
+    apply_search_depth_override,
 )
 from .rerank import BaseReranker, Qwen3Reranker, RerankedHit
 from .reference_fetch import (
     FIRECRAWL_SCRAPE_URL,
     PARALLEL_EXTRACT_URL,
+    TAVILY_EXTRACT_URL,
+    DirectFetchClient,
     FirecrawlScrapeClient,
     ParallelExtractClient,
     ReferenceContent,
@@ -23,6 +26,7 @@ from .reference_fetch import (
     ReferenceExtractor,
     ReferenceExtractorRouter,
     ReferenceFailure,
+    TavilyExtractClient,
     build_reference_extractors,
 )
 
@@ -48,10 +52,14 @@ __all__ = [
     "PrioritySearchClient",
     "CombinedSearchClient",
     "FallbackSearchClient",
+    "apply_search_depth_override",
     "FIRECRAWL_SCRAPE_URL",
     "PARALLEL_EXTRACT_URL",
+    "TAVILY_EXTRACT_URL",
+    "DirectFetchClient",
     "FirecrawlScrapeClient",
     "ParallelExtractClient",
+    "TavilyExtractClient",
     "ReferenceContent",
     "ReferenceExtraction",
     "ReferenceExtractor",

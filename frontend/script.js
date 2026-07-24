@@ -15,16 +15,22 @@ document.addEventListener("DOMContentLoaded", () => {
     const fileInput = document.getElementById("file-input");
     const chipRow = document.getElementById("chip-row");
     const searchPill = document.getElementById("search-pill");
-    const newSessionPill = document.getElementById("new-session-pill");
     const modelSelect = document.getElementById("model");
     const settingsBtn = document.getElementById("settings-btn");
     const settingsPanel = document.getElementById("settings-panel");
     const statusLine = document.getElementById("status-line");
     const topbarModel = document.getElementById("topbar-model");
+    const sidebar = document.getElementById("sidebar");
+    const sidebarToggle = document.getElementById("sidebar-toggle");
+    const sidebarClose = document.getElementById("sidebar-close");
+    const newConvBtn = document.getElementById("new-conv-btn");
+    const convList = document.getElementById("conv-list");
+    const convEmpty = document.getElementById("conv-empty");
     const forceSearchInput = document.getElementById("force-search");
     const limitTotal = document.getElementById("limit-total");
     const limitPerSource = document.getElementById("limit-per-source");
     const limitReference = document.getElementById("limit-reference");
+    const searchDepthSelect = document.getElementById("search-depth");
     const sourceCheckboxes = Array.from(
         document.querySelectorAll('#source-chips input[type="checkbox"]')
     );
@@ -37,6 +43,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // ------------------------------------------------------------------
     const SETTINGS_KEY = "ise.settings.v1";
     const CONVERSATION_ID_KEY = "ise.conversation.v1";
+    const SIDEBAR_KEY = "ise.sidebar.v1";
 
     function newConversationId() {
         return (
@@ -79,6 +86,7 @@ document.addEventListener("DOMContentLoaded", () => {
         sources: ["brave", "firecrawl", "tavily", "parallel", "brightdata", "google"],
         forceSearch: false,
         limits: { total: 5, perSource: 5, reference: 5 },
+        searchDepth: "auto",
         timing: ["total", "search", "llm", "tools"],
         model: "",
     };
@@ -97,6 +105,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 DEFAULT_SETTINGS.sources.includes(s)
             );
             if (!merged.sources.length) merged.sources = [...DEFAULT_SETTINGS.sources];
+            if (!["auto", "basic", "advanced", "fast", "ultra-fast"].includes(merged.searchDepth)) {
+                merged.searchDepth = DEFAULT_SETTINGS.searchDepth;
+            }
             return merged;
         } catch {
             return { ...DEFAULT_SETTINGS };
@@ -117,6 +128,8 @@ document.addEventListener("DOMContentLoaded", () => {
         loading: false,
         images: [],
         turnCount: 0,
+        conversations: [],
+        activeConversationId: "",
     };
 
     // ------------------------------------------------------------------
@@ -254,6 +267,229 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // ------------------------------------------------------------------
+    // 会话管理（侧栏）
+    // ------------------------------------------------------------------
+    function fmtRelative(iso) {
+        if (!iso) return "";
+        const date = new Date(iso.replace(" ", "T") + "Z");
+        if (Number.isNaN(date.getTime())) return "";
+        const diff = Date.now() - date.getTime();
+        const min = Math.floor(diff / 60000);
+        if (min < 1) return "刚刚";
+        if (min < 60) return `${min} 分钟前`;
+        const hr = Math.floor(min / 60);
+        if (hr < 24) return `${hr} 小时前`;
+        const day = Math.floor(hr / 24);
+        if (day < 7) return `${day} 天前`;
+        return date.toLocaleDateString();
+    }
+
+    function setSidebarOpen(open) {
+        sidebar.classList.toggle("is-hidden", !open);
+        try {
+            localStorage.setItem(SIDEBAR_KEY, open ? "1" : "0");
+        } catch {
+            /* localStorage 不可用时静默 */
+        }
+    }
+
+    function isSidebarOpen() {
+        try {
+            return localStorage.getItem(SIDEBAR_KEY) !== "0";
+        } catch {
+            return true;
+        }
+    }
+
+    function setActiveConversation(id) {
+        state.activeConversationId = id || "";
+        for (const item of convList.querySelectorAll(".conv-item")) {
+            item.classList.toggle(
+                "is-active",
+                item.dataset.id === state.activeConversationId
+            );
+        }
+    }
+
+    function renderConversationList() {
+        convList.innerHTML = "";
+        const items = state.conversations;
+        if (!items.length) {
+            convEmpty.hidden = false;
+            return;
+        }
+        convEmpty.hidden = true;
+
+        for (const conv of items) {
+            const item = el("div", "conv-item");
+            item.dataset.id = conv.conversation_id;
+            item.setAttribute("role", "listitem");
+            if (conv.conversation_id === state.activeConversationId) {
+                item.classList.add("is-active");
+            }
+
+            const main = el("div", "conv-item-main");
+            const title = el("span", "conv-item-title", conv.title || "新会话");
+            title.title = conv.title || "";
+            const meta = el("span", "conv-item-meta",
+                `${fmtRelative(conv.last_activity) || conv.last_activity || ""} · ${conv.turn_count} 轮`);
+            main.append(title, meta);
+
+            const actions = el("div", "conv-actions");
+            const rename = el("button", "conv-act", "");
+            rename.type = "button";
+            rename.title = "重命名";
+            rename.setAttribute("aria-label", "重命名会话");
+            rename.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
+            const del = el("button", "conv-act is-delete", "");
+            del.type = "button";
+            del.title = "删除";
+            del.setAttribute("aria-label", "删除会话");
+            del.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>';
+            actions.append(rename, del);
+
+            item.append(main, actions);
+            convList.appendChild(item);
+
+            item.addEventListener("click", (event) => {
+                if (event.target.closest(".conv-actions")) return;
+                if (state.loading) return;
+                selectConversation(conv.conversation_id);
+            });
+            rename.addEventListener("click", (event) => {
+                event.stopPropagation();
+                renameConversation(conv.conversation_id, conv.title);
+            });
+            del.addEventListener("click", async (event) => {
+                event.stopPropagation();
+                if (!confirm(`删除会话「${conv.title || "新会话"}」？`)) return;
+                await deleteConversation(conv.conversation_id);
+            });
+        }
+    }
+
+    async function loadConversationList() {
+        try {
+            const response = await fetch("/api/conversations");
+            if (!response.ok) throw new Error("list");
+            const data = await response.json();
+            state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
+        } catch {
+            state.conversations = [];
+        }
+        renderConversationList();
+    }
+
+    function renderRestoredTurns(turns, title) {
+        thread.innerHTML = "";
+        state.turnCount = 0;
+        clearEmpty();
+        if (!Array.isArray(turns) || !turns.length) {
+            renderEmpty();
+            return;
+        }
+        for (const turn of turns) {
+            const result = turn && turn.result && typeof turn.result === "object" ? turn.result : null;
+            const refs = appendTurn(turn.query || "", []);
+            if (result) {
+                // Full restore: synthesize workflow steps and render sources,
+                // docs, notes and meta exactly like a live answer.
+                for (const step of synthesizeSteps(result)) refs.workflow.apply(step);
+                renderResult(refs, result);
+            } else {
+                // Legacy turns recorded before full-result persistence.
+                refs.workflow.el.remove();
+                const answerText = (turn.answer || "").trim() || "（未保存回答内容）";
+                const answerEl = el("div", "answer");
+                answerEl.innerHTML = renderMarkdown(answerText);
+                highlightIn(answerEl);
+                refs.turn.appendChild(answerEl);
+            }
+        }
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        // suppress unused-title linting for restored view
+        void title;
+    }
+
+    async function selectConversation(id) {
+        if (!id) return;
+        setLoading(true);
+        setStatus("正在加载会话…");
+        try {
+            const response = await fetch(`/api/conversations/${encodeURIComponent(id)}`);
+            if (!response.ok) throw new Error("load");
+            const data = await response.json();
+            conversationId = id;
+            try {
+                localStorage.setItem(CONVERSATION_ID_KEY, id);
+            } catch {
+                /* localStorage 不可用时静默 */
+            }
+            setActiveConversation(id);
+            renderRestoredTurns(data.turns, data.title);
+            setStatus("已恢复会话");
+        } catch {
+            setStatus("加载会话失败", true);
+        } finally {
+            setLoading(false);
+            queryInput.focus();
+        }
+    }
+
+    function startNewConversation() {
+        if (state.loading) return;
+        conversationId = resetConversation();
+        try {
+            localStorage.setItem(CONVERSATION_ID_KEY, conversationId);
+        } catch {
+            /* localStorage 不可用时静默 */
+        }
+        setActiveConversation("");
+        thread.innerHTML = "";
+        state.turnCount = 0;
+        renderEmpty();
+        setStatus("已开启新会话");
+        queryInput.focus();
+    }
+
+    async function deleteConversation(id) {
+        try {
+            const response = await fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
+            if (!response.ok) throw new Error("delete");
+        } catch {
+            setStatus("删除会话失败", true);
+            return;
+        }
+        if (id === state.activeConversationId || id === conversationId) {
+            startNewConversation();
+        }
+        await loadConversationList();
+        setStatus("会话已删除");
+    }
+
+    async function renameConversation(id, currentTitle) {
+        const next = window.prompt("重命名会话", currentTitle || "");
+        if (next === null) return;
+        const trimmed = next.trim();
+        try {
+            const response = await fetch(
+                `/api/conversations/${encodeURIComponent(id)}/title`,
+                {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ title: trimmed }),
+                }
+            );
+            if (!response.ok) throw new Error("rename");
+        } catch {
+            setStatus("重命名失败", true);
+            return;
+        }
+        await loadConversationList();
+        setStatus(trimmed ? "会话已重命名" : "已恢复默认标题");
+    }
+
+    // ------------------------------------------------------------------
     // 工作流视图
     // ------------------------------------------------------------------
     function createWorkflow() {
@@ -335,9 +571,25 @@ document.addEventListener("DOMContentLoaded", () => {
                     detail.hidden = true;
                     const items = el("ul", "wf-items");
                     items.hidden = true;
-                    body.append(head, detail, items);
+                    const records = el("details", "wf-records");
+                    records.hidden = true;
+                    const recordSummary = el("summary", "wf-record-summary");
+                    const recordList = el("div", "wf-record-list");
+                    records.append(recordSummary, recordList);
+                    body.append(head, detail, items, records);
                     item.append(dot, body);
-                    node = { root: item, titleEl: title, badgeEl: badge, timeEl: time, detailEl: detail, itemsEl: items, startTs: 0 };
+                    node = {
+                        root: item,
+                        titleEl: title,
+                        badgeEl: badge,
+                        timeEl: time,
+                        detailEl: detail,
+                        itemsEl: items,
+                        recordsEl: records,
+                        recordSummaryEl: recordSummary,
+                        recordListEl: recordList,
+                        startTs: 0,
+                    };
                     steps.set(step.id, node);
                     list.appendChild(item);
                 }
@@ -387,6 +639,52 @@ document.addEventListener("DOMContentLoaded", () => {
                         node.itemsEl.appendChild(row);
                     }
                     node.itemsEl.hidden = false;
+                }
+
+                const hasRecordGroup = step.record_kind || Array.isArray(step.records);
+                if (hasRecordGroup) {
+                    const kind = step.record_kind || "search_results";
+                    const records = Array.isArray(step.records) ? step.records : [];
+                    const defaultLabel = kind === "extracted_pages" ? "已抽取网页" : "搜索结果";
+                    node.recordSummaryEl.textContent = step.record_label || `${defaultLabel} · ${records.length}`;
+                    node.recordListEl.innerHTML = "";
+
+                    if (!records.length) {
+                        node.recordListEl.appendChild(el("p", "wf-record-empty", "没有可展示的返回条目"));
+                    }
+
+                    records.forEach((record, index) => {
+                        const item = el("div", "wf-record");
+                        const url = record && record.url ? String(record.url) : "";
+                        const titleText = (record && record.title)
+                            ? String(record.title)
+                            : domainOf(url) || `条目 ${index + 1}`;
+                        const title = document.createElement(url ? "a" : "span");
+                        title.className = "wf-record-title";
+                        title.textContent = titleText;
+                        if (url) {
+                            title.href = url;
+                            title.target = "_blank";
+                            title.rel = "noopener noreferrer";
+                        }
+                        const meta = el("div", "wf-record-meta");
+                        const source = (record && record.provider) ? String(record.provider) : domainOf(url);
+                        if (source) meta.appendChild(el("span", null, source));
+                        if (record && record.status === "error") {
+                            meta.appendChild(el("span", "wf-record-status is-error", "失败"));
+                        } else if (kind === "extracted_pages" && record && record.content_chars !== undefined) {
+                            const contentChars = Number(record.content_chars);
+                            if (Number.isFinite(contentChars) && contentChars >= 0) {
+                                meta.appendChild(el("span", "wf-record-status", `已抽取 ${contentChars.toLocaleString()} 字符`));
+                            }
+                        }
+                        item.append(title, meta);
+
+                        const detail = record && (record.snippet || record.reason || record.detail);
+                        if (detail) item.appendChild(el("p", "wf-record-detail", String(detail)));
+                        node.recordListEl.appendChild(item);
+                    });
+                    node.recordsEl.hidden = false;
                 }
             },
 
@@ -467,21 +765,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function renderSources(turn, hits) {
         if (!Array.isArray(hits) || !hits.length) return;
-        const wrap = el("div", "sources");
-        wrap.appendChild(el("span", "section-label", `来源 · ${hits.length}`));
-        const scroll = el("div", "sources-scroll");
-        hits.slice(0, 12).forEach((hit, index) => {
+        const details = el("details", "sources");
+        details.open = true;
+        const summaryEl = el("summary");
+        summaryEl.appendChild(el("span", "section-label", `来源 · ${hits.length}`));
+        details.appendChild(summaryEl);
+
+        const list = el("div", "source-list");
+        hits.forEach((hit, index) => {
             const url = hit.url || "";
             const domain = domainOf(url) || "来源";
-            const chip = document.createElement(url ? "a" : "span");
-            chip.className = "source-chip";
-            if (url) {
-                chip.href = url;
-                chip.target = "_blank";
-                chip.rel = "noopener noreferrer";
-            }
-            chip.title = hit.title || domain;
-            chip.appendChild(el("span", "src-index", String(index + 1).padStart(2, "0")));
+            const titleText = (hit.title && String(hit.title).trim())
+                ? String(hit.title).trim()
+                : domain;
+
+            const row = el("div", "source-row");
+            row.appendChild(el("span", "src-index", String(index + 1).padStart(2, "0")));
+
+            const body = el("div", "src-body");
+
+            const head = el("div", "src-head");
             if (url) {
                 const fav = document.createElement("img");
                 fav.className = "src-fav";
@@ -492,13 +795,35 @@ document.addEventListener("DOMContentLoaded", () => {
                     const fallback = el("span", "src-fallback", domain.charAt(0) || "·");
                     fav.replaceWith(fallback);
                 });
-                chip.appendChild(fav);
+                head.appendChild(fav);
+            } else {
+                head.appendChild(el("span", "src-fallback", domain.charAt(0) || "·"));
             }
-            chip.appendChild(el("span", "src-domain", domain));
-            scroll.appendChild(chip);
+
+            const title = document.createElement(url ? "a" : "span");
+            title.className = "src-title";
+            title.textContent = titleText;
+            if (url) {
+                title.href = url;
+                title.target = "_blank";
+                title.rel = "noopener noreferrer";
+            }
+            head.appendChild(title);
+            body.appendChild(head);
+
+            if (url) body.appendChild(el("div", "src-domain", domain));
+
+            const snippetText = (hit.snippet && String(hit.snippet).trim())
+                ? String(hit.snippet).trim()
+                : "";
+            if (snippetText) body.appendChild(el("p", "src-snippet", snippetText));
+
+            row.appendChild(body);
+            list.appendChild(row);
         });
-        wrap.appendChild(scroll);
-        turn.appendChild(wrap);
+
+        details.appendChild(list);
+        turn.appendChild(details);
     }
 
     function renderDocs(turn, docs) {
@@ -671,6 +996,32 @@ document.addEventListener("DOMContentLoaded", () => {
             });
         }
 
+        const apiCalls = Array.isArray(data && data.search_api_calls) ? data.search_api_calls : [];
+        apiCalls.forEach((call, index) => {
+            const count = Number.isFinite(Number(call && call.result_count))
+                ? Math.max(0, Number(call.result_count))
+                : Array.isArray(call && call.records) ? call.records.length : 0;
+            const failed = call && call.status === "error";
+            const label = (call && (call.label || call.provider)) || "Search";
+            const isExtract = call && call.kind === "extracted_pages";
+            const items = [
+                { label: "提供方", value: (call && call.provider) || label },
+                { label: isExtract ? "页面" : "结果", value: `${count} ${isExtract ? "页" : "条"}` },
+            ];
+            if (call && call.reason) items.push({ label: "原因", value: call.reason });
+            steps.push({
+                id: `${isExtract ? "extract_api" : "search_api_fallback"}_${index + 1}`,
+                title: isExtract ? `官方文档抓取：${label}` : `搜索 API：${label}`,
+                status: failed ? "error" : "done",
+                detail: failed ? "抓取失败" : (isExtract ? `抽取 ${count} 个页面` : `返回 ${count} 条结果`),
+                duration_ms: call && call.duration_ms,
+                items,
+                records: Array.isArray(call && call.records) ? call.records : [],
+                record_kind: isExtract ? "extracted_pages" : "search_results",
+                record_label: isExtract ? `已抽取网页 · ${count}` : `搜索结果 · ${count}`,
+            });
+        });
+
         if (Array.isArray(data.retrieved_docs) && data.retrieved_docs.length) {
             steps.push({ id: "local", title: "本地文档检索", status: "done", detail: `${data.retrieved_docs.length} 个片段` });
         }
@@ -720,6 +1071,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 exhausted: "迭代用尽",
                 stagnated: "检索停滞",
                 unrecoverable: "工具持续失败",
+                invalid_tool_request: "工具调用格式无效",
+                process_narration: "过程性文本，继续补充",
             };
             const verdicts = Array.isArray(control.loop_verdicts) ? control.loop_verdicts : [];
             const reactStep = {
@@ -864,6 +1217,9 @@ document.addEventListener("DOMContentLoaded", () => {
             payload.search_total_limit = settings.limits.total;
             payload.search_source_limit = settings.limits.perSource;
             payload.search_reference_limit = settings.limits.reference;
+            if (settings.searchDepth && settings.searchDepth !== "auto") {
+                payload.search_depth = settings.searchDepth;
+            }
         }
         if (state.images.length) {
             payload.images = state.images.map((img) => ({
@@ -937,6 +1293,9 @@ document.addEventListener("DOMContentLoaded", () => {
             const note = el("div", "note note-error", failed);
             refs.workflow.el.after(note);
             setStatus(failed, true);
+        } else if (finished) {
+            setActiveConversation(conversationId);
+            loadConversationList();
         }
 
         setLoading(false);
@@ -1135,6 +1494,7 @@ document.addEventListener("DOMContentLoaded", () => {
         limitTotal.value = String(settings.limits.total);
         limitPerSource.value = String(settings.limits.perSource);
         limitReference.value = String(settings.limits.reference);
+        searchDepthSelect.value = settings.searchDepth;
         for (const checkbox of timingCheckboxes) {
             checkbox.checked = settings.timing.includes(checkbox.value);
         }
@@ -1146,6 +1506,7 @@ document.addEventListener("DOMContentLoaded", () => {
         for (const input of [limitTotal, limitPerSource, limitReference]) {
             input.disabled = disabled;
         }
+        searchDepthSelect.disabled = disabled;
         forceSearchInput.disabled = disabled;
         if (disabled && settings.forceSearch) {
             settings.forceSearch = false;
@@ -1180,14 +1541,14 @@ document.addEventListener("DOMContentLoaded", () => {
         setStatus(settings.search ? "联网搜索已启用" : "联网搜索已关闭");
     });
 
-    if (newSessionPill) {
-        newSessionPill.addEventListener("click", () => {
-            conversationId = resetConversation();
-            thread.innerHTML = "";
-            state.turnCount = 0;
-            setStatus("已开启新会话");
-            queryInput.focus();
-        });
+    if (newConvBtn) {
+        newConvBtn.addEventListener("click", startNewConversation);
+    }
+    if (sidebarToggle) {
+        sidebarToggle.addEventListener("click", () => setSidebarOpen(sidebar.classList.contains("is-hidden")));
+    }
+    if (sidebarClose) {
+        sidebarClose.addEventListener("click", () => setSidebarOpen(false));
     }
 
     modelSelect.addEventListener("change", () => {
@@ -1242,6 +1603,11 @@ document.addEventListener("DOMContentLoaded", () => {
         saveSettings();
     });
 
+    searchDepthSelect.addEventListener("change", () => {
+        settings.searchDepth = searchDepthSelect.value;
+        saveSettings();
+    });
+
     for (const input of [limitTotal, limitPerSource, limitReference]) {
         input.addEventListener("change", normalizeLimits);
     }
@@ -1249,10 +1615,22 @@ document.addEventListener("DOMContentLoaded", () => {
     // ------------------------------------------------------------------
     // 初始化
     // ------------------------------------------------------------------
-    state.docs = [];
-    applySettingsToControls();
-    renderEmpty();
-    fetchFiles();
-    loadModels();
-    autosize();
+    async function bootstrap() {
+        state.docs = [];
+        setSidebarOpen(isSidebarOpen());
+        setActiveConversation(conversationId);
+        applySettingsToControls();
+        renderEmpty();
+        fetchFiles();
+        loadModels();
+        autosize();
+        await loadConversationList();
+        // On a fresh load with no active turn in the thread, restore the most
+        // recent conversation so the user picks up where they left off.
+        if (state.conversations.length && state.turnCount === 0) {
+            await selectConversation(state.conversations[0].conversation_id);
+        }
+    }
+
+    bootstrap();
 });

@@ -3,7 +3,8 @@
 Records one self-contained audit line per answered turn under
 ``runtime/audit/<conversation_id>.jsonl``: workflow step events, control
 metadata, search queries, timing payloads, warnings, and optionally the
-answer text. Writes are best-effort; callers decide how to surface errors.
+answer text or the complete response payload. Writes are best-effort; callers
+decide how to surface errors.
 """
 
 from __future__ import annotations
@@ -72,7 +73,9 @@ def resolve_audit_settings(
         "enabled": _bool("enabled", False),
         "dir": str(block.get("dir") or DEFAULT_AUDIT_DIR),
         "include_answer": _bool("include_answer", True),
-        "max_files": max(1, _int("max_files", DEFAULT_MAX_FILES)),
+        "include_full_result": _bool("include_full_result", False),
+        # Zero explicitly means retain every conversation audit file.
+        "max_files": max(0, _int("max_files", DEFAULT_MAX_FILES)),
         "max_bytes_per_record": max_bytes_per_record,
     }
 
@@ -99,9 +102,19 @@ def _redact_text(value: str) -> str:
     return _URL_WITH_QUERY.sub(lambda match: match.group(0).split("?", 1)[0].split("#", 1)[0], text)
 
 
-def _safe_audit_value(value: Any, *, depth: int = 0) -> Any:
-    """Copy only a bounded, credential-safe audit value."""
-    if depth > 5:
+def sanitize_audit_value(
+    value: Any,
+    *,
+    max_depth: Optional[int] = 5,
+    depth: int = 0,
+) -> Any:
+    """Return a JSON-safe value with credential-like fields removed.
+
+    ``max_depth=None`` is intended for the explicit full-payload audit mode.
+    It preserves every serializable response field while retaining the same
+    credential and URL-query redaction used by the compact audit record.
+    """
+    if max_depth is not None and depth > max_depth:
         return "[truncated]"
     if value is None or isinstance(value, (bool, int, float)):
         return value
@@ -113,13 +126,28 @@ def _safe_audit_value(value: Any, *, depth: int = 0) -> Any:
             name = str(key)
             if any(marker in name.casefold() for marker in _SENSITIVE_FIELD_MARKERS):
                 continue
-            safe[name] = _safe_audit_value(child, depth=depth + 1)
+            safe[name] = sanitize_audit_value(
+                child,
+                max_depth=max_depth,
+                depth=depth + 1,
+            )
         return safe
     if isinstance(value, list):
-        return [_safe_audit_value(child, depth=depth + 1) for child in value]
+        return [
+            sanitize_audit_value(child, max_depth=max_depth, depth=depth + 1)
+            for child in value
+        ]
     if isinstance(value, tuple):
-        return [_safe_audit_value(child, depth=depth + 1) for child in value]
+        return [
+            sanitize_audit_value(child, max_depth=max_depth, depth=depth + 1)
+            for child in value
+        ]
     return _redact_text(str(value))
+
+
+def _safe_audit_value(value: Any, *, depth: int = 0) -> Any:
+    """Copy a bounded, credential-safe value for the compact audit record."""
+    return sanitize_audit_value(value, depth=depth)
 
 
 def _truncate_text(value: str, keep_bytes: int) -> str:
@@ -267,6 +295,7 @@ def build_audit_record(
     events: Optional[List[Dict[str, Any]]] = None,
     result: Optional[Dict[str, Any]] = None,
     include_answer: bool = True,
+    include_full_result: bool = False,
     max_bytes_per_record: int = DEFAULT_MAX_BYTES_PER_RECORD,
 ) -> Dict[str, Any]:
     """Assemble one audit record from tracer events and the result payload."""
@@ -285,6 +314,8 @@ def build_audit_record(
         answer = result.get("answer")
         if answer is not None:
             record["answer"] = _safe_audit_value(answer)
+    if include_full_result:
+        record["result"] = sanitize_audit_value(result, max_depth=None)
     return _apply_size_cap(record, max_bytes_per_record)
 
 
@@ -296,12 +327,14 @@ class AuditRecorder:
         directory: str,
         *,
         include_answer: bool = True,
+        include_full_result: bool = False,
         max_files: int = DEFAULT_MAX_FILES,
         max_bytes_per_record: int = DEFAULT_MAX_BYTES_PER_RECORD,
     ) -> None:
         self.directory = directory or DEFAULT_AUDIT_DIR
         self.include_answer = include_answer
-        self.max_files = max(1, int(max_files))
+        self.include_full_result = include_full_result
+        self.max_files = max(0, int(max_files))
         self.max_bytes_per_record = _normalize_max_bytes(int(max_bytes_per_record))
 
     def record_turn(
@@ -321,6 +354,7 @@ class AuditRecorder:
             events=events,
             result=result,
             include_answer=self.include_answer,
+            include_full_result=self.include_full_result,
             max_bytes_per_record=self.max_bytes_per_record,
         )
         line = json.dumps(record, ensure_ascii=False, default=str)
@@ -333,10 +367,14 @@ class AuditRecorder:
             )
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             self._evict_if_needed()
         return path
 
     def _evict_if_needed(self) -> None:
+        if self.max_files <= 0:
+            return
         try:
             names = [
                 name

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from search.search import SearchClient, SearchHit
 from utils.query_orchestration import canonical_reference
+from .source_tiering import classify_web_source_tier
 
 if TYPE_CHECKING:
     from langchain.langchain_support import Document, LangChainVectorStore
@@ -18,6 +19,22 @@ class EvidenceSourceType(str, Enum):
     WEB = "web"
     LOCAL = "local"
     DOMAIN = "domain"
+
+
+INDEXABLE_DOCUMENT_SUFFIXES = (".txt", ".md", ".pdf")
+
+
+def has_indexable_local_documents(data_path: Optional[str]) -> bool:
+    """Check for indexable local files without loading an embedding model."""
+    if not data_path or not os.path.isdir(data_path):
+        return False
+    for root, _, files in os.walk(data_path):
+        for name in files:
+            if not name.lower().endswith(INDEXABLE_DOCUMENT_SUFFIXES):
+                continue
+            if os.path.isfile(os.path.join(root, name)):
+                return True
+    return False
 
 
 @dataclass
@@ -172,8 +189,14 @@ class EvidenceSource(ABC):
 class WebEvidenceSource(EvidenceSource):
     source_type = EvidenceSourceType.WEB
 
-    def __init__(self, search_client: SearchClient) -> None:
+    def __init__(
+        self,
+        search_client: SearchClient,
+        *,
+        official_domains: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.search_client = search_client
+        self.official_domains = official_domains or {}
         self.source_id = getattr(search_client, "source_id", "web")
         self.display_name = getattr(search_client, "display_name", "Web Search")
 
@@ -184,6 +207,7 @@ class WebEvidenceSource(EvidenceSource):
         rank: Optional[int] = None,
         score: Optional[float] = None,
         provenance: Optional[Dict[str, Any]] = None,
+        tier_entities: Optional[List[str]] = None,
     ) -> EvidenceItem:
         metadata = {
             "search_hit": asdict(hit),
@@ -191,6 +215,16 @@ class WebEvidenceSource(EvidenceSource):
             "canonical_reference": canonical_reference(hit.url),
         }
         metadata.update(provenance or {})
+        if metadata.get("source_tier") not in {
+            "official",
+            "first_party",
+            "authoritative",
+        }:
+            metadata["source_tier"] = classify_web_source_tier(
+                hit.url,
+                entities=tier_entities,
+                official_domains=self.official_domains,
+            )
         return EvidenceItem(
             source_type=self.source_type.value,
             source_id=self.source_id,
@@ -208,9 +242,15 @@ class WebEvidenceSource(EvidenceSource):
         hits: List[SearchHit],
         *,
         provenance: Optional[Dict[str, Any]] = None,
+        tier_entities: Optional[List[str]] = None,
     ) -> List[EvidenceItem]:
         return [
-            self.hit_to_item(hit, rank=index, provenance=provenance)
+            self.hit_to_item(
+                hit,
+                rank=index,
+                provenance=provenance,
+                tier_entities=tier_entities,
+            )
             for index, hit in enumerate(hits, start=1)
         ]
 
@@ -222,7 +262,13 @@ class WebEvidenceSource(EvidenceSource):
             freshness=options.freshness,
             date_restrict=options.date_restrict,
         )
-        return self.hits_to_items(hits, provenance=_plan_provenance(options))
+        metadata = options.metadata or {}
+        tier_entities = metadata.get("source_tier_entities") or []
+        return self.hits_to_items(
+            hits,
+            provenance=_plan_provenance(options),
+            tier_entities=list(tier_entities) if isinstance(tier_entities, list) else [],
+        )
 
 
 class LocalEvidenceSource(EvidenceSource):
@@ -251,12 +297,12 @@ class LocalEvidenceSource(EvidenceSource):
     def is_available(self) -> bool:
         if self.vector_store is not None and self.vector_store.is_ready:
             return True
-        return bool(self.data_path and os.path.isdir(self.data_path))
+        return has_indexable_local_documents(self.data_path)
 
     def _ensure_store(self) -> Optional[LangChainVectorStore]:
         if self.vector_store is not None and self.vector_store.is_ready:
             return self.vector_store
-        if not self.data_path or not os.path.isdir(self.data_path):
+        if not has_indexable_local_documents(self.data_path):
             return None
         if self.vector_store is None:
             from langchain.langchain_support import LangChainVectorStore

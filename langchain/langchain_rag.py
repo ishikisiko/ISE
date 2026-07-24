@@ -39,11 +39,22 @@ from evidence import (
     describe_used_sources,
     evidence_items_to_documents,
     evidence_items_to_search_hits,
+    has_indexable_local_documents,
     normalize_reference_label,
 )
 from langchain.langchain_support import Document, FileReader, LangChainVectorStore
 from langchain.langchain_tools import SearchRetriever, WebSearchTool
 from search.search import SearchClient, SearchHit, GoogleSearchClient
+from search.reference_fetch import (
+    ReferenceExtractorRouter,
+    build_reference_extractors,
+)
+from evidence.source_tiering import (
+    classify_web_source_tier,
+    normalize_entity_stem,
+    registrable_domain,
+)
+from utils.retrieval_trace import emit_search_call_step, search_call_snapshots
 from utils.timing_utils import TimingRecorder
 from utils.workflow_trace import ensure_tracer
 from utils.query_orchestration import (
@@ -278,24 +289,36 @@ class SearchRAGChain:
         tracer = ensure_tracer(tracer)
         self.vector_store: Optional[LangChainVectorStore] = None
         if data_path:
-            print("Loading and indexing local documents...")
-            tracer.begin("local_index", "准备本地向量索引", detail="加载嵌入模型并索引文档")
-            try:
-                self.vector_store = LangChainVectorStore(
-                    model_name=embedding_model,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    config=self.config,
-                )
-                chunk_count = self.vector_store.index_from_directory(data_path)
-                print(f"Indexed {chunk_count} chunks from local documents.")
-                tracer.end("local_index", detail=f"{chunk_count} 个分块")
-            except Exception as e:
-                print(f"Failed to load local documents: {e}")
-                tracer.end("local_index", detail="无可用本地文档", status="skipped")
-                self.vector_store = None
+            if not has_indexable_local_documents(data_path):
+                tracer.skip("local_index", "准备本地向量索引", detail="无可索引本地文档")
+            else:
+                print("Loading and indexing local documents...")
+                tracer.begin("local_index", "准备本地向量索引", detail="加载嵌入模型并索引文档")
+                try:
+                    self.vector_store = LangChainVectorStore(
+                        model_name=embedding_model,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                        config=self.config,
+                    )
+                    chunk_count = self.vector_store.index_from_directory(data_path)
+                    print(f"Indexed {chunk_count} chunks from local documents.")
+                    tracer.end("local_index", detail=f"{chunk_count} 个分块")
+                except Exception as e:
+                    print(f"Failed to load local documents: {e}")
+                    tracer.end("local_index", detail="无可用本地文档", status="skipped")
+                    self.vector_store = None
 
-        self.web_source = WebEvidenceSource(search_client)
+        orchestration = self.config.get("orchestration") or {}
+        official_domains = (
+            orchestration.get("official_domains")
+            if isinstance(orchestration, dict)
+            else None
+        )
+        self.web_source = WebEvidenceSource(
+            search_client,
+            official_domains=official_domains if isinstance(official_domains, dict) else None,
+        )
         self.local_source = LocalEvidenceSource(
             vector_store=self.vector_store,
             data_path=data_path,
@@ -305,6 +328,39 @@ class SearchRAGChain:
             config=self.config,
         )
         self.domain_source = DomainEvidenceSource(source_selector)
+
+        # Official-page extraction: pull full page content from official /
+        # first-party domains so answers ground in primary documentation rather
+        # than shallow search snippets. The router is built lazily and only
+        # from providers whose keys are already configured.
+        orchestration_cfg = self.config.get("orchestration") or {}
+        if not isinstance(orchestration_cfg, dict):
+            orchestration_cfg = {}
+        extraction_cfg = orchestration_cfg.get("official_page_extraction")
+        if isinstance(extraction_cfg, bool):
+            extraction_cfg = {"enabled": extraction_cfg}
+        if not isinstance(extraction_cfg, dict):
+            extraction_cfg = {}
+        self.official_page_extraction_enabled = bool(extraction_cfg.get("enabled", True))
+        self.official_page_max_urls = max(
+            1, min(int(extraction_cfg.get("max_urls", 4) or 4), 10)
+        )
+        self.official_page_max_chars = max(
+            200, int(extraction_cfg.get("max_chars_per_page", 4000) or 4000)
+        )
+        # When search returns no official/first-party hits, still extract full
+        # content from the top-ranked results so the answer sees real pages
+        # instead of shallow snippets. Bounded and separately configurable.
+        self.official_page_fill_non_official = bool(
+            extraction_cfg.get("fill_non_official", True)
+        )
+        self.official_page_max_non_official_urls = max(
+            0, min(int(extraction_cfg.get("max_non_official_urls", 2) or 2), 8)
+        )
+        self._reference_router: Optional[ReferenceExtractorRouter] = None
+        self._official_domains_map = (
+            official_domains if isinstance(official_domains, dict) else None
+        )
 
     def _format_evidence_context(self, items: List[EvidenceItem]) -> Dict[str, str]:
         """Format evidence items into grouped prompt context blocks."""
@@ -340,6 +396,19 @@ class SearchRAGChain:
             "web": "\n".join(grouped["web"]),
             "local": "\n".join(grouped["local"]),
         }
+
+    @staticmethod
+    def _qualified_limited_evidence_notice(query: str) -> str:
+        """Give a bounded answer when a provider returns empty limited-context text."""
+        if any("\u4e00" <= char <= "\u9fff" for char in query):
+            return (
+                "检索到了相关来源，但它们未满足该问题所需的权威性标准。"
+                "以下链接只能作为待核实线索，具体事实请以官方来源为准。"
+            )
+        return (
+            "Relevant sources were found, but they do not meet the required authority tier. "
+            "Treat the links below as leads to verify against an official source."
+        )
 
     def _dedupe_and_rank_evidence(
         self,
@@ -435,6 +504,8 @@ class SearchRAGChain:
         evidence_ledger: Optional[EvidenceLedger] = None,
         execution_trace: Optional[QueryExecutionTrace] = None,
         plan_controller: Optional[PlanController] = None,
+        web_step_kind: PlanStepKind = PlanStepKind.WEB_SEARCH,
+        enable_temporal_recovery: bool = True,
     ) -> Dict[str, Any]:
         """Retrieve and normalize evidence from enabled first-class sources."""
         tracer = ensure_tracer(tracer)
@@ -448,15 +519,29 @@ class SearchRAGChain:
         search_timings: List[Dict[str, Any]] = []
         search_attempts: List[Dict[str, Any]] = []
         executed_providers: List[str] = []
+        search_api_calls: List[Dict[str, Any]] = []
+        search_api_index = 0
 
         domain_step = query_plan.step_for_kind(PlanStepKind.DOMAIN_API) if query_plan else None
-        web_step = query_plan.step_for_kind(PlanStepKind.WEB_SEARCH) if query_plan else None
-        local_step = query_plan.step_for_kind(PlanStepKind.LOCAL_RETRIEVAL) if query_plan else None
-        temporal_step = (
-            query_plan.step_for_kind(PlanStepKind.TEMPORAL_RECOVERY, include_recovery=True)
+        web_step = (
+            query_plan.step_for_kind(web_step_kind, include_recovery=True)
             if query_plan
             else None
         )
+        local_step = query_plan.step_for_kind(PlanStepKind.LOCAL_RETRIEVAL) if query_plan else None
+        temporal_step = (
+            query_plan.step_for_kind(PlanStepKind.TEMPORAL_RECOVERY, include_recovery=True)
+            if query_plan and enable_temporal_recovery
+            else None
+        )
+        tier_entities: List[str] = []
+        if query_plan is not None:
+            tier_entities = list(
+                dict.fromkeys(
+                    list(query_plan.analysis.comparison_members)
+                    + list(query_plan.analysis.entities)
+                )
+            )
         if query_plan is not None:
             enable_domain = bool(enable_domain and domain_step)
             enable_search = bool(enable_search and web_step)
@@ -499,6 +584,24 @@ class SearchRAGChain:
             errors_getter = getattr(client, "get_last_errors", None)
             errors = list(errors_getter() or []) if callable(errors_getter) else []
             return timings, errors
+
+        def snapshot_search_call_records(client: Any) -> List[Dict[str, Any]]:
+            records_getter = getattr(client, "get_last_call_records", None)
+            if not callable(records_getter):
+                return []
+            return [record for record in list(records_getter() or []) if isinstance(record, dict)]
+
+        def emit_search_call_records(records: List[Dict[str, Any]]) -> None:
+            """Emit concrete provider requests before later evidence fusion."""
+            nonlocal search_api_index
+            for snapshot in search_call_snapshots(records):
+                search_api_index += 1
+                search_api_calls.append(snapshot)
+                emit_search_call_step(
+                    tracer,
+                    snapshot,
+                    step_id=f"search_api_{web_step_kind.value}_{search_api_index}",
+                )
 
         def record_provider_state(
             timings: List[Dict[str, Any]],
@@ -576,12 +679,33 @@ class SearchRAGChain:
                             date_restrict=date_restrict,
                             metadata={
                                 "originating_plan_step": step.step_id if step else None,
-                                "source_tier": "unknown",
                                 "retrieval_kind": "general_search",
+                                "source_tier_entities": tier_entities,
                             },
                         ),
                     )
                     timings, errors = snapshot_provider_state(self.search_client)
+                    call_records = snapshot_search_call_records(self.search_client)
+                    if not call_records and len(timings) == 1:
+                        timing = timings[0]
+                        if isinstance(timing, dict):
+                            call_records = [
+                                {
+                                    "source": timing.get("source"),
+                                    "label": timing.get("label"),
+                                    "query": effective_query,
+                                    "duration_ms": timing.get("duration_ms"),
+                                    "status": "error" if timing.get("error") else "done",
+                                    "result_count": len(search_items),
+                                    "results": [
+                                        {"title": hit.title, "url": hit.url, "snippet": hit.snippet}
+                                        for hit in evidence_items_to_search_hits(search_items)
+                                    ],
+                                    "error": timing.get("error"),
+                                    "fallback": bool(timing.get("fallback")),
+                                }
+                            ]
+                    emit_search_call_records(call_records)
                     search_timings.extend(timings)
                     providers, attempts = record_provider_state(timings, errors)
                     executed_providers.extend(provider for provider in providers if provider not in executed_providers)
@@ -593,9 +717,9 @@ class SearchRAGChain:
                             hits,
                             provenance={
                                 "originating_plan_step": step.step_id if step else None,
-                                "source_tier": "unknown",
                                 "retrieval_kind": "general_search",
                             },
+                            tier_entities=tier_entities,
                         ),
                         providers=providers,
                         attempts=attempts,
@@ -603,6 +727,24 @@ class SearchRAGChain:
                 except Exception as exc:  # noqa: BLE001 - preserve search failure in payload
                     search_error = str(exc)
                     timings, errors = snapshot_provider_state(self.search_client)
+                    call_records = snapshot_search_call_records(self.search_client)
+                    if not call_records:
+                        call_records = [
+                            {
+                                "source": timing.get("source"),
+                                "label": timing.get("label"),
+                                "query": effective_query,
+                                "duration_ms": timing.get("duration_ms"),
+                                "status": "error",
+                                "result_count": 0,
+                                "results": [],
+                                "error": timing.get("error") or search_error,
+                                "fallback": bool(timing.get("fallback")),
+                            }
+                            for timing in timings
+                            if isinstance(timing, dict)
+                        ]
+                    emit_search_call_records(call_records)
                     search_timings.extend(timings)
                     providers, attempts = record_provider_state(timings, errors)
                     executed_providers.extend(provider for provider in providers if provider not in executed_providers)
@@ -621,6 +763,32 @@ class SearchRAGChain:
             hits_count = len(hits)
             if web_result.status in {"error", "blocked", "skipped"} and not search_error:
                 search_error = web_result.reason or web_result.status
+
+            # Official-page extraction: fetch full content from official /
+            # first-party domains and feed it into the evidence pool so the
+            # answer can ground in primary documentation, not just snippets.
+            try:
+                extracted_items, extraction_records = self._enrich_official_pages(
+                    query=query,
+                    web_hits=hits,
+                    tier_entities=tier_entities,
+                    tracer=tracer,
+                )
+            except Exception as exc:  # noqa: BLE001 - enrichment is best effort
+                print(f"[official_page_extraction] error: {exc}")
+                extracted_items, extraction_records = [], []
+            if extracted_items:
+                evidence_items.extend(extracted_items)
+                hits_count += len(extracted_items)
+            if extraction_records:
+                for record in extraction_records:
+                    search_api_index += 1
+                    search_api_calls.append(record)
+                    emit_search_call_step(
+                        tracer,
+                        record,
+                        step_id=f"search_api_extract_{search_api_index}",
+                    )
 
             if temporal_step is not None and not search_error:
                 missing_years = self._detect_missing_years(
@@ -663,15 +831,16 @@ class SearchRAGChain:
                             timing_recorder,
                             missing_years=missing_years,
                             attempt_collector=collect_temporal_attempts,
+                            call_observer=emit_search_call_records,
                         )
                         return PlanStepResult(
                             items=self.web_source.hits_to_items(
                                 granular_hits,
                                 provenance={
                                     "originating_plan_step": step.step_id if step else None,
-                                    "source_tier": "unknown",
                                     "retrieval_kind": "temporal_recovery",
                                 },
+                                tier_entities=tier_entities,
                             ),
                             providers=temporal_providers,
                             attempts=temporal_attempts,
@@ -731,12 +900,19 @@ class SearchRAGChain:
 
         tracer.begin("rerank", "证据重排融合")
         evidence_items, fusion_meta = self._dedupe_and_rank_evidence(evidence_items)
+        answer_basis = "retrieved_evidence"
         if evidence_ledger is not None:
             evidence_ledger.ingest(evidence_items)
             evidence_ledger.apply_limits(
                 max_items=query_plan.result_budget if query_plan else num_search_results,
             )
-            evidence_items = evidence_ledger.retained_items()
+            retained_items = evidence_ledger.retained_items()
+            limited_items = evidence_ledger.limited_items()
+            evidence_items = retained_items or limited_items
+            if limited_items and not retained_items:
+                answer_basis = "limited_evidence"
+            elif retained_items:
+                answer_basis = "retained_evidence"
             fusion_meta.extend(
                 {
                     "reference": entry.canonical_reference,
@@ -762,6 +938,8 @@ class SearchRAGChain:
                 "executed": executed_providers,
                 "attempts": search_attempts,
             },
+            "search_api_calls": search_api_calls,
+            "answer_basis": answer_basis,
         }
     
     def _format_search_hits(self, hits: List[SearchHit]) -> str:
@@ -777,6 +955,199 @@ class SearchRAGChain:
                 f"   {hit.snippet or 'No snippet available.'}"
             )
         return "\n".join(formatted)
+
+    def _get_reference_router(self) -> Optional[ReferenceExtractorRouter]:
+        """Build the page-extraction router lazily from configured providers."""
+        if not self.official_page_extraction_enabled:
+            return None
+        if self._reference_router is not None:
+            return self._reference_router
+        extractors = build_reference_extractors(self.config or {})
+        if not extractors:
+            self._reference_router = None
+            return None
+        self._reference_router = ReferenceExtractorRouter(extractors)
+        return self._reference_router
+
+    def _enrich_official_pages(
+        self,
+        query: str,
+        web_hits: List[SearchHit],
+        tier_entities: List[str],
+        tracer: Optional[Any] = None,
+    ) -> tuple[List[EvidenceItem], List[Dict[str, Any]]]:
+        """Extract full content from official/first-party hits.
+
+        Returns additional evidence items plus per-provider extraction records
+        (surfaced as ``search_api_calls`` of kind ``extracted_pages`` in the UI).
+        Failures degrade gracefully: any error yields no items, never a crash.
+        """
+        if not web_hits:
+            return [], []
+        router = self._get_reference_router()
+        if router is None:
+            return [], []
+
+        entities = list(tier_entities) if tier_entities else []
+        # The deterministic analyzer does not always surface brand entities, so
+        # derive extra stems from the query text and keep those that correspond
+        # to a configured official alias. This lets official-page extraction
+        # trigger even when entity extraction comes back empty.
+        alias_stems = set()
+        if isinstance(self._official_domains_map, dict):
+            alias_stems = {
+                normalize_entity_stem(alias)
+                for alias in self._official_domains_map.keys()
+                if not str(alias).startswith("_")
+            }
+        for token in re.split(r"[\s,，、/()（）]+", query or ""):
+            stem = normalize_entity_stem(token)
+            if stem and stem in alias_stems and stem not in entities:
+                entities.append(stem)
+        # Union of every configured official registrable domain — a hit landing
+        # here is official by definition, independent of entity extraction.
+        configured_official_domains: Set[str] = set()
+        if isinstance(self._official_domains_map, dict):
+            for configured in self._official_domains_map.values():
+                if isinstance(configured, str):
+                    configured = [configured]
+                if not hasattr(configured, "__iter__"):
+                    continue
+                for domain_value in configured:
+                    domain = registrable_domain(domain_value)
+                    if domain:
+                        configured_official_domains.add(domain)
+
+        seen_urls: Set[str] = set()
+        official_selected: List[str] = []
+        for hit in web_hits:
+            if len(official_selected) >= self.official_page_max_urls:
+                break
+            url = (hit.url or "").strip()
+            if not url or url in seen_urls:
+                continue
+            hit_domain = registrable_domain(url)
+            tier = classify_web_source_tier(
+                url,
+                entities=entities,
+                official_domains=self._official_domains_map,
+            )
+            if hit_domain in configured_official_domains or tier in {"official", "first_party"}:
+                seen_urls.add(url)
+                official_selected.append(url)
+        selected = list(official_selected)
+        # Fallback: when search surfaces no official-domain hits (or to fill the
+        # remaining budget), extract the top-ranked remaining hits so the answer
+        # still reads full pages instead of shallow snippets.
+        if self.official_page_fill_non_official and self.official_page_max_non_official_urls:
+            if official_selected:
+                non_official_cap = self.official_page_max_non_official_urls
+            else:
+                # Nothing official at all: use the full budget for top hits.
+                non_official_cap = self.official_page_max_urls
+            added = 0
+            for hit in web_hits:
+                if added >= non_official_cap or len(selected) >= self.official_page_max_urls:
+                    break
+                url = (hit.url or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                selected.append(url)
+                added += 1
+        if not selected:
+            return [], []
+
+        tracer_ref = ensure_tracer(tracer)
+        official_count = sum(
+            1 for url in selected if registrable_domain(url) in configured_official_domains
+        )
+        non_official_count = len(selected) - official_count
+        step_detail_parts = [f"{official_count} 官方页"] if official_count else []
+        if non_official_count:
+            step_detail_parts.append(f"{non_official_count} 权威页")
+        tracer_ref.begin(
+            "official_extract",
+            "抓取官方文档",
+            detail="、".join(step_detail_parts) or f"{len(selected)} 个页面",
+        )
+        started_at = time.perf_counter()
+        try:
+            extraction = router.extract(selected, objective=query or None)
+        except Exception as exc:  # noqa: BLE001 - extraction is best effort
+            print(f"[official_page_extraction] failed: {exc}")
+            tracer_ref.error("official_extract", detail="抓取异常")
+            return [], []
+        duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+
+        synthetic_hits: List[SearchHit] = []
+        records: List[Dict[str, Any]] = []
+        result_rows: List[Dict[str, Any]] = []
+        for content in extraction.contents:
+            text = (content.content or "").strip()
+            if not text:
+                continue
+            snippet = text[: self.official_page_max_chars]
+            title = content.title or content.url
+            synthetic_hits.append(
+                SearchHit(title=title, url=content.url, snippet=snippet)
+            )
+            result_rows.append(
+                {
+                    "url": content.url,
+                    "title": title,
+                    "provider": content.provider,
+                    "content_chars": len(text),
+                    "status": "done",
+                    "official": registrable_domain(content.url) in configured_official_domains,
+                }
+            )
+
+        failure_rows = [
+            {
+                "url": failure.requested_url,
+                "provider": failure.provider,
+                "status": "error",
+                "error": failure.error_type,
+            }
+            for failure in extraction.failures
+        ]
+
+        if synthetic_hits:
+            items = self.web_source.hits_to_items(
+                synthetic_hits,
+                provenance={"retrieval_kind": "official_page_extraction"},
+                tier_entities=entities,
+            )
+        else:
+            items = []
+
+        if result_rows or failure_rows:
+            extracted_official = sum(1 for row in result_rows if row.get("official"))
+            label = "官方文档抓取" if extracted_official else "权威页面抓取"
+            records.append(
+                {
+                    "source": "reference_extract",
+                    "label": label,
+                    "query": query or "",
+                    "duration_ms": duration_ms,
+                    "status": "error" if not synthetic_hits else "done",
+                    "result_count": len(synthetic_hits),
+                    "kind": "extracted_pages",
+                    "official_count": extracted_official,
+                    "records": result_rows + failure_rows,
+                    "attempts": list(extraction.attempts),
+                }
+            )
+
+        detail = (
+            f"{len(synthetic_hits)} 个页面"
+            + (f"、{len(failure_rows)} 失败" if failure_rows else "")
+            or "无内容"
+        )
+        tracer_ref.end("official_extract", detail=detail)
+        return items, records
+
     
     def _format_local_docs(self, docs: List[Document]) -> str:
         """Format local documents for prompt context."""
@@ -933,6 +1304,7 @@ class SearchRAGChain:
         timing_recorder: Optional[TimingRecorder],
         missing_years: Optional[List[str]] = None,
         attempt_collector: Optional[Callable[[List[Dict[str, Any]], List[Dict[str, Any]]], None]] = None,
+        call_observer: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> List[SearchHit]:
         """Perform granular search for historical data."""
         
@@ -949,6 +1321,12 @@ class SearchRAGChain:
                 timings = list(timings_getter() or []) if callable(timings_getter) else []
                 errors_getter = getattr(active_client, "get_last_errors", None)
                 errors = list(errors_getter() or []) if callable(errors_getter) else []
+                records_getter = getattr(active_client, "get_last_call_records", None)
+                call_records = list(records_getter() or []) if callable(records_getter) else []
+                if call_observer is not None:
+                    call_observer(
+                        [record for record in call_records if isinstance(record, dict)]
+                    )
                 if attempt_collector is not None:
                     attempt_collector(timings, errors)
                 elif timing_recorder is not None and timings:
@@ -1125,6 +1503,8 @@ class SearchRAGChain:
         evidence_ledger: Optional[EvidenceLedger] = None,
         execution_trace: Optional[QueryExecutionTrace] = None,
         plan_controller: Optional[PlanController] = None,
+        web_step_kind: PlanStepKind = PlanStepKind.WEB_SEARCH,
+        enable_temporal_recovery: bool = True,
     ) -> Dict[str, Any]:
         """Answer a query using search + local docs RAG pipeline."""
         tracer = ensure_tracer(tracer)
@@ -1148,20 +1528,21 @@ class SearchRAGChain:
             evidence_ledger=evidence_ledger,
             execution_trace=execution_trace,
             plan_controller=plan_controller,
+            web_step_kind=web_step_kind,
+            enable_temporal_recovery=enable_temporal_recovery,
         )
         evidence_items: List[EvidenceItem] = retrieval["evidence_items"]
         search_hits = evidence_items_to_search_hits(evidence_items)
         retrieved_docs = evidence_items_to_documents(evidence_items)
         domain_items = [item for item in evidence_items if item.source_type == "domain"]
 
-        # A planned authority/comparison query with no acceptable retained
-        # evidence must not spend another expensive model call producing an
-        # unsupported draft. The orchestrator turns this typed preflight into
-        # the compatible final control state and user-facing insufficiency.
+        # Only a completely empty ledger is a hard pre-generation stop. A
+        # limited-only ledger can support an explicitly qualified answer after
+        # the recovery loop has exhausted its bounded attempts.
         preflight = None
         if query_plan is not None and evidence_ledger is not None:
             preflight = verify_evidence_plan(query_plan, evidence_ledger)
-            if preflight.status == VerificationStatus.EVIDENCE_INSUFFICIENT:
+            if query_plan.analysis.requires_evidence and not evidence_ledger.entries:
                 payload: Dict[str, Any] = {
                     "query": query,
                     "answer": "",
@@ -1184,7 +1565,9 @@ class SearchRAGChain:
                         "search_provider_trace",
                         {"executed": [], "attempts": []},
                     ),
+                    "search_api_calls": retrieval.get("search_api_calls", []),
                     "verification_precheck": preflight.to_dict(),
+                    "answer_basis": "no_evidence",
                 }
                 if retrieval["search_error"]:
                     payload["search_error"] = retrieval["search_error"]
@@ -1208,6 +1591,13 @@ class SearchRAGChain:
             )
             user_prompt = "".join(prompt_parts)
             system_prompt = self.system_prompt
+            if retrieval.get("answer_basis") == "limited_evidence":
+                system_prompt = (
+                    f"{system_prompt}\n\n"
+                    "The available sources did not meet the required authority tier. "
+                    "Answer only from this limited context and explicitly state the "
+                    "source limitation and uncertainty."
+                )
         else:
             user_prompt = query
             system_prompt = DEFAULT_DIRECT_FALLBACK_SYSTEM_PROMPT
@@ -1271,7 +1661,11 @@ class SearchRAGChain:
         tracer.end("generate", detail=_model_suffix or None)
         
         # Build answer with references
-        answer = content
+        answer = content if isinstance(content, str) else str(content or "")
+        limited_evidence_fallback = False
+        if not answer.strip() and retrieval.get("answer_basis") == "limited_evidence":
+            answer = self._qualified_limited_evidence_notice(query)
+            limited_evidence_fallback = True
         reference_hits = search_hits if reference_limit is None else search_hits[:reference_limit]
         
         if answer:
@@ -1313,6 +1707,9 @@ class SearchRAGChain:
                 "search_provider_trace",
                 {"executed": [], "attempts": []},
             ),
+            "search_api_calls": retrieval.get("search_api_calls", []),
+            "answer_basis": retrieval.get("answer_basis"),
+            "limited_evidence_fallback": limited_evidence_fallback,
         }
         
         if retrieval["search_error"]:

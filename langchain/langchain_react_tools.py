@@ -85,6 +85,13 @@ class ReActSearchTool(BaseTool):
         except Exception as exc:
             return f"Search failed: {exc}"
 
+    def get_last_search_api_calls(self) -> List[Dict[str, Any]]:
+        """Expose the concrete provider calls for the workflow audit only."""
+        getter = getattr(self.search_client, "get_last_call_records", None)
+        if not callable(getter):
+            return []
+        return [record for record in list(getter() or []) if isinstance(record, dict)]
+
     def _format_results(self, hits: List[SearchHit]) -> str:
         """Format search results as a readable string."""
         if not hits:
@@ -147,6 +154,7 @@ class ReActSearchRecoveryTool(BaseTool):
         )
         self._rag_chain: Optional[SearchRAGChain] = None
         self._last_payload: Optional[Dict[str, Any]] = None
+        self._last_search_api_calls: List[Dict[str, Any]] = []
 
     def _get_chain(self) -> SearchRAGChain:
         if self._rag_chain is None:
@@ -180,9 +188,18 @@ class ReActSearchRecoveryTool(BaseTool):
                 enable_domain=True,
             )
             self._last_payload = result
+            raw_calls = result.get("search_api_calls") if isinstance(result, dict) else None
+            self._last_search_api_calls = [
+                record for record in list(raw_calls or []) if isinstance(record, dict)
+            ]
             return self._format_payload(result)
         except Exception as exc:
+            self._last_search_api_calls = []
             return f"Search recovery failed: {exc}"
+
+    def get_last_search_api_calls(self) -> List[Dict[str, Any]]:
+        """Return the recovery chain's provider-call audit snapshots."""
+        return [dict(record) for record in self._last_search_api_calls]
 
     def _format_payload(self, payload: Dict[str, Any]) -> str:
         answer = str(payload.get("answer") or "").strip()

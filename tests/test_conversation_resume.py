@@ -234,6 +234,7 @@ class TestEndToEndResume:
         runner2 = _runner(["精简版答案，苹果对比微软。"], tools2, query="精简一点")
         result2 = runner2.run("精简一点", conversation_id=cid)
         assert result2["conversation_resumed"] is True
+        assert len(result2["verdicts"]) == result2["iterations"]
         # Evidence from turn 1 is retained from the checkpoint.
         assert result2.get("evidence_pool_size", 0) >= 1
 

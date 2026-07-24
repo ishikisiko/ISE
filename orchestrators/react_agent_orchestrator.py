@@ -277,6 +277,7 @@ class ReactAgentOrchestrator:
                 query=query,
                 fallback_context=fallback_context,
                 history_window=history_window,
+                tracer=tracer,
             )
             loop_result = runner.run(user_input, conversation_id=conversation_id)
             resumed = resumed or bool(loop_result.get("conversation_resumed"))
@@ -311,6 +312,8 @@ class ReactAgentOrchestrator:
             "exhausted": "迭代用尽",
             "stagnated": "检索停滞",
             "unrecoverable": "工具持续失败",
+            "invalid_tool_request": "工具调用格式无效",
+            "process_narration": "过程性文本，继续补充",
         }
         verdict_items = [
             {
@@ -333,7 +336,9 @@ class ReactAgentOrchestrator:
         tracer.end(
             "react_loop",
             detail=f"{badge['text']} · {loop_result.get('iterations')} 轮迭代" if badge else None,
-            items=verdict_items,
+            # Per-iteration evaluation events already carry detailed verdicts.
+            # Keep this outer event as a compact status summary.
+            items=None if loop_result.get("trace_events") else verdict_items,
             status="done" if loop_status == "succeeded" else "error",
             badge=badge,
         )
@@ -370,6 +375,8 @@ class ReactAgentOrchestrator:
             "loop_iterations": loop_result.get("iterations"),
             "loop_verdicts": list(loop_result.get("verdicts") or []),
             "loop_termination_reason": loop_result.get("termination_reason"),
+            "react_trace": list(loop_result.get("trace_events") or []),
+            "react_trace_truncated": bool(loop_result.get("trace_truncated")),
             "final_executor": "react_fallback" if fallback_context else "react_agent",
             "fallback_triggered": bool(fallback_context),
             "conversation_resumed": resumed,

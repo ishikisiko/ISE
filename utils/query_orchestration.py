@@ -89,6 +89,20 @@ TEMPORAL_ENTITY_TRAILING_RE = re.compile(
 )
 ENTITY_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
 
+# Generic tokens that carry no entity signal. Used to keep brand names (e.g.
+# "OpenAI", "GLM") in the fallback search query after stripping intent cues.
+_QUERY_SUBJECT_STOPWORDS = frozenset(
+    str(token).casefold()
+    for token in (
+        "api", "model", "models", "sdk", "doc", "docs", "service", "services",
+        "platform", "platforms", "app", "apps", "tool", "tools",
+        "price", "pricing", "cost", "rate", "tariff", "fee", "fees",
+        "latest", "current", "today", "now", "new",
+        "compare", "comparison", "versus", "vs", "and", "or", "of", "for", "the",
+        "compliance", "regulation", "policy", "terms",
+    )
+)
+
 
 class PlanStepKind(str, Enum):
     """Bounded execution modes understood by the plan controller."""
@@ -98,6 +112,7 @@ class PlanStepKind(str, Enum):
     DOMAIN_API = "domain_api"
     WEB_SEARCH = "web_search"
     TEMPORAL_RECOVERY = "temporal_recovery"
+    QUERY_REFORMULATION = "query_reformulation"
     DIRECT_REFERENCE = "direct_reference"
     CLARIFICATION = "clarification"
 
@@ -513,10 +528,94 @@ class QueryPlan:
         }
 
 
+def _query_subject_tokens(query: str) -> List[str]:
+    """Extract brand/subject tokens from a query when no entities were detected.
+
+    Keeps latin product tokens (e.g. "OpenAI", "GLM") and meaningful CJK runs
+    after stripping intent cues, so the fallback search query does not collapse
+    to bare cues like "价格 pricing" and drop the subject entirely.
+    """
+    text = ENTITY_SUFFIX_RE.sub("", str(query or "")).strip()
+    latin_tokens = [
+        token
+        for token in ENTITY_TOKEN_RE.findall(text)
+        if len(token) >= 2 and token.casefold() not in _QUERY_SUBJECT_STOPWORDS
+    ]
+    latin_tokens = _dedupe_strings(latin_tokens, limit=5)
+    if latin_tokens:
+        return latin_tokens
+    cue_set = set(PRICE_CUES) | set(CURRENT_CUES) | set(COMPLIANCE_CUES) | set(COMPARISON_CUES)
+    cjk_runs = re.findall(r"[\u4e00-\u9fff]{2,}", text)
+    kept = [run for run in cjk_runs if run not in cue_set]
+    return _dedupe_strings(kept, limit=5)
+
+
 def deterministic_query_for_plan(analysis: QueryAnalysis) -> str:
     """Produce a safe fallback query without relying on a prompt template."""
-    base = " ".join(_dedupe_strings(analysis.entities, limit=5))
-    return _bounded_text(base or analysis.query, 500)
+    base = _dedupe_strings(analysis.entities, limit=5)
+    if not base:
+        # Entity extraction only catches comparison members and version-digit
+        # model tokens, so plain brand names (OpenAI, Anthropic, ...) are
+        # absent. Preserve the subject of the original query instead of
+        # searching with intent cues alone, which would drop the brand and
+        # prevent official-domain evidence from ever surfacing.
+        base = _query_subject_tokens(analysis.query)
+    cues: List[str] = []
+    claim_classes = {value.casefold() for value in analysis.claim_classes}
+    if "pricing" in claim_classes or "numeric" in claim_classes:
+        cues.extend(["价格", "pricing"])
+    if "current" in claim_classes:
+        cues.extend(["最新", "latest"])
+    if "compliance" in claim_classes:
+        cues.extend(["官方", "policy"])
+    if "temporal" in claim_classes:
+        cues.extend(["趋势", "historical"])
+    parts = _dedupe_strings(base + cues, limit=8)
+    return _bounded_text(" ".join(parts) or analysis.query, 500)
+
+
+def reformulate_query_for_recovery(
+    analysis: QueryAnalysis,
+    missing_constraints: Sequence[str],
+) -> str:
+    """Build one deterministic recovery query from typed evidence gaps."""
+    missing = [str(value).casefold() for value in missing_constraints]
+    members = _dedupe_strings(analysis.comparison_members or analysis.entities, limit=8)
+    base_query = deterministic_query_for_plan(analysis)
+    claim_classes = {value.casefold() for value in analysis.claim_classes}
+    intent_cues: List[str] = []
+    if "pricing" in claim_classes or "numeric" in claim_classes:
+        intent_cues.extend(["价格", "pricing"])
+    if "current" in claim_classes:
+        intent_cues.extend(["最新", "latest"])
+    if "compliance" in claim_classes:
+        intent_cues.extend(["官方", "policy"])
+
+    if "authority" in missing:
+        targets = members or _dedupe_strings(analysis.entities, limit=5)
+        return _bounded_text(
+            " ".join(targets + ["official", "pricing", "价格", "定价"])
+            or f"{base_query} official",
+            500,
+        )
+
+    comparison_missing = next(
+        (value.split(":", 1)[1] for value in missing if value.startswith("comparison:") and ":" in value),
+        None,
+    )
+    if comparison_missing:
+        member = next(
+            (candidate for candidate in members if candidate.casefold() == comparison_missing),
+            comparison_missing,
+        )
+        return _bounded_text(
+            " ".join(_dedupe_strings([member] + intent_cues, limit=6)),
+            500,
+        )
+
+    if "no_evidence" in missing or "evidence" in missing:
+        return base_query
+    return base_query
 
 
 def build_query_plan(
@@ -620,6 +719,24 @@ def build_query_plan(
                 max_results=min(4, plan.result_budget),
                 recovery_only=True,
                 metadata=dict(analysis.time_scope),
+            )
+        )
+    if (
+        analysis.search_allowed
+        and plan.recovery_budget > 0
+        and {"authority", "comparison_coverage"}.intersection(plan.policy_names())
+    ):
+        plan.steps.append(
+            QueryPlanStep(
+                step_id="query_reformulation",
+                kind=PlanStepKind.QUERY_REFORMULATION,
+                purpose="Re-search with a deterministic query for an authority or comparison coverage gap.",
+                query=deterministic_query_for_plan(analysis),
+                source_types=["web"],
+                allowed_providers=list(analysis.requested_sources),
+                max_results=min(4, plan.result_budget),
+                recovery_only=True,
+                metadata={"recovery_kind": "query_reformulation"},
             )
         )
     return plan
@@ -802,12 +919,12 @@ class EvidenceLedger:
             references.add(reference_key)
 
     def retained_items(self) -> List[Any]:
-        """Return only evidence that may support the generated answer.
-
-        ``limited`` entries remain visible in the coverage projection for
-        diagnostics, but cannot silently become factual answer context.
-        """
+        """Return policy-accepted evidence for ordinary answer generation."""
         return [entry.raw_item for entry in self.entries if entry.decision == "retained" and entry.raw_item is not None]
+
+    def limited_items(self) -> List[Any]:
+        """Return constrained evidence for an explicitly qualified answer."""
+        return [entry.raw_item for entry in self.entries if entry.decision == "limited" and entry.raw_item is not None]
 
     def coverage_summary(self) -> Dict[str, Any]:
         entries = list(self.entries)
@@ -854,22 +971,76 @@ def verify_evidence_plan(
         )
 
     # Limited and rejected entries are useful diagnostics, but cannot satisfy
-    # a planned factual constraint or be treated as answer-supporting evidence.
+    # a planned factual constraint. Limited entries can still distinguish a
+    # source-authority gap from a total retrieval failure.
     entries = [entry for entry in ledger.entries if entry.decision == "retained"]
+    available_entries = [entry for entry in ledger.entries if entry.decision != "rejected"]
     if not plan.analysis.requires_evidence:
         return VerificationOutcome(status=VerificationStatus.COMPLETE, next_action="return")
+
+    reformulation_step = plan.step_for_kind(
+        PlanStepKind.QUERY_REFORMULATION,
+        include_recovery=True,
+    )
+    temporal_step = plan.step_for_kind(
+        PlanStepKind.TEMPORAL_RECOVERY,
+        include_recovery=True,
+    )
+
+    def recovery_allowed_for(missing_constraints: Sequence[str]) -> bool:
+        if plan.recovery_budget <= 0:
+            return False
+        typed_missing = {constraint for constraint in missing_constraints if not constraint.startswith("answer_")}
+        if typed_missing.intersection({"no_evidence", "authority"}):
+            return reformulation_step is not None or temporal_step is not None
+        if any(constraint.startswith("comparison:") for constraint in typed_missing):
+            return reformulation_step is not None
+        if typed_missing.intersection({"temporal_coverage"}):
+            return temporal_step is not None
+        if "answer_temporal_coverage" in missing_constraints:
+            return temporal_step is not None
+        return False
+
+    def insufficiency_failure(missing_constraints: Sequence[str]) -> List[str]:
+        structural_gap = any(not constraint.startswith("answer_") for constraint in missing_constraints)
+        if (
+            structural_gap
+            and plan.analysis.search_allowed
+            and plan.recovery_budget <= 0
+        ):
+            return ["recovery_budget_exhausted"]
+        return []
+
     if not entries:
-        recoverable = (
-            bool(plan.step_for_kind(PlanStepKind.TEMPORAL_RECOVERY, include_recovery=True))
-            and plan.recovery_budget > 0
-        )
+        missing: List[str] = []
+        failures: List[str] = []
+        rule_hits: List[Dict[str, str]] = []
+        authority = next((policy for policy in plan.policies if policy.name == "authority"), None)
+        if available_entries and authority:
+            missing.append("authority")
+            failures.append("authority_policy_not_met")
+            rule_hits.append(
+                {
+                    "rule": "authority",
+                    "detail": "Evidence exists, but none meets the authority policy.",
+                }
+            )
+        else:
+            missing.append("no_evidence")
+            failures.append("no_evidence")
+            rule_hits.append(
+                {"rule": "no_evidence", "detail": "No evidence was retained for the planned query."}
+            )
+        recoverable = recovery_allowed_for(missing)
+        if not recoverable:
+            failures.extend(insufficiency_failure(missing))
         return VerificationOutcome(
             status=VerificationStatus.RECOVERABLE_GAP if recoverable else VerificationStatus.EVIDENCE_INSUFFICIENT,
-            missing_constraints=["evidence"],
-            failure_types=["no_evidence"],
+            missing_constraints=missing,
+            failure_types=_dedupe_strings(failures, limit=12),
             recoverable=recoverable,
             next_action="recover" if recoverable else "return_insufficient",
-            rule_hits=[{"rule": "no_evidence", "detail": "No evidence was retained for the planned query."}],
+            rule_hits=rule_hits,
         )
 
     missing: List[str] = []
@@ -920,11 +1091,9 @@ def verify_evidence_plan(
 
     if not missing:
         return VerificationOutcome(status=VerificationStatus.COMPLETE, next_action="return")
-    recovery_allowed = (
-        plan.recovery_budget > 0
-        and bool(plan.step_for_kind(PlanStepKind.TEMPORAL_RECOVERY, include_recovery=True))
-        and "authority" not in missing
-    )
+    recovery_allowed = recovery_allowed_for(missing)
+    if not recovery_allowed:
+        failures.extend(insufficiency_failure(missing))
     return VerificationOutcome(
         status=VerificationStatus.RECOVERABLE_GAP if recovery_allowed else VerificationStatus.EVIDENCE_INSUFFICIENT,
         missing_constraints=missing,
@@ -1040,7 +1209,14 @@ class QueryExecutionTrace:
             }
         )
 
-    def record_recovery(self, *, executor: str, status: str, reason: Optional[str] = None) -> None:
+    def record_recovery(
+        self,
+        *,
+        executor: str,
+        status: str,
+        reason: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> None:
         """Record a bounded fallback decision that is outside source retrieval."""
         event: Dict[str, Any] = {
             "step_id": "recovery",
@@ -1050,6 +1226,8 @@ class QueryExecutionTrace:
         }
         if reason:
             event["reason"] = _bounded_text(reason, 160)
+        if query:
+            event["query"] = _bounded_text(query, 240)
         self.events.append(event)
 
     def to_dict(self, *, max_events: int = 24) -> Dict[str, Any]:
@@ -1080,8 +1258,13 @@ class PlanController:
             PlanStepKind.DOMAIN_API,
             PlanStepKind.WEB_SEARCH,
             PlanStepKind.TEMPORAL_RECOVERY,
+            PlanStepKind.QUERY_REFORMULATION,
             PlanStepKind.DIRECT_REFERENCE,
         }
+
+    def can_run(self, step: QueryPlanStep) -> Optional[str]:
+        """Expose a read-only budget check for orchestrator recovery loops."""
+        return self._can_run(step)
 
     def _can_run(self, step: QueryPlanStep) -> Optional[str]:
         if self.plan.clarification_required and step.kind != PlanStepKind.CLARIFICATION:
