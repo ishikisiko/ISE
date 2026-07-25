@@ -1,5 +1,7 @@
 # react-orchestrator Specification
 
+> **Status:** reframing at M1 — 能力存续但立论框架会变，可修补，不要在现框架上做大投入。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Define the standalone React agent executor and its fallback role within the unified default search pipeline.
 ## Requirements

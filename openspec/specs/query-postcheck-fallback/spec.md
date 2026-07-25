@@ -1,5 +1,7 @@
 # query-postcheck-fallback Specification
 
+> **Status:** superseded by roadmap M1 — 该能力将在对应里程碑删除，不要新增 requirement 或加固；仅接受阻断性缺陷的最小修复。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Define the default pipeline post-check stage and the rules for escalating to ReAct fallback with compatible evidence context and fallback metadata.
 ## Requirements

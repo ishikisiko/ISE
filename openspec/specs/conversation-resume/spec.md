@@ -1,5 +1,7 @@
 # conversation-resume Specification
 
+> **Status:** active — 当前契约，且在目标架构中存续。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Define how multi-turn feedback on an existing conversation resumes the ReAct loop via persistent checkpointing, intent classification, constraint inheritance and message-window budgeting.
 

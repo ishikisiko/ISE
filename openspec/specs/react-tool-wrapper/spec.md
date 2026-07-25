@@ -1,5 +1,7 @@
 # react-tool-wrapper Specification
 
+> **Status:** reframing at M2 — 能力存续但立论框架会变，可修补，不要在现框架上做大投入。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Define the LangChain ReAct tool wrappers used by the fallback executor, including web search, domain evidence access, local evidence access, and high-level search recovery built on the unified evidence layer.
 ## Requirements

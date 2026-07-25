@@ -1,5 +1,7 @@
 # unified-rag-execution Specification
 
+> **Status:** reframing at M5 — 能力存续但立论框架会变，可修补，不要在现框架上做大投入。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Define the single primary RAG execution layer used by the default orchestrator for local, search, and hybrid execution.
 

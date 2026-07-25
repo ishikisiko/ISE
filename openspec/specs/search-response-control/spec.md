@@ -1,5 +1,7 @@
 # search-response-control Specification
 
+> **Status:** active — 当前契约，且在目标架构中存续。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Define normalized response control metadata semantics for the default pipeline and its fallback paths.
 

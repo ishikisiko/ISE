@@ -1,5 +1,7 @@
 # aggregator-auto-detection Specification
 
+> **Status:** active — 当前契约，且在目标架构中存续。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Detect hosts that behave like aggregators across unrelated entity resolutions.
 

@@ -1,5 +1,7 @@
 # conversation-session Specification
 
+> **Status:** active — 当前契约，且在目标架构中存续。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Define the lifecycle, persistence, and governance rules for client-supplied `conversation_id` values that identify a continuous multi-turn dialogue.
 

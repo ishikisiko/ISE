@@ -1,5 +1,7 @@
 # official-domain-resolution Specification
 
+> **Status:** active — 当前契约，且在目标架构中存续。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Resolve official domains for query entities from deterministic, auditable structural signals.
 

@@ -1,5 +1,7 @@
 # process-audit-log Specification
 
+> **Status:** active — 当前契约，且在目标架构中存续。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Define a toggleable, persisted per-turn process audit for CLI and Web requests,
 with bounded JSONL retention and best-effort writes.

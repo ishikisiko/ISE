@@ -1,5 +1,7 @@
 # search-routing-core Specification
 
+> **Status:** superseded by roadmap M3 — 该能力将在对应里程碑删除，不要新增 requirement 或加固；仅接受阻断性缺陷的最小修复。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 Define the shared routing core used by the default search pipeline across CLI and API entrypoints.
 

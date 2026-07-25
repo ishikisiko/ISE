@@ -1,5 +1,7 @@
 # evidence-source-layer Specification
 
+> **Status:** active — 当前契约，且在目标架构中存续。 分类依据见 `docs/agentic_loop_roadmap.md`。
+
 ## Purpose
 TBD - created by archiving change unify-evidence-sources. Update Purpose after archive.
 ## Requirements
