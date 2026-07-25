@@ -26,13 +26,15 @@ from evidence import (
     RetrievalOptions,
     WebEvidenceSource,
     build_evidence_summary,
+    classify_web_source_tier,
+    provisional_entity_for_url,
     source_identity_label,
 )
 from evidence.official_domain_resolver import build_official_domain_resolver
 from langchain.langchain_rag import SearchRAGChain
 from search.search import SearchClient, SearchHit
 from skills import SkillRegistry
-from utils.query_orchestration import QueryAnalysis
+from utils.query_orchestration import QueryAnalysis, canonical_reference
 from utils.timing_utils import TimingRecorder
 
 
@@ -635,7 +637,12 @@ class ReActFetchUrlTool(BaseTool):
     app_config: Dict[str, Any] = Field(default_factory=dict, exclude=True)
     max_calls_per_query: int = Field(default=3, exclude=True)
     max_chars: int = Field(default=8000, exclude=True)
+    min_content_chars: int = Field(default=600, exclude=True)
     _calls_in_run: int = PrivateAttr(default=0)
+    _seen_urls: set[str] = PrivateAttr(default_factory=set)
+    _analysis: Optional[QueryAnalysis] = PrivateAttr(default=None)
+    _official_domains: Dict[str, Any] = PrivateAttr(default_factory=dict)
+    _official_resolver: Any = PrivateAttr(default=None)
     _router: Any = PrivateAttr(default=None)
     _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
 
@@ -648,23 +655,40 @@ class ReActFetchUrlTool(BaseTool):
         config: Optional[Dict[str, Any]] = None,
         max_calls_per_query: int = 3,
         max_chars: Optional[int] = None,
+        min_content_chars: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
         app_config = config or {}
+        orch = app_config.get("orchestration") or {}
+        fetch_cfg = orch.get("fetch_url") if isinstance(orch, dict) else None
         if max_chars is None:
-            orch = app_config.get("orchestration") or {}
-            fetch_cfg = orch.get("fetch_url") if isinstance(orch, dict) else None
             if isinstance(fetch_cfg, dict):
                 try:
                     max_chars = int(fetch_cfg.get("max_chars") or 0) or None
                 except (TypeError, ValueError):
                     max_chars = None
+        if min_content_chars is None and isinstance(fetch_cfg, dict):
+            try:
+                min_content_chars = int(
+                    fetch_cfg.get("min_content_chars") or 0
+                ) or None
+            except (TypeError, ValueError):
+                min_content_chars = None
         super().__init__(
             app_config=app_config,
             max_calls_per_query=max(1, int(max_calls_per_query)),
             max_chars=max(200, int(max_chars or 8000)),
+            min_content_chars=max(1, int(min_content_chars or 600)),
             **kwargs,
         )
+        orchestration = self.app_config.get("orchestration") or {}
+        if not isinstance(orchestration, dict):
+            orchestration = {}
+        official_domains = orchestration.get("official_domains") or {}
+        self._official_domains = (
+            dict(official_domains) if isinstance(official_domains, dict) else {}
+        )
+        self._official_resolver = build_official_domain_resolver(orchestration)
 
     def _get_router(self) -> Any:
         """Build the extraction router lazily from runtime configuration."""
@@ -679,7 +703,10 @@ class ReActFetchUrlTool(BaseTool):
         if not extractors:
             self._router = None
             return None
-        self._router = ReferenceExtractorRouter(extractors)
+        self._router = ReferenceExtractorRouter(
+            extractors,
+            min_content_chars=self.min_content_chars,
+        )
         return self._router
 
     def _run(
@@ -718,6 +745,18 @@ class ReActFetchUrlTool(BaseTool):
                 "Enable orchestration.directFetch to use this tool."
             )
 
+        url_key = canonical_reference(raw_url) or raw_url
+        if url_key in self._seen_urls:
+            return json.dumps(
+                {
+                    "status": "rejected",
+                    "reason": "duplicate_url",
+                    "url": url_key,
+                },
+                ensure_ascii=False,
+            )
+        self._seen_urls.add(url_key)
+
         self._calls_in_run += 1
         started_at = time.perf_counter()
         try:
@@ -726,7 +765,11 @@ class ReActFetchUrlTool(BaseTool):
             return f"Fetch failed: {exc}"
 
         content_obj = next(
-            (item for item in extraction.contents if (item.content or "").strip()),
+            (
+                item
+                for item in extraction.contents
+                if len((item.content or "").strip()) >= self.min_content_chars
+            ),
             None,
         )
         duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
@@ -751,20 +794,51 @@ class ReActFetchUrlTool(BaseTool):
         if truncated:
             page_text += f"\n... [truncated; {len(full_text)} chars total]"
 
+        entities = list(
+            dict.fromkeys(
+                list(getattr(self._analysis, "comparison_members", None) or [])
+                + list(getattr(self._analysis, "entities", None) or [])
+            )
+        )
+        source_tier = classify_web_source_tier(
+            resolved_url,
+            entities=entities,
+            official_domains=self._official_domains,
+            resolver=self._official_resolver,
+        )
+        provisional_entity = provisional_entity_for_url(
+            resolved_url,
+            entities=entities,
+            resolver=self._official_resolver,
+        )
+        metadata = {
+            "retrieval_kind": "fetch_url",
+            "provider": provider,
+            "content_chars": len(full_text),
+            "truncated": truncated,
+            "duration_ms": duration_ms,
+            "source_tier_entities": entities,
+        }
+        if provisional_entity and source_tier not in {
+            "official",
+            "first_party",
+            "authoritative",
+        }:
+            metadata.update(
+                {
+                    "authority_provisional": True,
+                    "authority_provisional_entity": provisional_entity,
+                }
+            )
+
         self._last_evidence_records = [
             {
                 "source_type": "web",
-                "source_tier": "fetched",
+                "source_tier": source_tier if source_tier != "unknown" else "fetched",
                 "reference": resolved_url,
                 "title": title or resolved_url,
                 "content": page_text,
-                "metadata": {
-                    "retrieval_kind": "fetch_url",
-                    "provider": provider,
-                    "content_chars": len(full_text),
-                    "truncated": truncated,
-                    "duration_ms": duration_ms,
-                },
+                "metadata": metadata,
             }
         ]
 
@@ -776,10 +850,11 @@ class ReActFetchUrlTool(BaseTool):
 
     def reset_budget(self) -> None:
         self._calls_in_run = 0
+        self._seen_urls.clear()
         self._last_evidence_records = []
 
     def set_analysis(self, analysis: Optional[QueryAnalysis]) -> None:
-        """Compatibility hook; fetch_url uses no query analysis."""
+        self._analysis = analysis
 
     def get_last_evidence_records(self) -> List[Dict[str, Any]]:
         return [dict(record) for record in self._last_evidence_records]

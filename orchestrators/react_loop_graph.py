@@ -22,6 +22,7 @@ from utils.query_orchestration import (
     CriticEvidenceState,
     TerminationAction,
     TerminationContext,
+    canonical_reference,
     check_constraint_coverage,
     evidence_increment_ratio,
     evaluate_termination,
@@ -259,6 +260,15 @@ class ReactLoopGraphRunner:
         parts: List[str] = []
         if self.initial_checklist:
             parts.append("本次回答必须满足：" + "、".join(self.initial_checklist))
+        analysis_constraints = getattr(self.analysis, "constraints", None)
+        if (
+            isinstance(analysis_constraints, dict)
+            and analysis_constraints.get("authority_required")
+        ):
+            parts.append(
+                "涉及价格、数字或当前事实时必须以权威来源为依据；若搜索命中官方页面"
+                "但摘要没有所需数值，必须调用 fetch_url 阅读该页面后再回答"
+            )
         if not parts:
             return ""
         return "\n成功标准：\n" + "\n".join(f"- {p}" for p in parts)
@@ -439,16 +449,65 @@ class ReactLoopGraphRunner:
         )
 
     def _normalize_function_markup(self, response: Any) -> Tuple[Any, Optional[str]]:
-        """Convert the supported XML-style function form into a tool call.
+        """Convert supported XML or JSON fallback forms into a tool call.
 
-        Some providers emit a simple XML-like function format even after tool
+        Some providers emit textual function markup even after native tool
         binding. It is not safe to treat that as an answer: only an enabled
-        tool with a non-empty query is normalized, everything else is reported
-        as an invalid request and replaced with an empty draft.
+        tool whose arguments validate against its schema is normalized.
         """
         text = self._message_text(response).strip()
         if "<function" not in text.casefold():
-            return response, None
+            payload = extract_json_object(text)
+            if not isinstance(payload, dict):
+                return response, None
+
+            action = str(payload.get("action") or "").strip()
+            if action == "final" and payload.get("answer"):
+                return AIMessage(content=str(payload["answer"])), None
+
+            name = ""
+            if action in self.tools_by_name:
+                name = action
+            elif action == "tool":
+                name = str(payload.get("tool") or payload.get("name") or "").strip()
+            elif payload.get("tool") or payload.get("name"):
+                name = str(payload.get("tool") or payload.get("name") or "").strip()
+            if not name:
+                return response, None
+            if name not in self.tools_by_name:
+                return AIMessage(content=""), f"unsupported_tool: {name}"
+
+            raw_args = payload.get("args", payload.get("arguments"))
+            if raw_args is None:
+                raw_args = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"action", "tool", "name", "args", "arguments"}
+                }
+            tool = self.tools_by_name[name]
+            if not isinstance(raw_args, dict):
+                field_names = list((getattr(tool, "args", None) or {}).keys())
+                if len(field_names) != 1:
+                    return AIMessage(content=""), f"invalid_tool_arguments: {name}"
+                raw_args = {field_names[0]: raw_args}
+            try:
+                schema = getattr(tool, "args_schema", None)
+                if schema is not None and hasattr(schema, "model_validate"):
+                    validated = schema.model_validate(raw_args)
+                    raw_args = validated.model_dump()
+                elif schema is not None and hasattr(schema, "parse_obj"):
+                    validated = schema.parse_obj(raw_args)
+                    raw_args = validated.dict()
+            except Exception:  # noqa: BLE001 - invalid model markup is loop data
+                return AIMessage(content=""), f"invalid_tool_arguments: {name}"
+
+            call = {
+                "name": name,
+                "args": raw_args,
+                "id": f"call_{uuid4().hex[:12]}",
+                "type": "tool_call",
+            }
+            return AIMessage(content="", tool_calls=[call]), None
 
         function_match = _FUNCTION_TAG.search(text)
         if function_match is None:
@@ -567,6 +626,7 @@ class ReactLoopGraphRunner:
                 "constraints_met": List[str],
                 "constraints_missing": List[str],
                 "last_fingerprint": Optional[str],
+                "seen_fingerprints": List[str],
                 "fingerprint_streak": int,
                 "no_progress_streak": int,
                 "tool_error_streak": int,
@@ -695,10 +755,17 @@ class ReactLoopGraphRunner:
         error_streak = state["tool_error_streak"]
         had_success = state["had_successful_observation"]
         fingerprints: List[str] = []
+        seen_fingerprints = set(state.get("seen_fingerprints") or [])
+        duplicate_fingerprint_count = int(state.get("fingerprint_streak") or 0)
 
         for position, call in enumerate(tool_calls, start=1):
             record_start = len(new_records)
-            fingerprints.append(self._fingerprint(call))
+            fingerprint = self._fingerprint(call)
+            fingerprints.append(fingerprint)
+            if fingerprint in seen_fingerprints:
+                duplicate_fingerprint_count += 1
+            elif fingerprint:
+                seen_fingerprints.add(fingerprint)
             tool_name = str(call.get("name") or "")
             tool_step_id = self._tool_step_id(iteration, position)
             query = self._safe_tool_query(call)
@@ -839,10 +906,6 @@ class ReactLoopGraphRunner:
             tool_messages.append(self._tool_result_message(call, content))
 
         combined_fingerprint = " | ".join(sorted(fingerprints))
-        if combined_fingerprint and combined_fingerprint == state["last_fingerprint"]:
-            fingerprint_streak = state["fingerprint_streak"] + 1
-        else:
-            fingerprint_streak = 1
 
         pool_text = "\n".join(state["evidence_pool"])
         ratios = [
@@ -858,7 +921,8 @@ class ReactLoopGraphRunner:
             "tool_error_streak": error_streak,
             "had_successful_observation": had_success,
             "last_fingerprint": combined_fingerprint or state["last_fingerprint"],
-            "fingerprint_streak": fingerprint_streak,
+            "seen_fingerprints": sorted(seen_fingerprints),
+            "fingerprint_streak": duplicate_fingerprint_count,
             "last_round_new_evidence": new_evidence,
             "last_round_observations": new_observations,
         }
@@ -943,13 +1007,11 @@ class ReactLoopGraphRunner:
         met = [value for value in met if value in self.initial_checklist]
         missing = [value for value in missing if value in self.initial_checklist]
 
-        no_progress_streak = int(state["no_progress_streak"])
-        if not final_proposed:
-            no_progress_streak = (
-                0
-                if state["last_round_new_evidence"]
-                else no_progress_streak + 1
-            )
+        no_progress_streak = (
+            0
+            if state["last_round_new_evidence"]
+            else int(state["no_progress_streak"]) + 1
+        )
 
         unsupported: List[str] = []
         if final_proposed and draft:
@@ -977,6 +1039,7 @@ class ReactLoopGraphRunner:
         judge_error = state.get("judge_error")
         should_judge = (
             self.judge_llm is not None
+            and bool(draft.strip())
             and not invalid_tool_request
             and not invalid_final_response
             and preliminary.action != TerminationAction.CLARIFY
@@ -1007,7 +1070,7 @@ class ReactLoopGraphRunner:
         elif decision.action == TerminationAction.CONTINUE and final_proposed:
             reason = "final_answer_rejected"
         elif decision.action == TerminationAction.RETURN_INSUFFICIENT:
-            reason = "evidence_insufficient"
+            reason = decision.reason or "evidence_insufficient"
 
         verdict = LoopVerdict(
             iteration=iteration,
@@ -1049,7 +1112,12 @@ class ReactLoopGraphRunner:
                 TerminationAction.RETURN_INSUFFICIENT: "evidence_insufficient",
                 TerminationAction.CLARIFY: "clarification_required",
             }.get(decision.action, decision.action.value)
-            final_answer = self._best_effort_answer(draft, termination_reason)
+            answer_reason = (
+                "authority_unverified"
+                if decision.reason == "authority_unverified"
+                else termination_reason
+            )
+            final_answer = self._best_effort_answer(draft, answer_reason)
         elif invalid_tool_request:
             update["messages"] = [
                 HumanMessage(
@@ -1070,12 +1138,14 @@ class ReactLoopGraphRunner:
             ]
         elif final_proposed and decision.should_continue:
             rejected = list(decision.missing_constraints) or ["semantic_sufficiency"]
+            fetch_instruction = self._official_fetch_instruction(state)
             update["messages"] = [
                 HumanMessage(
                     content=(
                         "你的回答尚未满足以下约束："
                         + "、".join(rejected)
-                        + "。请继续使用工具收集信息，然后重新作答。"
+                        + "。"
+                        + fetch_instruction
                     )
                 )
             ]
@@ -1085,6 +1155,41 @@ class ReactLoopGraphRunner:
         update["verdicts"] = list(state["verdicts"]) + [verdict.to_dict()]
         self._trace_verdict(iteration, verdict)
         return update
+
+    def _official_fetch_instruction(self, state: Dict[str, Any]) -> str:
+        """Give a concrete fetch retry when an official search hit is still shallow."""
+        analysis_constraints = getattr(self.analysis, "constraints", None)
+        if (
+            "fetch_url" not in self.tools_by_name
+            or not isinstance(analysis_constraints, dict)
+            or not analysis_constraints.get("authority_required")
+        ):
+            return "请继续使用工具收集信息，然后重新作答。"
+
+        records = [
+            record
+            for record in list(state.get("evidence_records") or [])
+            if isinstance(record, dict)
+        ]
+        fetched = {
+            str(record.get("reference") or "")
+            for record in records
+            if str(record.get("tool_name") or "") == "fetch_url"
+        }
+        for record in records:
+            reference = str(record.get("reference") or "").strip()
+            tier = str(record.get("source_tier") or "").casefold()
+            if (
+                reference.startswith(("http://", "https://"))
+                and reference not in fetched
+                and tier in {"official", "first_party", "authoritative"}
+            ):
+                return (
+                    "请现在直接调用 fetch_url 阅读已找到的权威页面 "
+                    + reference
+                    + "，不要描述检索计划；获取页面内容后再重新作答。"
+                )
+        return "请继续使用工具收集信息，然后重新作答；不要只描述检索计划。"
 
     def _termination_context(
         self,
@@ -1131,6 +1236,11 @@ class ReactLoopGraphRunner:
             for record in records
             if str(record.get("source_tier") or "").casefold() in authoritative_tiers
         )
+        provisional_authoritative_count = sum(
+            1
+            for record in records
+            if bool((record.get("metadata") or {}).get("authority_provisional"))
+        )
         covered_constraints = (
             ("temporal_coverage",)
             if re.search(r"(?<!\d)20\d{2}(?!\d)", evidence_text)
@@ -1155,6 +1265,7 @@ class ReactLoopGraphRunner:
                 retained_count=len(records),
                 available_count=len(records),
                 authoritative_count=authoritative_count,
+                provisional_authoritative_count=provisional_authoritative_count,
                 covered_entities=tuple(covered_entities),
                 covered_constraints=covered_constraints,
             ),
@@ -1204,7 +1315,8 @@ class ReactLoopGraphRunner:
         state: Dict[str, Any],
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Run the loop judge LLM; degrade to rules-only on any failure."""
-        observations_preview = "\n".join(state.get("last_round_observations") or [])[:1500]
+        evidence_pool = list(state.get("evidence_pool") or [])
+        observations_preview = "\n".join(evidence_pool)[-3000:]
         system_prompt = (
             "You are a strict judge for an iterative search agent loop. "
             "Return JSON only with keys: "
@@ -1245,17 +1357,22 @@ class ReactLoopGraphRunner:
     @staticmethod
     def _fingerprint(tool_call: Dict[str, Any]) -> str:
         args = tool_call.get("args") or {}
+        tool_name = str(tool_call.get("name") or "")
+        if tool_name == "fetch_url" and isinstance(args, dict):
+            url = canonical_reference(args.get("url"))
+            if url:
+                return f"fetch_url({url.casefold()})"
         normalized = json.dumps(args, ensure_ascii=False, sort_keys=True)
         normalized = " ".join(normalized.lower().split())
-        return f"{tool_call.get('name', '')}({normalized})"
+        return f"{tool_name}({normalized})"
 
     @staticmethod
     def _last_ai_text(messages: List[Any]) -> str:
         for message in reversed(messages):
             if isinstance(message, AIMessage):
                 content = message.content
-                if isinstance(content, str) and content.strip():
-                    return content
+                if isinstance(content, str):
+                    return content if content.strip() else ""
                 if isinstance(content, list):
                     text_parts = [
                         part.get("text", "")
@@ -1263,25 +1380,47 @@ class ReactLoopGraphRunner:
                         if isinstance(part, dict) and part.get("type") == "text"
                     ]
                     joined = "".join(text_parts).strip()
-                    if joined:
-                        return joined
+                    return joined
+                return ""
         return ""
 
     @staticmethod
     def _best_effort_answer(draft: str, reason: str) -> str:
+        payload = extract_json_object(draft)
+        if (
+            isinstance(payload, dict)
+            and any(key in payload for key in ("action", "tool", "name"))
+        ) or "<function" in draft.casefold():
+            draft = ""
         if draft:
             is_chinese = any("\u4e00" <= char <= "\u9fff" for char in draft)
-            qualification = (
-                "现有证据或执行预算不足，以下仅为当前候选信息，可能不完整或不准确：\n"
-                if is_chinese
-                else "Available evidence or execution budget was insufficient; the following is only a provisional result and may be incomplete or inaccurate:\n"
-            )
+            if reason == "authority_unverified":
+                qualification = (
+                    "已获取与目标实体相关的页面，但其官方归属未通过权威策略验证；以下内容仅供参考：\n"
+                    if is_chinese
+                    else (
+                        "A page related to the target entity was retrieved, but its "
+                        "official ownership could not be verified under the authority "
+                        "policy; the following is provisional:\n"
+                    )
+                )
+            else:
+                qualification = (
+                    "现有证据或执行预算不足，以下仅为当前候选信息，可能不完整或不准确：\n"
+                    if is_chinese
+                    else (
+                        "Available evidence or execution budget was insufficient; the "
+                        "following is only a provisional result and may be incomplete "
+                        "or inaccurate:\n"
+                    )
+                )
             return qualification + draft
         reasons = {
             "exhausted": "迭代次数用尽，未能获得完整答案。",
             "stagnated": "检索陷入停滞，未能获得新的有效信息。",
             "unrecoverable": "工具连续失败，无法完成检索。",
             "evidence_insufficient": "现有证据不足，无法可靠完成回答。",
+            "authority_unverified": "已获取相关页面，但无法验证其官方归属，不能可靠完成回答。",
             "clarification_required": "需要补充关键实体或约束后才能继续。",
         }
         return reasons.get(reason, "未能获得完整答案。")
@@ -1300,6 +1439,7 @@ class ReactLoopGraphRunner:
             "constraints_met": [],
             "constraints_missing": list(self.initial_checklist),
             "last_fingerprint": None,
+            "seen_fingerprints": [],
             "fingerprint_streak": 0,
             "no_progress_streak": 0,
             "tool_error_streak": 0,
@@ -1334,6 +1474,7 @@ class ReactLoopGraphRunner:
             "constraints_met": [],
             "constraints_missing": list(self.initial_checklist),
             "last_fingerprint": None,
+            "seen_fingerprints": [],
             "fingerprint_streak": 0,
             "no_progress_streak": 0,
             "tool_error_streak": 0,

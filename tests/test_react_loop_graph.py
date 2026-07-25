@@ -17,7 +17,7 @@ from orchestrators.react_loop_graph import (
     langgraph_available,
     normalize_termination_config,
 )
-from utils.query_orchestration import analyze_query
+from utils.query_orchestration import QueryAnalysis, analyze_query
 from utils.timing_utils import TimingRecorder
 from utils.workflow_trace import WorkflowTracer
 
@@ -109,6 +109,89 @@ def make_runner(
 
 
 class TestTerminationSemantics:
+    def test_authority_rejection_points_directly_to_unfetched_official_page(self):
+        analysis = QueryAnalysis(
+            query="Acme price 1",
+            constraints={"authority_required": True},
+            requires_evidence=True,
+        )
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(replies=["unused"]),
+            tools=[FakeTools.make("fetch_url", ["page"])],
+            query=analysis.query,
+            analysis=analysis,
+        )
+        instruction = runner._official_fetch_instruction(
+            {
+                "evidence_records": [
+                    {
+                        "tool_name": "web_search",
+                        "source_tier": "official",
+                        "reference": "https://docs.acme.example/pricing",
+                    }
+                ]
+            }
+        )
+
+        assert "直接调用 fetch_url" in instruction
+        assert "https://docs.acme.example/pricing" in instruction
+        assert "必须调用 fetch_url" in runner.system_prompt
+
+    def test_provisional_authority_stops_with_qualified_answer(self):
+        class ProvisionalFetchTool:
+            name = "fetch_url"
+            description = "test fetch"
+
+            @staticmethod
+            def invoke(args):
+                return "目标产品页面包含价格说明，但域名归属仍待验证。"
+
+            @staticmethod
+            def get_last_evidence_records():
+                return [
+                    {
+                        "source_type": "web",
+                        "source_tier": "fetched",
+                        "reference": "https://docs.newbrand.example/pricing",
+                        "content": "目标产品页面包含价格说明，但域名归属仍待验证。",
+                        "metadata": {"authority_provisional": True},
+                    }
+                ]
+
+        analysis = QueryAnalysis(
+            query="Acme price",
+            entities=["Acme"],
+            claim_classes=["numeric", "pricing"],
+            constraints={"authority_required": True},
+            requires_evidence=True,
+        )
+        draft = "当前页面显示该产品按使用量计费，但官方归属尚未完全核验。"
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(
+                replies=[
+                    _tool_call(
+                        "fetch_url",
+                        {"url": "https://docs.newbrand.example/pricing"},
+                    ),
+                    draft,
+                    draft,
+                ]
+            ),
+            tools=[ProvisionalFetchTool()],
+            max_iterations=8,
+            termination_config={"no_progress_threshold": 2},
+            query=analysis.query,
+            analysis=analysis,
+        )
+
+        result = runner.run(analysis.query)
+
+        assert result["loop_status"] == "evidence_insufficient"
+        assert result["iterations"] == 3
+        assert result["verdicts"][-1]["reason"] == "authority_unverified"
+        assert "官方归属未通过权威策略验证" in result["answer"]
+        assert result["answer"].endswith(draft)
+
     def test_critical_ambiguity_clarifies_without_spending_judge_call(self):
         judge = ScriptedChatModel(
             replies=['{"passes": true, "missing_constraints": [], "reason": "ok"}']
@@ -159,6 +242,37 @@ class TestTerminationSemantics:
         )
         result = runner.run("苹果和微软的区别")
         assert result["loop_status"] == "stagnated"
+
+    def test_stagnated_on_interleaved_repeated_fingerprint(self):
+        tools = [
+            FakeTools.make(
+                "web_search",
+                [f"全新证据 {index} " * 20 for index in range(6)],
+            )
+        ]
+        replies = [
+            _tool_call("web_search", {"query": "q1"}, "c1"),
+            _tool_call("web_search", {"query": "repeated"}, "c2"),
+            _tool_call("web_search", {"query": "q2"}, "c3"),
+            _tool_call("web_search", {"query": "repeated"}, "c4"),
+            _tool_call("web_search", {"query": "q3"}, "c5"),
+            _tool_call("web_search", {"query": "repeated"}, "c6"),
+        ]
+        runner = make_runner(
+            replies,
+            tools,
+            max_iterations=8,
+            termination_config={
+                "repeat_threshold": 2,
+                "no_progress_threshold": 99,
+            },
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "stagnated"
+        assert result["iterations"] == 6
+        assert result["verdicts"][-1]["rule_hits"][-1]["rule"] == "no_progress"
 
     def test_stagnated_on_no_new_evidence(self):
         tools = [FakeTools.make("web_search", ["重复的证据内容"])]
@@ -236,30 +350,56 @@ class TestLoopVerdict:
 
 
 class TestJudgeDegradation:
+    def test_empty_tool_rounds_skip_semantic_judge(self):
+        tools = [FakeTools.make("web_search", ["证据 A", "证据 B"])]
+        judge = ScriptedChatModel(
+            replies=['{"passes": false, "missing_constraints": ["answer"]}']
+        )
+        runner = make_runner(
+            [
+                _tool_call("web_search", {"query": "q1"}, "c1"),
+                _tool_call("web_search", {"query": "q2"}, "c2"),
+            ],
+            tools,
+            max_iterations=2,
+            termination_config={"judge_interval": 1},
+            judge_llm=judge,
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "exhausted"
+        assert judge.calls == 0
+        assert all(not verdict["judge_used"] for verdict in result["verdicts"])
+
     def test_judge_exception_does_not_break_loop(self):
-        tools = [FakeTools.make("web_search", ["全新证据A", "全新证据B", "全新证据C"])]
+        evidence = "2025年苹果和微软分别公布财报，苹果相比微软更强，而微软同时领先。" * 6
+        answer = "2025年苹果相比微软更强，而微软同时领先，两者分别发展。" * 8
+        tools = [FakeTools.make("web_search", [evidence])]
         replies = [
             _tool_call("web_search", {"query": "q1"}, "c1"),
-            _tool_call("web_search", {"query": "q2"}, "c2"),
-            _tool_call("web_search", {"query": "q3"}, "c3"),
+            answer,
         ]
         judge = ScriptedChatModel(replies=[RuntimeError("judge down")])
         runner = make_runner(
             replies,
             tools,
-            max_iterations=3,
+            max_iterations=2,
             termination_config={"judge_interval": 1},
             judge_llm=judge,
         )
         result = runner.run("苹果和微软的区别")
-        assert result["loop_status"] in ("exhausted", "succeeded", "stagnated")
-        assert result["judge_error"]
+        assert result["loop_status"] == "succeeded"
+        assert result["judge_error"] == "judge down"
+        assert judge.calls == 1
 
     def test_judge_unparseable_degrades(self):
-        tools = [FakeTools.make("web_search", ["全新证据A", "全新证据B"])]
+        evidence = "2025年苹果和微软分别公布财报，苹果相比微软更强，而微软同时领先。" * 6
+        answer = "2025年苹果相比微软更强，而微软同时领先，两者分别发展。" * 8
+        tools = [FakeTools.make("web_search", [evidence])]
         replies = [
             _tool_call("web_search", {"query": "q1"}, "c1"),
-            _tool_call("web_search", {"query": "q2"}, "c2"),
+            answer,
         ]
         judge = ScriptedChatModel(replies=["这不是JSON"])
         runner = make_runner(
@@ -270,8 +410,9 @@ class TestJudgeDegradation:
             judge_llm=judge,
         )
         result = runner.run("苹果和微软的区别")
-        assert result["loop_status"] == "exhausted"
+        assert result["loop_status"] == "succeeded"
         assert result["judge_error"] == "judge_unparseable_response"
+        assert judge.calls == 1
 
     def test_judge_pass_cannot_override_deterministic_missing_constraint(self):
         tools = [FakeTools.make("web_search", ["全新证据A"])]
@@ -290,7 +431,7 @@ class TestJudgeDegradation:
             judge_llm=judge,
         )
         result = runner.run("苹果和微软的区别")
-        assert result["loop_status"] == "exhausted"
+        assert result["loop_status"] == "stagnated"
         assert "comparison" in result["verdicts"][-1]["constraints_missing"]
         assert result["verdicts"][-1]["deterministic_pass"] is False
 
@@ -333,7 +474,71 @@ class TestShimMode:
             query="苹果和微软的区别",
         )
         result = runner.run("苹果和微软的区别")
-        assert result["loop_status"] in ("exhausted", "succeeded")
+        assert result["loop_status"] == "stagnated"
+
+    def test_native_fallback_accepts_direct_json_tool_action(self):
+        tools = [
+            FakeTools.make(
+                "web_search",
+                ["苹果和微软分别提供了可核验信息，苹果相比微软更强，而微软同时领先。" * 6],
+            )
+        ]
+        answer = "苹果和微软分别有公开信息，苹果相比微软更强，而微软同时领先。" * 8
+        runner = make_runner(
+            [
+                '{"action": "web_search", "query": "Apple Microsoft pricing"}',
+                answer,
+            ],
+            tools,
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "succeeded"
+        assert result["answer"] == answer
+
+    def test_native_fallback_accepts_smart_quote_json_tool_action(self):
+        tools = [
+            FakeTools.make(
+                "web_search",
+                ["苹果和微软分别提供了可核验信息，苹果相比微软更强，而微软同时领先。" * 6],
+            )
+        ]
+        answer = "苹果和微软分别有公开信息，苹果相比微软更强，而微软同时领先。" * 8
+        runner = make_runner(
+            [
+                "{“action”: “web_search”, “query”: “Apple Microsoft pricing”}",
+                answer,
+            ],
+            tools,
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "succeeded"
+        assert result["answer"] == answer
+
+    def test_invalid_json_tool_arguments_stagnate_without_leaking_markup(self):
+        raw = '{"action": "web_search", "query": {}}'
+        runner = make_runner(
+            [raw],
+            [FakeTools.make("web_search", ["unused"])],
+            max_iterations=8,
+        )
+
+        result = runner.run("苹果和微软的区别")
+
+        assert result["loop_status"] == "stagnated"
+        assert result["iterations"] == 2
+        assert raw not in result["answer"]
+
+    def test_structured_action_draft_is_never_returned_by_best_effort(self):
+        raw = '{"action": "web_search", "query": "pricing"}'
+
+        answer = ReactLoopGraphRunner._best_effort_answer(raw, "exhausted")
+
+        assert raw not in answer
+        assert answer == "迭代次数用尽，未能获得完整答案。"
 
     def test_xml_function_markup_is_normalized_into_tool_call(self):
         tools = [

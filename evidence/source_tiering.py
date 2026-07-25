@@ -61,6 +61,15 @@ def normalize_entity_stem(value: Any) -> str:
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", text).casefold()
+    # Strip product-version tails such as ``K2.7 Code HighSpeed`` before the
+    # generic numeric suffix rule. This keeps a branded model label bound to
+    # the explicit brand pin instead of creating a second candidate cache key.
+    text = re.sub(
+        r"(?:[\s_.-]*[vk]?\d+(?:[\s_.-]*\d+)*)"
+        r"(?:[\s_.-]*(?:code|chat|instruct|highspeed))+$",
+        "",
+        text,
+    )
     # Strip trailing version suffixes (v3, 5.2, k3, ...) but keep everything
     # else, including CJK and accented letters.
     text = re.sub(r"(?:[-_.]*[vk]?\d+(?:[-_.]*\d+)*)+$", "", text)
@@ -109,10 +118,54 @@ def _host_pattern(value: Any) -> str:
 
 
 def _host_matches(pattern: Any, url: Any, *, allow_subdomains: bool = True) -> bool:
-    """Use the resolver's matcher while avoiding an import cycle."""
-    from evidence.official_domain_resolver import host_matches
+    """Match ownership patterns, including safe sibling service subdomains.
 
-    return host_matches(pattern, url, allow_subdomains=allow_subdomains)
+    The resolver keeps host-level boundaries for multi-tenant and path-scoped
+    ownership. Source tiering additionally treats conventional service hosts
+    such as ``www.example.com`` and ``platform.example.com`` as the same
+    first-party site when they share a registrable domain.
+    """
+    from evidence.official_domain_resolver import (
+        HostPattern,
+        _WELL_KNOWN_SUBDOMAIN_PREFIXES,
+        host_matches,
+    )
+
+    if host_matches(pattern, url, allow_subdomains=allow_subdomains):
+        return True
+    if not allow_subdomains:
+        return False
+
+    pattern_value = HostPattern.parse(pattern)
+    target = HostPattern.parse(url)
+    if (
+        pattern_value is None
+        or target is None
+        or pattern_value.path_prefix
+    ):
+        return False
+
+    pattern_domain = registrable_domain(pattern_value.host)
+    target_domain = registrable_domain(target.host)
+    if not pattern_domain or pattern_domain != target_domain:
+        return False
+
+    known_prefixes = {
+        value.rstrip(".") for value in _WELL_KNOWN_SUBDOMAIN_PREFIXES
+    }
+
+    def is_owned_service_host(host: str, domain: str) -> bool:
+        if host == domain:
+            return True
+        suffix = "." + domain
+        if not host.endswith(suffix):
+            return False
+        prefix = host[: -len(suffix)]
+        return "." not in prefix and prefix in known_prefixes
+
+    return is_owned_service_host(
+        pattern_value.host, pattern_domain
+    ) and is_owned_service_host(target.host, target_domain)
 
 
 def _url_host(value: Any) -> str:
@@ -216,6 +269,42 @@ def official_entity_for_url(
     return None
 
 
+def provisional_entity_for_url(
+    url: Any,
+    *,
+    entities: Optional[Iterable[Any]] = None,
+    resolver: Any = None,
+) -> Optional[str]:
+    """Return an entity whose resolver candidate matches ``url``.
+
+    Candidate ownership is deliberately not promoted to ``official`` or
+    ``first_party``. The marker only enables a bounded, explicitly qualified
+    fallback when the loop cannot verify authority after repeated attempts.
+    """
+    if resolver is None or not _url_host(url):
+        return None
+    for entity in entities or []:
+        label = str(entity or "").strip()
+        if not label:
+            continue
+        try:
+            resolution = resolver.resolve(label)
+        except Exception:  # noqa: BLE001 - resolver failures must not poison tiering
+            continue
+        if str(getattr(resolution, "confidence", "")).casefold() != "candidate":
+            continue
+        resolved_domains = getattr(resolution, "resolved_domains", None)
+        if resolved_domains is None:
+            resolved_domains = [getattr(resolution, "domain", "")]
+        allow_subdomains = bool(getattr(resolution, "subdomain_allowed", True))
+        if any(
+            _host_matches(pattern, url, allow_subdomains=allow_subdomains)
+            for pattern in resolved_domains
+        ):
+            return label
+    return None
+
+
 def classify_web_source_tier(
     url: Any,
     *,
@@ -247,9 +336,13 @@ def classify_web_source_tier(
     ):
         return "official"
 
-    label = host.split(".")[0] if "." not in host else host.split(".")[-2]
+    label = _domain_label(registrable_domain(host))
     normalized_label = re.sub(r"[^a-z0-9]", "", label.casefold())
-    if any(stem in normalized_label for stem in stems):
+    if normalized_label and any(
+        min(len(stem), len(normalized_label)) >= 4
+        and (stem == normalized_label or normalized_label in stem)
+        for stem in stems
+    ):
         return "first_party"
     return "unknown"
 

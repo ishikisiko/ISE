@@ -80,19 +80,28 @@ def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     if not content:
         return None
 
-    try:
-        parsed = json.loads(content)
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        start = content.find("{")
-        end = content.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
+    candidates = [content]
+    smart_quote_normalized = content.translate(
+        str.maketrans({"\u201c": '"', "\u201d": '"'})
+    )
+    if smart_quote_normalized != content:
+        candidates.append(smart_quote_normalized)
+
+    for candidate in candidates:
         try:
-            parsed = json.loads(content[start : end + 1])
+            parsed = json.loads(candidate)
             return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
-            return None
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                continue
+            try:
+                parsed = json.loads(candidate[start : end + 1])
+                return parsed if isinstance(parsed, dict) else None
+            except json.JSONDecodeError:
+                continue
+    return None
 
 
 def coerce_bool(value: Any, default: bool = False) -> bool:

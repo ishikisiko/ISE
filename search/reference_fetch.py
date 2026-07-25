@@ -849,8 +849,14 @@ class DirectFetchClient(ReferenceExtractor):
 class ReferenceExtractorRouter:
     """Try configured extractors in order for each selected URL."""
 
-    def __init__(self, extractors: Sequence[ReferenceExtractor]) -> None:
+    def __init__(
+        self,
+        extractors: Sequence[ReferenceExtractor],
+        *,
+        min_content_chars: int = 1,
+    ) -> None:
         self.extractors = list(extractors)
+        self.min_content_chars = max(1, int(min_content_chars))
 
     def extract(
         self,
@@ -878,6 +884,30 @@ class ReferenceExtractorRouter:
                             )
                         ],
                     )
+                raw_content = next(
+                    (
+                        item
+                        for item in provider_result.contents
+                        if item.content.strip()
+                    ),
+                    None,
+                )
+                content = (
+                    raw_content
+                    if raw_content is not None
+                    and len(raw_content.content.strip()) >= self.min_content_chars
+                    else None
+                )
+                insufficient_content = raw_content is not None and content is None
+                if insufficient_content:
+                    provider_result.contents = []
+                    provider_result.failures.append(
+                        ReferenceFailure(
+                            provider=extractor.source_id,
+                            requested_url=_safe_reference_url(url),
+                            error_type="insufficient_content",
+                        )
+                    )
                 if tracer is not None:
                     from utils.retrieval_trace import emit_extraction_call_step
 
@@ -898,22 +928,21 @@ class ReferenceExtractorRouter:
                         step_id=f"{trace_step_prefix}_{trace_position}",
                         duration_ms=duration_ms,
                     )
-                content = next(
-                    (
-                        item
-                        for item in provider_result.contents
-                        if item.content.strip()
+                attempt = {
+                    "provider": extractor.source_id,
+                    "requested_url": _safe_reference_url(url),
+                    "status": "success" if content else "failed",
+                    "content_chars": (
+                        len(content.content)
+                        if content
+                        else len(raw_content.content)
+                        if raw_content
+                        else 0
                     ),
-                    None,
-                )
-                result.attempts.append(
-                    {
-                        "provider": extractor.source_id,
-                        "requested_url": _safe_reference_url(url),
-                        "status": "success" if content else "failed",
-                        "content_chars": len(content.content) if content else 0,
-                    }
-                )
+                }
+                if insufficient_content:
+                    attempt["reason"] = "insufficient_content"
+                result.attempts.append(attempt)
                 if content:
                     result.contents.append(content)
                     break

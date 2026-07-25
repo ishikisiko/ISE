@@ -89,6 +89,11 @@
             "max_urls": 4,
             "max_chars_per_page": 4000
         },
+        "fetch_url": {
+            "_comment": "Agent fetch_url acceptance guard. Short JS shells and other thin extracts are rejected so the extractor router can try the next provider.",
+            "min_content_chars": 600,
+            "max_chars": 8000
+        },
         "directFetch": {
             "_comment": "Preferred zero-API-key extractor for selected public pages: plain HTTP GET plus bs4 main-text extraction. Extract APIs are used only after this fetch fails or returns no usable content. No JS rendering.",
             "enabled": true,

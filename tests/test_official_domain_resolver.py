@@ -157,6 +157,27 @@ def test_single_provider_alone_is_candidate() -> None:
     assert res.confidence == "candidate"
 
 
+def test_cached_conventional_service_host_uses_registrable_domain() -> None:
+    provider = _Prov(
+        "brave",
+        [SearchHit(title="Kimi", url="https://www.kimi.com/", snippet="Kimi")],
+    )
+    resolver = OfficialDomainResolver(
+        _cfg(max_discovery_searches=1),
+        search_clients=[provider],
+        fetch_client=_NoFetch(),
+    )
+
+    result = resolver.resolve("kimik2.7code")
+
+    assert result.confidence == "candidate"
+    assert result.domain == "kimi.com"
+    assert result.resolved_domains == ["kimi.com"]
+    cached = resolver.resolve("kimik2.7code")
+    assert cached.domain == "kimi.com"
+    assert provider.calls == 1
+
+
 def test_single_provider_plus_self_proof_is_candidate() -> None:
     """A single search provider plus a self-proof is only ONE independent
     source. Self-proof verifies the candidate the provider surfaced, so it is
@@ -235,6 +256,46 @@ def test_pins_override_with_zero_network() -> None:
     assert all(s.tier == "pin" for s in res.signals)
     # No search/fetch client was ever consulted.
     assert r._search_clients == []
+
+
+def test_product_stem_pin_upgrades_and_replaces_stale_candidate_cache() -> None:
+    cache_path = os.path.join(tempfile.mkdtemp(), "cache.sqlite")
+    cfg = resolver_config_from_mapping(
+        {
+            "enabled": True,
+            "cache_path": cache_path,
+            "structured_sources": [],
+            "graph_probes_enabled": False,
+            "pin_shadow_audit": False,
+            "pins": {"kimi": ["www.kimi.com"]},
+        }
+    )
+    resolver = OfficialDomainResolver(
+        cfg,
+        search_clients=[],
+        fetch_client=_NoFetch(),
+    )
+    resolver._cache.put(
+        Resolution(
+            stem="kimik27code",
+            domain="www.kimi.com",
+            domains=["www.kimi.com"],
+            confidence="candidate",
+        )
+    )
+
+    result = resolver.resolve("Kimi K2.7 Code HighSpeed")
+
+    assert result.is_official
+    assert result.stem == "kimi"
+    assert result.domain == "kimi.com"
+    rows = resolver._cache._connect().execute(
+        "SELECT stem, domain, confidence FROM entity_stem ORDER BY stem"
+    ).fetchall()
+    assert rows == [("kimi", "kimi.com", "official")]
+
+    resolver.config.pins.clear()
+    assert not resolver.resolve("kimi").is_official
 
 
 def test_disabled_resolver_returns_none_for_unpinned() -> None:

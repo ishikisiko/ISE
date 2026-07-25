@@ -186,6 +186,35 @@ def host_matches(
     )
 
 
+def _canonical_ownership_pattern(value: Any) -> str:
+    """Collapse conventional service hosts to their registrable owner domain.
+
+    Path-scoped and non-conventional hosts stay exact. This preserves tenant
+    boundaries such as ``github.com/org`` and product siblings such as
+    ``ai.google.dev`` while preventing cached ``www.``/``docs.``/``api.``
+    candidates from becoming stranded from another service subdomain.
+    """
+    pattern = HostPattern.parse(value)
+    if pattern is None or pattern.path_prefix:
+        return pattern.serialize() if pattern is not None else ""
+
+    from evidence.source_tiering import registrable_domain
+
+    domain = registrable_domain(pattern.host)
+    if not domain or pattern.host == domain:
+        return pattern.host
+    suffix = "." + domain
+    if not pattern.host.endswith(suffix):
+        return pattern.host
+    prefix = pattern.host[: -len(suffix)]
+    known_prefixes = {
+        item.rstrip(".") for item in _WELL_KNOWN_SUBDOMAIN_PREFIXES
+    }
+    if "." not in prefix and prefix in known_prefixes:
+        return domain
+    return pattern.host
+
+
 def _host_from_value(value: Any, *, include_path: bool = False) -> str:
     pattern = HostPattern.from_url(value, include_path=include_path)
     return pattern.serialize() if pattern is not None else ""
@@ -538,6 +567,13 @@ class _Cache:
         except (ValueError, TypeError):
             domains = []
         graph = RelationGraph.from_json(graph_json) if graph_json else None
+        domain = _canonical_ownership_pattern(domain)
+        domains = [
+            canonical
+            for item in domains
+            if (canonical := _canonical_ownership_pattern(item))
+        ]
+        domains = list(dict.fromkeys(domains))
         return Resolution(
             stem=stem,
             domain=domain,
@@ -550,6 +586,14 @@ class _Cache:
         )
 
     def put(self, resolution: Resolution) -> None:
+        resolution.domain = _canonical_ownership_pattern(resolution.domain)
+        resolution.domains = list(
+            dict.fromkeys(
+                canonical
+                for item in resolution.resolved_domains
+                if (canonical := _canonical_ownership_pattern(item))
+            )
+        )
         conn = self._connect()
         if conn is None:
             return
@@ -571,6 +615,43 @@ class _Cache:
             conn.commit()
         except sqlite3.Error:
             _LOGGER.debug("official-domain cache write failed for %s", resolution.stem, exc_info=True)
+
+    def delete(self, stem: str) -> None:
+        conn = self._connect()
+        if conn is None:
+            return
+        try:
+            conn.execute("DELETE FROM entity_stem WHERE stem = ?", (stem,))
+            conn.commit()
+        except sqlite3.Error:
+            _LOGGER.debug("official-domain cache delete failed for %s", stem, exc_info=True)
+
+    def delete_normalized_aliases(self, canonical_stem: str) -> int:
+        """Remove stale cache keys that now normalize to ``canonical_stem``."""
+        conn = self._connect()
+        if conn is None:
+            return 0
+        try:
+            stale = [
+                str(row[0])
+                for row in conn.execute("SELECT stem FROM entity_stem").fetchall()
+                if str(row[0]) != canonical_stem
+                and normalize_entity_stem(row[0]) == canonical_stem
+            ]
+            if stale:
+                conn.executemany(
+                    "DELETE FROM entity_stem WHERE stem = ?",
+                    [(stem,) for stem in stale],
+                )
+                conn.commit()
+            return len(stale)
+        except sqlite3.Error:
+            _LOGGER.debug(
+                "official-domain alias cleanup failed for %s",
+                canonical_stem,
+                exc_info=True,
+            )
+            return 0
 
     def record_candidate_observations(self, stem: str, hosts: Iterable[str]) -> None:
         """Best-effort upsert of one B-tier observation per host/stem pair."""
@@ -776,7 +857,7 @@ class OfficialDomainResolver:
                         tier=TIER_PIN,
                     )
                 )
-            return Resolution(
+            resolution = Resolution(
                 stem=stem,
                 domain=pinned[0],
                 domains=list(pinned),
@@ -784,11 +865,21 @@ class OfficialDomainResolver:
                 signals=signals,
                 verified_at=now,
             )
+            cached_pin_target = self._cache.get(stem, ignore_ttl=True)
+            aliases_deleted = self._cache.delete_normalized_aliases(stem)
+            if cached_pin_target is not None or aliases_deleted:
+                self._cache.put(resolution)
+            return resolution
 
         if not self.config.enabled:
             return Resolution(stem=stem, confidence=NONE, verified_at=now)
 
         cached = self._cache.get(stem)
+        if cached is not None and any(
+            signal.kind == "pin" for signal in cached.signals
+        ):
+            self._cache.delete(stem)
+            cached = None
         if cached is not None:
             return self._readjudicate(cached)
 
@@ -814,6 +905,7 @@ class OfficialDomainResolver:
         if cached.graph is None:
             return cached
         confidence, domain = self._rule(cached.graph)
+        domain = _canonical_ownership_pattern(domain)
         if confidence == cached.confidence and domain == cached.domain:
             return cached
         domains = [domain] if domain else []

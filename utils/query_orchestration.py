@@ -661,6 +661,7 @@ class CriticEvidenceState:
     retained_count: int = 0
     available_count: int = 0
     authoritative_count: int = 0
+    provisional_authoritative_count: int = 0
     covered_entities: tuple[str, ...] = ()
     covered_official_entities: tuple[str, ...] = ()
     covered_constraints: tuple[str, ...] = ()
@@ -972,8 +973,32 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
             evidence_sufficiency=evidence_sufficiency,
         )
 
+    progress_stagnated = (
+        context.fingerprint_streak >= max(1, context.repeat_threshold)
+        or context.no_progress_streak >= max(1, context.no_progress_threshold)
+    )
+
     if context.invalid_tool_request or context.invalid_final_response:
         failure = "invalid_tool_request" if context.invalid_tool_request else "process_narration"
+        if progress_stagnated:
+            return TerminationDecision(
+                action=TerminationAction.STAGNATED,
+                reason="stagnated",
+                hard_stop=True,
+                missing_constraints=missing,
+                failure_types=_dedupe_strings(failures + [failure, "no_progress"], limit=16),
+                rule_hits=rules
+                + [
+                    {
+                        "rule": "no_progress",
+                        "detail": "Repeated invalid model actions produced no new evidence.",
+                    }
+                ],
+                constraints_met=list(context.constraints_met),
+                judge_used=judge_used,
+                judge_error=context.judge_error,
+                evidence_sufficiency=evidence_sufficiency,
+            )
         if context.budget.exhausted:
             return TerminationDecision(
                 action=TerminationAction.EXHAUSTED,
@@ -1001,11 +1026,7 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
         )
 
     if not context.final_proposed:
-        stagnated = (
-            context.fingerprint_streak >= max(1, context.repeat_threshold)
-            or context.no_progress_streak >= max(1, context.no_progress_threshold)
-        )
-        if stagnated:
+        if progress_stagnated:
             return TerminationDecision(
                 action=TerminationAction.STAGNATED,
                 reason="stagnated",
@@ -1055,6 +1076,56 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
                 {
                     "rule": "constraints_satisfied",
                     "detail": "The deterministic evidence and constraint checklist passed.",
+                }
+            ],
+            constraints_met=list(context.constraints_met),
+            judge_used=judge_used,
+            judge_error=context.judge_error,
+            evidence_sufficiency=evidence_sufficiency,
+        )
+
+    authority_only = set(failures) == {"authority_policy_not_met"}
+    if (
+        authority_only
+        and evidence.provisional_authoritative_count > 0
+        and context.no_progress_streak >= max(1, context.no_progress_threshold)
+    ):
+        return TerminationDecision(
+            action=TerminationAction.RETURN_INSUFFICIENT,
+            reason="authority_unverified",
+            hard_stop=True,
+            deterministic_pass=False,
+            missing_constraints=missing,
+            failure_types=failures,
+            rule_hits=rules
+            + [
+                {
+                    "rule": "authority_provisional_fallback",
+                    "detail": (
+                        "A target-related page was retained, but official ownership "
+                        "remained unverified after repeated attempts."
+                    ),
+                }
+            ],
+            constraints_met=list(context.constraints_met),
+            judge_used=judge_used,
+            judge_error=context.judge_error,
+            evidence_sufficiency="partial",
+        )
+
+    if context.no_progress_streak >= max(1, context.no_progress_threshold):
+        return TerminationDecision(
+            action=TerminationAction.STAGNATED,
+            reason="stagnated",
+            hard_stop=True,
+            deterministic_pass=deterministic_pass,
+            missing_constraints=missing,
+            failure_types=_dedupe_strings(failures + ["no_progress"], limit=16),
+            rule_hits=rules
+            + [
+                {
+                    "rule": "no_progress",
+                    "detail": "Repeated rejected drafts produced no new evidence.",
                 }
             ],
             constraints_met=list(context.constraints_met),

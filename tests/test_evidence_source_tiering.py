@@ -5,13 +5,17 @@ from evidence import (
     normalize_entity_stem,
     official_domain_targets,
     official_entity_for_url,
+    provisional_entity_for_url,
     registrable_domain,
 )
+from evidence.official_domain_resolver import Resolution
 
 
 def test_normalizes_product_versions_and_extracts_registrable_domains() -> None:
     assert normalize_entity_stem("GLM5.2") == "glm"
     assert normalize_entity_stem("kimik3") == "kimi"
+    assert normalize_entity_stem("Kimi K2.7 Code HighSpeed") == "kimi"
+    assert normalize_entity_stem("kimik27code") == "kimi"
     # Non-ASCII labels must keep a usable stem instead of collapsing to "".
     assert normalize_entity_stem("小米") == "小米"
     assert normalize_entity_stem("阿里云") == "阿里云"
@@ -45,6 +49,53 @@ def test_first_party_and_unknown_domains_remain_distinct() -> None:
         )
         == "unknown"
     )
+
+
+def test_long_product_stem_matches_short_registrable_brand_label() -> None:
+    assert (
+        classify_web_source_tier(
+            "https://platform.kimi.com/docs/pricing",
+            entities=["kimik2.7code", "highspeed"],
+        )
+        == "first_party"
+    )
+    # A domain that merely prefixes itself with a brand remains untrusted.
+    assert (
+        classify_web_source_tier(
+            "https://kimik2ai.com/pricing",
+            entities=["Kimi"],
+        )
+        == "unknown"
+    )
+
+
+def test_candidate_www_domain_matches_platform_as_provisional_only() -> None:
+    class CandidateResolver:
+        @staticmethod
+        def is_non_evidence(url: str) -> bool:
+            return False
+
+        @staticmethod
+        def resolve(entity: str) -> Resolution:
+            return Resolution(
+                stem="kimik27code",
+                domain="www.kimi.com",
+                domains=["www.kimi.com"],
+                confidence="candidate",
+            )
+
+    resolver = CandidateResolver()
+    url = "https://platform.kimi.com/docs/pricing"
+    assert provisional_entity_for_url(
+        url,
+        entities=["kimik2.7code"],
+        resolver=resolver,
+    ) == "kimik2.7code"
+    assert classify_web_source_tier(
+        url,
+        entities=["kimik2.7code"],
+        resolver=resolver,
+    ) == "first_party"
 
 
 def test_official_aliases_only_apply_to_current_query_targets() -> None:

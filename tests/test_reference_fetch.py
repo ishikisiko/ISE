@@ -452,6 +452,59 @@ def test_reference_router_uses_extract_api_after_direct_fetch_has_no_content():
     ]
 
 
+def test_reference_router_falls_back_when_direct_fetch_body_is_too_small():
+    calls = []
+
+    class DirectFetchShell:
+        source_id = "direct_fetch"
+
+        def extract(self, urls, *, objective=None):
+            calls.append(self.source_id)
+            return ReferenceExtraction(
+                provider=self.source_id,
+                contents=[
+                    ReferenceContent(
+                        provider=self.source_id,
+                        requested_url=urls[0],
+                        url=urls[0],
+                        content="x" * 383,
+                    )
+                ],
+            )
+
+    class ExtractApiContent:
+        source_id = "tavily_extract"
+
+        def extract(self, urls, *, objective=None):
+            calls.append(self.source_id)
+            return ReferenceExtraction(
+                provider=self.source_id,
+                contents=[
+                    ReferenceContent(
+                        provider=self.source_id,
+                        requested_url=urls[0],
+                        url=urls[0],
+                        content="Extracted pricing table " * 40,
+                    )
+                ],
+            )
+
+    result = ReferenceExtractorRouter(
+        [DirectFetchShell(), ExtractApiContent()],
+        min_content_chars=600,
+    ).extract("https://example.com/pricing")
+
+    assert calls == ["direct_fetch", "tavily_extract"]
+    assert result.contents[0].provider == "tavily_extract"
+    assert result.attempts[0] == {
+        "provider": "direct_fetch",
+        "requested_url": "https://example.com/pricing",
+        "status": "failed",
+        "content_chars": 383,
+        "reason": "insufficient_content",
+    }
+
+
 def test_reference_router_uses_extract_api_when_direct_fetch_raises():
     calls = []
 

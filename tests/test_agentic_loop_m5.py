@@ -14,6 +14,7 @@ from langchain.langchain_react_tools import (
     create_react_tools_from_config,
 )
 from search.search import SearchClient, SearchHit
+from search.reference_fetch import ReferenceContent, ReferenceExtraction
 from utils.query_orchestration import QueryAnalysis, analyze_query
 
 
@@ -90,7 +91,11 @@ def test_web_tool_enforces_its_own_budget() -> None:
 
 
 def test_fetch_url_tool_enforces_its_own_budget() -> None:
-    tool = ReActFetchUrlTool(config={}, max_calls_per_query=1)
+    tool = ReActFetchUrlTool(
+        config={},
+        max_calls_per_query=1,
+        min_content_chars=20,
+    )
     # Burn the single allowed call without touching the network.
     tool._calls_in_run = 1
     exhausted = json.loads(tool._run("https://example.com"))
@@ -111,6 +116,104 @@ def test_fetch_url_rejects_non_http_input_without_burning_budget() -> None:
         assert result.startswith("Fetch failed:")
     # All inputs were rejected before extraction, so no budget consumed.
     assert tool.get_budget_status() == {"limit": 2, "used": 0}
+    assert tool.get_last_evidence_records() == []
+
+
+def test_fetch_url_classifies_page_with_query_entities() -> None:
+    class Router:
+        @staticmethod
+        def extract(urls, objective=None):
+            return ReferenceExtraction(
+                provider="direct_fetch",
+                contents=[
+                    ReferenceContent(
+                        provider="direct_fetch",
+                        requested_url=urls[0],
+                        url="https://platform.kimi.com/docs/pricing",
+                        title="Kimi API Pricing",
+                        content="HighSpeed input token price: 1.9 USD per million.",
+                    )
+                ],
+            )
+
+    tool = ReActFetchUrlTool(
+        config={},
+        max_calls_per_query=1,
+        min_content_chars=20,
+    )
+    tool._router = Router()
+    tool.set_analysis(analyze_query("kimik2.7code highspeed价格", allow_search=True))
+
+    tool._run("https://platform.kimi.com/docs/pricing")
+
+    records = tool.get_last_evidence_records()
+    assert records[0]["source_tier"] == "first_party"
+    assert records[0]["metadata"]["source_tier_entities"] == [
+        "kimik2.7code",
+        "highspeed",
+    ]
+
+
+def test_fetch_url_rejects_duplicate_url_without_refetching() -> None:
+    class Router:
+        calls = 0
+
+        @classmethod
+        def extract(cls, urls, objective=None):
+            cls.calls += 1
+            return ReferenceExtraction(
+                provider="direct_fetch",
+                contents=[
+                    ReferenceContent(
+                        provider="direct_fetch",
+                        requested_url=urls[0],
+                        url=urls[0],
+                        content="Official pricing content " * 40,
+                    )
+                ],
+            )
+
+    tool = ReActFetchUrlTool(config={}, max_calls_per_query=3)
+    tool._router = Router()
+
+    first = tool._run("https://example.com/pricing?source=one")
+    duplicate = json.loads(
+        tool._run("https://example.com/pricing?source=two")
+    )
+
+    assert "Official pricing content" in first
+    assert duplicate == {
+        "status": "rejected",
+        "reason": "duplicate_url",
+        "url": "https://example.com/pricing",
+    }
+    assert Router.calls == 1
+    assert tool.get_budget_status() == {"limit": 3, "used": 1}
+
+
+def test_fetch_url_does_not_retain_short_shell_as_authority() -> None:
+    class Router:
+        @staticmethod
+        def extract(urls, objective=None):
+            return ReferenceExtraction(
+                provider="direct_fetch",
+                contents=[
+                    ReferenceContent(
+                        provider="direct_fetch",
+                        requested_url=urls[0],
+                        url="https://platform.kimi.com/docs/pricing",
+                        content="x" * 383,
+                    )
+                ],
+            )
+
+    tool = ReActFetchUrlTool(config={}, min_content_chars=600)
+    tool._router = Router()
+    tool.set_analysis(analyze_query("kimik2.7code价格", allow_search=True))
+
+    result = tool._run("https://platform.kimi.com/docs/pricing")
+
+    assert result.startswith("Fetch failed:")
     assert tool.get_last_evidence_records() == []
 
 

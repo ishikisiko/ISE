@@ -20,6 +20,7 @@ from .source_tiering import (
     normalize_entity_stem,
     official_domain_targets,
     official_entity_for_url,
+    provisional_entity_for_url,
     registrable_domain,
 )
 
@@ -40,6 +41,7 @@ __all__ = [
     "normalize_entity_stem",
     "official_domain_targets",
     "official_entity_for_url",
+    "provisional_entity_for_url",
     "registrable_domain",
     "source_identity_label",
 ]
