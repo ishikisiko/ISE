@@ -71,6 +71,29 @@ def test_combined_and_priority_clients_keep_concrete_provider_snapshots() -> Non
     assert records[1]["fallback"] is True
 
 
+def test_priority_domain_search_continues_past_non_target_results() -> None:
+    first = _RecordedSearchClient(
+        "brave",
+        [SearchHit("Review", "https://review.example/glm", "third-party pricing")],
+    )
+    second = _RecordedSearchClient(
+        "firecrawl",
+        [SearchHit("GLM pricing", "https://open.bigmodel.cn/pricing", "official pricing")],
+    )
+    priority = PrioritySearchClient([first, second])
+
+    hits = priority.search_for_domains(
+        "glm5.2 official pricing site:bigmodel.cn",
+        {"bigmodel.cn"},
+        num_results=1,
+    )
+
+    assert [hit.url for hit in hits] == ["https://open.bigmodel.cn/pricing"]
+    records = priority.get_last_call_records()
+    assert [record["source"] for record in records] == ["brave", "firecrawl"]
+    assert records[1]["fallback"] is True
+
+
 def test_search_rag_emits_one_safe_trace_step_per_provider_call() -> None:
     client = _RecordedSearchClient(
         "brave",

@@ -65,6 +65,8 @@ def search_call_snapshot(call: Mapping[str, Any]) -> Dict[str, Any]:
         snapshot["fallback"] = True
     if call.get("slot"):
         snapshot["slot"] = safe_trace_text(call.get("slot"), limit=40)
+    if call.get("target"):
+        snapshot["target"] = safe_trace_text(call.get("target"), limit=80)
     if call.get("error"):
         snapshot["reason"] = safe_trace_text(call.get("error"), limit=180)
         snapshot["status"] = "error"
@@ -106,6 +108,8 @@ def emit_search_call_step(
         items.append({"label": "耗时", "value": f"{duration_ms:.0f} ms"})
     if snapshot.get("fallback"):
         items.append({"label": "路径", "value": "回退"})
+    if snapshot.get("target"):
+        items.append({"label": "目标", "value": safe_trace_text(snapshot.get("target"), limit=80)})
     if status == "error" and snapshot.get("reason"):
         items.append({"label": "原因", "value": safe_trace_text(snapshot.get("reason"), limit=180)})
 

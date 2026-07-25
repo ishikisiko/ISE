@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from search.search import SearchClient, SearchHit
 from utils.query_orchestration import canonical_reference
-from .source_tiering import classify_web_source_tier
+from .source_tiering import classify_web_source_tier, official_entity_for_url
 
 if TYPE_CHECKING:
     from langchain.langchain_support import Document, LangChainVectorStore
@@ -194,9 +194,11 @@ class WebEvidenceSource(EvidenceSource):
         search_client: SearchClient,
         *,
         official_domains: Optional[Dict[str, Any]] = None,
+        official_resolver: Any = None,
     ) -> None:
         self.search_client = search_client
         self.official_domains = official_domains or {}
+        self.official_resolver = official_resolver
         self.source_id = getattr(search_client, "source_id", "web")
         self.display_name = getattr(search_client, "display_name", "Web Search")
 
@@ -224,7 +226,18 @@ class WebEvidenceSource(EvidenceSource):
                 hit.url,
                 entities=tier_entities,
                 official_domains=self.official_domains,
+                resolver=self.official_resolver,
             )
+        if metadata.get("source_tier") == "excluded":
+            metadata["exclude_from_evidence"] = True
+        official_target = official_entity_for_url(
+            hit.url,
+            entities=tier_entities,
+            official_domains=self.official_domains,
+            resolver=self.official_resolver,
+        )
+        if official_target:
+            metadata["official_target"] = official_target
         return EvidenceItem(
             source_type=self.source_type.value,
             source_id=self.source_id,
@@ -244,15 +257,17 @@ class WebEvidenceSource(EvidenceSource):
         provenance: Optional[Dict[str, Any]] = None,
         tier_entities: Optional[List[str]] = None,
     ) -> List[EvidenceItem]:
-        return [
-            self.hit_to_item(
+        items: List[EvidenceItem] = []
+        for index, hit in enumerate(hits, start=1):
+            item = self.hit_to_item(
                 hit,
                 rank=index,
                 provenance=provenance,
                 tier_entities=tier_entities,
             )
-            for index, hit in enumerate(hits, start=1)
-        ]
+            if not item.metadata.get("exclude_from_evidence"):
+                items.append(item)
+        return items
 
     def retrieve(self, query: str, options: RetrievalOptions) -> List[EvidenceItem]:
         hits = self.search_client.search(

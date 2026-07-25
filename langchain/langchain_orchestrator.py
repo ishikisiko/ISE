@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evidence import DomainEvidenceSource, RetrievalOptions, build_evidence_summary, source_identity_label
+from evidence.official_domain_resolver import build_official_domain_resolver
 from langchain.langchain_rag import LocalRAGChain, NullSearchClient, SearchRAGChain
 from langchain.postcheck import PostcheckVerdict, merge_judge_verdict, screen_search_answer
 from langchain.langchain_support import Document, LangChainVectorStore
@@ -108,9 +109,9 @@ Guidelines:
 Generate up to 4 bilingual (Chinese/English) search keywords or phrases for the given query.
 
 Respond in JSON format:
-{
+{{
     "keywords": ["关键词1", "keyword 1", "关键词2", "keyword 2"]
-}
+}}
 
 Rules:
 1. Keywords should cover the core information of the query
@@ -211,6 +212,7 @@ Always answer in the same language as the user's question."""
         self._search_signature: Optional[tuple] = None
         self._primary_rag: Optional[SearchRAGChain] = None
         self._primary_signature: Optional[tuple] = None
+        self._plan_resolver: Optional[Any] = None
         
         # Build decision chain
         self._decision_chain = self._build_decision_chain()
@@ -342,6 +344,124 @@ Always answer in the same language as the user's question."""
                 return True
         return False
 
+    def _get_official_resolver(self) -> Optional[Any]:
+        """Reuse the RAG chain's resolver, or lazily build one for planning.
+
+        Both instances share the same SQLite cache path, so resolutions made
+        at plan time are reused during evidence tiering and vice versa.
+        """
+        primary = self._primary_rag
+        resolver = getattr(primary, "_official_resolver", None) if primary is not None else None
+        if resolver is not None:
+            return resolver
+        if self._plan_resolver is not None:
+            return self._plan_resolver
+        orchestration = self.config.get("orchestration")
+        if not isinstance(orchestration, dict):
+            return None
+        discovery_clients = list(
+            getattr(self.search_client, "clients", None)
+            or ([self.search_client] if self.search_client is not None else [])
+        )
+        try:
+            self._plan_resolver = build_official_domain_resolver(
+                orchestration,
+                search_clients=discovery_clients,
+            )
+        except Exception:  # noqa: BLE001 - planning must not fail on resolver setup
+            self._plan_resolver = None
+        return self._plan_resolver
+
+    def _agent_discovery_config(self) -> Dict[str, Any]:
+        orchestration = self.config.get("orchestration")
+        block = orchestration.get("official_domain_resolution") if isinstance(orchestration, dict) else None
+        agent_cfg = block.get("agent_discovery") if isinstance(block, dict) else None
+        if isinstance(agent_cfg, bool):
+            agent_cfg = {"enabled": agent_cfg}
+        return agent_cfg if isinstance(agent_cfg, dict) else {}
+
+    def _resolve_official_targets_for_plan(
+        self,
+        analysis: QueryAnalysis,
+    ) -> Optional[Dict[str, List[str]]]:
+        """Resolve comparison members to verified official domains for planning.
+
+        This closes the gap where only statically pinned entities could
+        receive an ``official_domain_recovery`` step: any entity the resolver
+        rules ``official`` -- via pins, cache, structured signals, or the
+        bounded discovery agent -- now generates proactive official-site
+        retrieval targets. The ruling stays deterministic; the agent (when
+        enabled) only fills the relation graph the resolver rules on.
+        """
+        if not (
+            analysis.constraints.get("authority_required")
+            and analysis.constraints.get("comparison_required")
+            and analysis.search_allowed
+        ):
+            return None
+        resolver = self._get_official_resolver()
+        if resolver is None:
+            return None
+        agent_cfg = self._agent_discovery_config()
+        agent_enabled = bool(agent_cfg.get("enabled", False))
+        resolved: Dict[str, List[str]] = {}
+        for member in analysis.comparison_members:
+            label = str(member or "").strip()
+            if not label:
+                continue
+            try:
+                resolution = resolver.resolve(label)
+            except Exception:  # noqa: BLE001 - a resolver failure must not break planning
+                continue
+            if (
+                not getattr(resolution, "is_official", False)
+                and agent_enabled
+                and getattr(resolution, "confidence", "none") in ("candidate", "none")
+            ):
+                discovered = self._agent_discover_official(label, resolver, agent_cfg)
+                if discovered is not None:
+                    resolution = discovered
+            if getattr(resolution, "is_official", False) and getattr(
+                resolution, "resolved_domains", None
+            ):
+                resolved[label] = list(resolution.resolved_domains)
+        return resolved or None
+
+    def _agent_discover_official(
+        self,
+        label: str,
+        resolver: Any,
+        agent_cfg: Dict[str, Any],
+    ) -> Optional[Any]:
+        """Run the discovery agent for one unresolved entity and adjudicate.
+
+        The agent only discovers candidates and fills the relation graph;
+        :meth:`resolver.adjudicate` performs the deterministic ruling.
+        """
+        try:
+            from orchestrators.official_domain_discovery_agent import run_discovery_agent
+
+            llm = self.routing_llm or self.llm
+            discovery_clients = list(
+                getattr(self.search_client, "clients", None)
+                or ([self.search_client] if self.search_client is not None else [])
+            )
+            graph = run_discovery_agent(
+                label,
+                llm=llm,
+                resolver=resolver,
+                search_clients=discovery_clients,
+                max_iterations=max(1, int(agent_cfg.get("max_iterations", 4) or 4)),
+            )
+        except Exception:  # noqa: BLE001 - discovery is best-effort
+            return None
+        if graph is None or not graph.edges:
+            return None
+        try:
+            return resolver.adjudicate(label, graph)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _prepare_query_plan(
         self,
         *,
@@ -373,6 +493,12 @@ Always answer in the same language as the user's question."""
             time_budget_ms=self.orchestration_config["time_budget_ms"],
             recovery_budget=recovery_budget,
             registry=self._policy_registry,
+            official_domains=(
+                self.config.get("orchestration", {}).get("official_domains")
+                if isinstance(self.config.get("orchestration"), dict)
+                else None
+            ),
+            resolved_official_domains=self._resolve_official_targets_for_plan(analysis),
         )
         self._current_plan = plan
         self._current_ledger = EvidenceLedger(plan)
@@ -503,6 +629,17 @@ Always answer in the same language as the user's question."""
         return bool(
             str(result.get("answer") or "").strip()
             and result.get("answer_basis") == "limited_evidence"
+        )
+
+    def _requires_target_official_coverage(self) -> bool:
+        """Require a safe terminal response when configured target evidence is absent."""
+        plan = self._current_plan
+        return bool(
+            plan
+            and plan.step_for_kind(
+                PlanStepKind.OFFICIAL_DOMAIN_RECOVERY,
+                include_recovery=True,
+            )
         )
 
     def _attach_orchestration_metadata(self, result: Dict[str, Any]) -> None:
@@ -889,11 +1026,22 @@ Always answer in the same language as the user's question."""
             return result
 
         recovery_step = plan.step_for_kind(
+            PlanStepKind.OFFICIAL_DOMAIN_RECOVERY,
+            include_recovery=True,
+        ) or plan.step_for_kind(
             PlanStepKind.QUERY_REFORMULATION,
             include_recovery=True,
         )
         if recovery_step is None:
             return result
+        official_domain_recovery = (
+            recovery_step.kind == PlanStepKind.OFFICIAL_DOMAIN_RECOVERY
+        )
+        recovery_executor = (
+            "official_domain_recovery"
+            if official_domain_recovery
+            else "query_reformulation"
+        )
 
         outcome = self._verify_current_plan(result)
         attempt = 0
@@ -902,7 +1050,7 @@ Always answer in the same language as the user's question."""
             if attempt >= max_attempts:
                 if trace is not None:
                     trace.record_recovery(
-                        executor="query_reformulation",
+                        executor=recovery_executor,
                         status="skipped",
                         reason="recovery_budget_exhausted",
                     )
@@ -913,37 +1061,60 @@ Always answer in the same language as the user's question."""
             if blocked:
                 if trace is not None:
                     trace.record_recovery(
-                        executor="query_reformulation",
+                        executor=recovery_executor,
                         status="skipped",
                         reason=blocked,
                     )
                 self._terminalize_recovery_outcome(outcome, blocked)
                 break
 
-            reformulated_query = reformulate_query_for_recovery(
-                plan.analysis,
-                outcome.missing_constraints,
+            recovery_query = (
+                "；".join(
+                    str(target.get("query") or "").strip()
+                    for target in recovery_step.metadata.get("targets") or []
+                    if isinstance(target, dict)
+                )
+                if official_domain_recovery
+                else reformulate_query_for_recovery(
+                    plan.analysis,
+                    outcome.missing_constraints,
+                )
             )
-            if not reformulated_query:
+            if not recovery_query:
                 if trace is not None:
                     trace.record_recovery(
-                        executor="query_reformulation",
+                        executor=recovery_executor,
                         status="skipped",
-                        reason="empty_reformulation_query",
+                        reason=(
+                            "empty_official_domain_targets"
+                            if official_domain_recovery
+                            else "empty_reformulation_query"
+                        ),
                     )
-                self._terminalize_recovery_outcome(outcome, "empty_reformulation_query")
+                self._terminalize_recovery_outcome(
+                    outcome,
+                    (
+                        "empty_official_domain_targets"
+                        if official_domain_recovery
+                        else "empty_reformulation_query"
+                    ),
+                )
                 break
 
             attempt += 1
-            recovery_step.query = reformulated_query
+            recovery_step.query = recovery_query
             trace_step_id = f"recovery_{attempt}"
             active_tracer = ensure_tracer(tracer)
-            active_tracer.begin(trace_step_id, "改写检索恢复", detail=reformulated_query)
+            active_tracer.begin(
+                trace_step_id,
+                "官方域名检索恢复" if official_domain_recovery else "改写检索恢复",
+                detail=recovery_query,
+            )
             if trace is not None:
                 trace.record_recovery(
-                    executor="query_reformulation",
+                    executor=recovery_executor,
                     status="active",
-                    query=reformulated_query,
+                    query=recovery_query,
                 )
             recovered = self._run_primary_rag(
                 query=query,
@@ -956,7 +1127,7 @@ Always answer in the same language as the user's question."""
                 num_search_results=num_search_results,
                 per_source_limit=per_source_limit,
                 reference_limit=reference_limit,
-                search_query=reformulated_query,
+                search_query=recovery_query,
                 freshness=freshness,
                 date_restrict=date_restrict,
                 tracer=active_tracer,
@@ -965,16 +1136,16 @@ Always answer in the same language as the user's question."""
                 execution_trace=trace,
                 plan_controller=controller,
                 enable_local_docs=False,
-                web_step_kind=PlanStepKind.QUERY_REFORMULATION,
+                web_step_kind=recovery_step.kind,
                 enable_temporal_recovery=False,
             )
             if not recovered:
                 active_tracer.end(trace_step_id, detail="检索不可用", status="error")
                 if trace is not None:
                     trace.record_recovery(
-                        executor="query_reformulation",
+                        executor=recovery_executor,
                         status="error",
-                        query=reformulated_query,
+                        query=recovery_query,
                         reason="search_unavailable",
                     )
                 self._terminalize_recovery_outcome(outcome, "search_unavailable")
@@ -986,9 +1157,9 @@ Always answer in the same language as the user's question."""
             active_tracer.end(trace_step_id, detail=status)
             if trace is not None:
                 trace.record_recovery(
-                    executor="query_reformulation",
+                    executor=recovery_executor,
                     status=status,
-                    query=reformulated_query,
+                    query=recovery_query,
                     reason=outcome.status.value if outcome is not None else None,
                 )
 
@@ -1906,7 +2077,10 @@ Always answer in the same language as the user's question."""
             and self._current_verification is not None
             and self._current_verification.status == VerificationStatus.EVIDENCE_INSUFFICIENT
             and bool((result.get("control") or {}).get("search_performed"))
-            and not self._has_limited_evidence_answer(result)
+            and (
+                not self._has_limited_evidence_answer(result)
+                or self._requires_target_official_coverage()
+            )
         ):
             result = self._mark_evidence_insufficient(
                 result,
@@ -2301,7 +2475,10 @@ Always answer in the same language as the user's question."""
         """Run post-check and optionally escalate to ReAct fallback."""
         tracer = ensure_tracer(tracer)
         plan_outcome = self._verify_current_plan(result)
-        limited_evidence_answer = self._has_limited_evidence_answer(result)
+        limited_evidence_answer = (
+            self._has_limited_evidence_answer(result)
+            and not self._requires_target_official_coverage()
+        )
         if result.get("answer_basis"):
             control["answer_basis"] = result["answer_basis"]
         if plan_outcome is not None:

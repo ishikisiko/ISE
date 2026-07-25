@@ -51,9 +51,10 @@ from search.reference_fetch import (
 )
 from evidence.source_tiering import (
     classify_web_source_tier,
-    normalize_entity_stem,
-    registrable_domain,
+    official_entity_for_url,
 )
+from evidence.official_domain_resolver import build_official_domain_resolver
+from evidence.official_domain_resolver import host_matches
 from utils.retrieval_trace import emit_search_call_step, search_call_snapshots
 from utils.timing_utils import TimingRecorder
 from utils.workflow_trace import ensure_tracer
@@ -315,9 +316,21 @@ class SearchRAGChain:
             if isinstance(orchestration, dict)
             else None
         )
+        # Build the discover -> verify -> cache official-domain resolver. It
+        # honors configured ``pins`` (folded from the legacy ``official_domains``
+        # map) with top priority and only performs network discovery for stems
+        # that are not pinned, when ``official_domain_resolution.enabled`` is on.
+        discovery_clients = list(
+            getattr(search_client, "clients", None) or [search_client]
+        )
+        self._official_resolver = build_official_domain_resolver(
+            orchestration if isinstance(orchestration, dict) else {},
+            search_clients=discovery_clients,
+        )
         self.web_source = WebEvidenceSource(
             search_client,
             official_domains=official_domains if isinstance(official_domains, dict) else None,
+            official_resolver=self._official_resolver,
         )
         self.local_source = LocalEvidenceSource(
             vector_store=self.vector_store,
@@ -663,12 +676,167 @@ class SearchRAGChain:
             hits_count = 0
             per_source_cap = per_source_limit or num_search_results
 
+            def retrieve_official_domains(step: Any) -> PlanStepResult:
+                """Run one bounded target-domain search per required entity."""
+                nonlocal search_timings, search_attempts, executed_providers
+                targets = [
+                    target
+                    for target in (step.metadata.get("targets") or [])
+                    if isinstance(target, dict)
+                    and str(target.get("entity") or "").strip()
+                    and isinstance(target.get("domains"), list)
+                ]
+                recovered_items: List[EvidenceItem] = []
+                providers: List[str] = []
+                attempts: List[Dict[str, Any]] = []
+                warnings: List[str] = []
+                for target in targets:
+                    entity = str(target["entity"]).strip()
+                    domains = {
+                        str(domain).strip().casefold()
+                        for domain in target["domains"]
+                        if str(domain).strip()
+                    }
+                    target_query = str(target.get("query") or effective_query).strip()
+                    target_hits: List[SearchHit] = []
+                    try:
+                        search_for_domains = getattr(
+                            self.search_client,
+                            "search_for_domains",
+                            None,
+                        )
+                        if callable(search_for_domains):
+                            target_hits = list(
+                                search_for_domains(
+                                    target_query,
+                                    domains,
+                                    num_results=1,
+                                    per_source_limit=1,
+                                    freshness=freshness,
+                                    date_restrict=date_restrict,
+                                )
+                                or []
+                            )
+                        else:
+                            target_hits = list(
+                                self.search_client.search(
+                                    target_query,
+                                    num_results=1,
+                                    per_source_limit=1,
+                                    freshness=freshness,
+                                    date_restrict=date_restrict,
+                                )
+                                or []
+                            )
+                            target_hits = [
+                                hit
+                                for hit in target_hits
+                                if any(host_matches(domain, hit.url) for domain in domains)
+                            ]
+                    except Exception as exc:  # noqa: BLE001 - target misses stay auditable
+                        search_warnings.append(f"{entity} 官方域名检索异常：{exc}")
+
+                    timings, errors = snapshot_provider_state(self.search_client)
+                    call_records = snapshot_search_call_records(self.search_client)
+                    if not call_records and len(timings) == 1:
+                        timing = timings[0]
+                        if isinstance(timing, dict):
+                            call_records = [
+                                {
+                                    "source": timing.get("source"),
+                                    "label": timing.get("label"),
+                                    "query": target_query,
+                                    "duration_ms": timing.get("duration_ms"),
+                                    "status": "error" if timing.get("error") else "done",
+                                    "result_count": len(target_hits),
+                                    "results": [
+                                        {
+                                            "title": hit.title,
+                                            "url": hit.url,
+                                            "snippet": hit.snippet,
+                                        }
+                                        for hit in target_hits
+                                    ],
+                                    "error": timing.get("error"),
+                                    "target": entity,
+                                }
+                            ]
+                    for record in call_records:
+                        record.setdefault("target", entity)
+                    emit_search_call_records(call_records)
+                    search_timings.extend(timings)
+                    target_providers, target_attempts = record_provider_state(timings, errors)
+                    for attempt in target_attempts:
+                        attempt["target"] = entity
+                    providers.extend(
+                        provider
+                        for provider in target_providers
+                        if provider not in providers
+                    )
+                    attempts.extend(target_attempts)
+                    executed_providers.extend(
+                        provider
+                        for provider in target_providers
+                        if provider not in executed_providers
+                    )
+
+                    target_hit = next(
+                        (
+                            hit
+                            for hit in target_hits
+                            if any(host_matches(domain, hit.url) for domain in domains)
+                        ),
+                        None,
+                    )
+                    if target_hit is None:
+                        warnings.append(f"未找到 {entity} 的配置官方域名结果")
+                        attempts.append(
+                            {
+                                "provider": "official_domain_recovery",
+                                "target": entity,
+                                "status": "missing",
+                            }
+                        )
+                        continue
+                    recovered_items.extend(
+                        self.web_source.hits_to_items(
+                            [target_hit],
+                            provenance={
+                                "originating_plan_step": step.step_id,
+                                "retrieval_kind": "official_domain_recovery",
+                                "official_target": entity,
+                            },
+                            tier_entities=[entity],
+                        )
+                    )
+                    attempts.append(
+                        {
+                            "provider": "official_domain_recovery",
+                            "target": entity,
+                            "status": "done",
+                        }
+                    )
+                search_attempts.extend(attempts)
+                return PlanStepResult(
+                    items=recovered_items,
+                    providers=providers,
+                    attempts=attempts,
+                    warnings=warnings,
+                )
+
             def retrieve_web(step: Any) -> PlanStepResult:
                 nonlocal rerank_meta, search_error, search_timings, search_attempts, executed_providers
-                per_source_cap = per_source_limit or num_search_results
-                fetch_limit = num_search_results
+                if step is not None and step.kind == PlanStepKind.OFFICIAL_DOMAIN_RECOVERY:
+                    return retrieve_official_domains(step)
+                step_limit = (
+                    max(1, int(step.max_results or num_search_results))
+                    if step is not None
+                    else num_search_results
+                )
+                per_source_cap = min(per_source_limit or num_search_results, step_limit)
+                fetch_limit = step_limit
                 if self.reranker and hasattr(self.search_client, "clients"):
-                    fetch_limit = per_source_cap * len(self.search_client.clients)
+                    fetch_limit = max(step_limit, per_source_cap * len(self.search_client.clients))
                 try:
                     search_items = self.web_source.retrieve(
                         effective_query,
@@ -684,6 +852,14 @@ class SearchRAGChain:
                             },
                         ),
                     )
+                    # Source tiering marks non-evidence hosts explicitly. Keep
+                    # this second guard at the RAG boundary so alternate web
+                    # sources cannot reintroduce them into fusion.
+                    search_items = [
+                        item
+                        for item in search_items
+                        if not (item.metadata or {}).get("exclude_from_evidence")
+                    ]
                     timings, errors = snapshot_provider_state(self.search_client)
                     call_records = snapshot_search_call_records(self.search_client)
                     if not call_records and len(timings) == 1:
@@ -711,7 +887,7 @@ class SearchRAGChain:
                     executed_providers.extend(provider for provider in providers if provider not in executed_providers)
                     search_attempts.extend(attempts)
                     hits = evidence_items_to_search_hits(search_items)
-                    hits, rerank_meta = self._apply_rerank(query, hits, limit=num_search_results)
+                    hits, rerank_meta = self._apply_rerank(query, hits, limit=step_limit)
                     return PlanStepResult(
                         items=self.web_source.hits_to_items(
                             hits,
@@ -969,6 +1145,63 @@ class SearchRAGChain:
         self._reference_router = ReferenceExtractorRouter(extractors)
         return self._reference_router
 
+    def _collect_resolution_audit(self, entities: List[str]) -> List[Dict[str, Any]]:
+        """Return audit records for discovered (non-pinned) official entities.
+
+        Only discovered resolutions are surfaced; pinned stems carry no
+        discovery rationale worth auditing -- unless the pin shadow audit
+        recorded a disagreement, in which case the (never overridden) pin is
+        surfaced so a wrong or expired pin is visible instead of silent.
+        Cache reads power this, so it is cheap to call per enrichment.
+        """
+        resolver = self._official_resolver
+        if resolver is None:
+            return []
+        audit: List[Dict[str, Any]] = []
+        for entity in entities or []:
+            label = str(entity or "").strip()
+            if not label:
+                continue
+            try:
+                resolution = resolver.resolve(label)
+            except Exception:  # noqa: BLE001
+                continue
+            if not resolution.is_official:
+                continue
+            shadow_disagreement = any(
+                getattr(s, "kind", "") == "pin_shadow_disagreement"
+                for s in resolution.signals
+            )
+            # Skip pure-pin resolutions: nothing was discovered. A shadow-audit
+            # disagreement is the exception -- that is precisely what must be
+            # visible.
+            if all(getattr(s, "tier", "") == "pin" for s in resolution.signals) and not shadow_disagreement:
+                continue
+            record: Dict[str, Any] = {
+                "entity": label,
+                "stem": resolution.stem,
+                "domain": resolution.domain,
+                "signals": [
+                    {
+                        "kind": getattr(s, "kind", ""),
+                        "source": getattr(s, "source", ""),
+                        "tier": getattr(s, "tier", ""),
+                    }
+                    for s in resolution.signals
+                ],
+            }
+            if shadow_disagreement:
+                record["pin_shadow_audit"] = next(
+                    (
+                        getattr(s, "detail", "")
+                        for s in resolution.signals
+                        if getattr(s, "kind", "") == "pin_shadow_disagreement"
+                    ),
+                    "",
+                )
+            audit.append(record)
+        return audit
+
     def _enrich_official_pages(
         self,
         query: str,
@@ -989,35 +1222,6 @@ class SearchRAGChain:
             return [], []
 
         entities = list(tier_entities) if tier_entities else []
-        # The deterministic analyzer does not always surface brand entities, so
-        # derive extra stems from the query text and keep those that correspond
-        # to a configured official alias. This lets official-page extraction
-        # trigger even when entity extraction comes back empty.
-        alias_stems = set()
-        if isinstance(self._official_domains_map, dict):
-            alias_stems = {
-                normalize_entity_stem(alias)
-                for alias in self._official_domains_map.keys()
-                if not str(alias).startswith("_")
-            }
-        for token in re.split(r"[\s,，、/()（）]+", query or ""):
-            stem = normalize_entity_stem(token)
-            if stem and stem in alias_stems and stem not in entities:
-                entities.append(stem)
-        # Union of every configured official registrable domain — a hit landing
-        # here is official by definition, independent of entity extraction.
-        configured_official_domains: Set[str] = set()
-        if isinstance(self._official_domains_map, dict):
-            for configured in self._official_domains_map.values():
-                if isinstance(configured, str):
-                    configured = [configured]
-                if not hasattr(configured, "__iter__"):
-                    continue
-                for domain_value in configured:
-                    domain = registrable_domain(domain_value)
-                    if domain:
-                        configured_official_domains.add(domain)
-
         seen_urls: Set[str] = set()
         official_selected: List[str] = []
         for hit in web_hits:
@@ -1026,13 +1230,19 @@ class SearchRAGChain:
             url = (hit.url or "").strip()
             if not url or url in seen_urls:
                 continue
-            hit_domain = registrable_domain(url)
             tier = classify_web_source_tier(
                 url,
                 entities=entities,
                 official_domains=self._official_domains_map,
+                resolver=self._official_resolver,
             )
-            if hit_domain in configured_official_domains or tier in {"official", "first_party"}:
+            official_target = official_entity_for_url(
+                url,
+                entities=entities,
+                official_domains=self._official_domains_map,
+                resolver=self._official_resolver,
+            )
+            if official_target or tier == "first_party":
                 seen_urls.add(url)
                 official_selected.append(url)
         selected = list(official_selected)
@@ -1060,12 +1270,26 @@ class SearchRAGChain:
 
         tracer_ref = ensure_tracer(tracer)
         official_count = sum(
-            1 for url in selected if registrable_domain(url) in configured_official_domains
+            1
+            for url in selected
+            if official_entity_for_url(
+                url,
+                entities=entities,
+                official_domains=self._official_domains_map,
+                resolver=self._official_resolver,
+            )
         )
         non_official_count = len(selected) - official_count
         step_detail_parts = [f"{official_count} 官方页"] if official_count else []
         if non_official_count:
-            step_detail_parts.append(f"{non_official_count} 权威页")
+            step_detail_parts.append(f"{non_official_count} 非官方页")
+        # Surface why each discovered (non-pinned) official entity was judged
+        # official, so the audit trace explains the domain verdict.
+        resolution_audit = self._collect_resolution_audit(entities)
+        if resolution_audit:
+            step_detail_parts.append(
+                f"{len(resolution_audit)} 解析官方域"
+            )
         tracer_ref.begin(
             "official_extract",
             "抓取官方文档",
@@ -1092,6 +1316,12 @@ class SearchRAGChain:
             synthetic_hits.append(
                 SearchHit(title=title, url=content.url, snippet=snippet)
             )
+            official_target = official_entity_for_url(
+                content.url,
+                entities=entities,
+                official_domains=self._official_domains_map,
+                resolver=self._official_resolver,
+            )
             result_rows.append(
                 {
                     "url": content.url,
@@ -1099,7 +1329,8 @@ class SearchRAGChain:
                     "provider": content.provider,
                     "content_chars": len(text),
                     "status": "done",
-                    "official": registrable_domain(content.url) in configured_official_domains,
+                    "official": bool(official_target),
+                    "official_target": official_target,
                 }
             )
 
@@ -1124,7 +1355,7 @@ class SearchRAGChain:
 
         if result_rows or failure_rows:
             extracted_official = sum(1 for row in result_rows if row.get("official"))
-            label = "官方文档抓取" if extracted_official else "权威页面抓取"
+            label = "官方文档抓取" if extracted_official else "网页正文抓取"
             records.append(
                 {
                     "source": "reference_extract",
@@ -1137,6 +1368,17 @@ class SearchRAGChain:
                     "official_count": extracted_official,
                     "records": result_rows + failure_rows,
                     "attempts": list(extraction.attempts),
+                }
+            )
+        if resolution_audit:
+            records.append(
+                {
+                    "source": "official_domain_resolution",
+                    "label": "官方域解析",
+                    "query": query or "",
+                    "status": "done",
+                    "kind": "resolved_entities",
+                    "records": resolution_audit,
                 }
             )
 

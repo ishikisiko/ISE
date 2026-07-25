@@ -46,6 +46,33 @@ class SearchHit:
     snippet: str
 
 
+def _registrable_result_domain(url: str) -> str:
+    """Normalize a result hostname for bounded configured-domain matching."""
+    try:
+        raw = str(url or "").strip()
+        if "://" not in raw:
+            raw = f"https://{raw}"
+        host = (urlparse(raw).hostname or "").casefold().strip(".")
+    except ValueError:
+        return ""
+    labels = [label for label in host.split(".") if label]
+    if len(labels) <= 2:
+        return ".".join(labels)
+    suffix = ".".join(labels[-2:])
+    if suffix in {"com.cn", "com.hk", "com.au", "co.uk", "co.jp", "co.kr", "com.tw"}:
+        return ".".join(labels[-3:])
+    return suffix
+
+
+def _matches_required_host(url: str, patterns: Set[str]) -> bool:
+    """Match configured host/path ownership targets without family collapse."""
+    # Imported lazily: search providers are used by the resolver itself, so a
+    # module-load import would create a resolver -> search cycle.
+    from evidence.official_domain_resolver import host_matches
+
+    return any(host_matches(pattern, url) for pattern in patterns)
+
+
 class SearchClient:
     """Abstract base class for search providers."""
 
@@ -1348,6 +1375,51 @@ class PrioritySearchClient(SearchClient):
         freshness: Optional[str] = None,
         date_restrict: Optional[str] = None,
     ) -> List[SearchHit]:
+        return self._search(
+            query,
+            num_results=num_results,
+            per_source_limit=per_source_limit,
+            freshness=freshness,
+            date_restrict=date_restrict,
+        )
+
+    def search_for_domains(
+        self,
+        query: str,
+        accepted_domains: Set[str],
+        num_results: int = 5,
+        *,
+        per_source_limit: Optional[int] = None,
+        freshness: Optional[str] = None,
+        date_restrict: Optional[str] = None,
+    ) -> List[SearchHit]:
+        """Continue provider fallback until a configured target host appears.
+
+        This is intentionally separate from normal priority search: a generic
+        query still returns after the first provider with any usable result.
+        """
+        patterns = {str(value).strip() for value in accepted_domains if str(value).strip()}
+        if not patterns:
+            return []
+        return self._search(
+            query,
+            num_results=num_results,
+            per_source_limit=per_source_limit,
+            freshness=freshness,
+            date_restrict=date_restrict,
+            required_domains=patterns,
+        )
+
+    def _search(
+        self,
+        query: str,
+        num_results: int = 5,
+        *,
+        per_source_limit: Optional[int] = None,
+        freshness: Optional[str] = None,
+        date_restrict: Optional[str] = None,
+        required_domains: Optional[Set[str]] = None,
+    ) -> List[SearchHit]:
         self._reset_timings()
         self._last_errors = []
         total_limit = max(1, int(num_results))
@@ -1437,6 +1509,15 @@ class PrioritySearchClient(SearchClient):
                 deduped.append(hit)
                 if len(deduped) >= total_limit:
                     break
+            if required_domains:
+                matched = [
+                    hit
+                    for hit in deduped
+                    if _matches_required_host(hit.url, required_domains)
+                ]
+                if matched:
+                    return matched
+                continue
             if deduped:
                 return deduped
 

@@ -39,23 +39,56 @@
             "enabled": true,
             "max_attempts": 1
         },
-        "official_domains": {
-            "_comment": "Optional entity-stem to official registrable-domain aliases. Alias matches are tiered official before first-party stem matching.",
-            "glm": ["zhipu.cn", "bigmodel.cn", "open.bigmodel.cn"],
-            "kimi": ["moonshot.cn", "kimi.com", "platform.moonshot.cn"],
-            "openai": ["openai.com", "platform.openai.com"],
-            "anthropic": ["anthropic.com", "docs.anthropic.com"],
-            "claude": ["anthropic.com", "docs.anthropic.com"],
-            "gemini": ["google.com", "ai.google.dev"],
-            "deepseek": ["deepseek.com", "platform.deepseek.com"],
-            "minimax": ["minimaxi.com", "platform.minimaxi.com"],
-            "fable": ["fable.ai"],
-            "fireworks": ["fireworks.ai", "docs.fireworks.ai"],
-            "together": ["together.ai"],
-            "langchain": ["langchain.com", "python.langchain.com"],
-            "pytorch": ["pytorch.org"],
-            "react": ["react.dev"],
-            "nextjs": ["nextjs.org", "nextjs.com"]
+        "official_domain_resolution": {
+            "_comment": "Discover -> verify -> cache resolver for entity official domains. The ruling currency is structurally verifiable relations (registry homepage + homepage->repo backlink closure, Wikidata P856 + support, trusted-domain redirects into the candidate, certificate SAN coverage, facade consistency, CT-log domain age); cross-provider search voting is only a weak signal and can never rule official alone. What is cached is the relation graph, not the verdict, so ruling rules can be re-applied offline. Pinned stems (pins) win with top priority; pin_shadow_audit re-verifies pins in the background and surfaces disagreements without ever overriding the pin. Set enabled false to fall back to pins-only (legacy static-map behavior).",
+            "enabled": true,
+            "min_signals": 2,
+            "cache_path": "./runtime/official_domains.sqlite",
+            "cache_ttl_days": 30,
+            "negative_ttl_hours": 24,
+            "max_discovery_searches": 2,
+            "max_verification_fetches": 2,
+            "structured_sources": ["wikidata", "pypi", "npm", "github"],
+            "min_domain_age_days": 180,
+            "graph_probes_enabled": true,
+            "pin_shadow_audit": true,
+            "pin_audit_ttl_days": 7,
+            "aggregator_min_stems": 5,
+            "aggregator_observation_window_days": 30,
+            "agent_discovery": {
+                "_comment": "Agent-assisted discovery for entities the deterministic path leaves at candidate/none. The agent only searches/fetches/looks up registries and submits candidate hosts; every graph edge comes from deterministic tool outputs and the ruling stays with the resolver. Triggered only for authority-required queries.",
+                "enabled": false,
+                "max_iterations": 4
+            },
+            "never_official": {
+                "mode": "extend",
+                "domains": ["csdn.net", "zhihu.com", "juejin.cn", "medium.com"]
+            },
+            "hosting_platforms": {
+                "mode": "extend",
+                "domains": []
+            },
+            "non_evidence": {
+                "mode": "extend",
+                "domains": []
+            },
+            "pins": {
+                "glm": ["zhipu.cn", "bigmodel.cn", "open.bigmodel.cn"],
+                "kimi": ["moonshot.cn", "kimi.com", "platform.moonshot.cn"],
+                "openai": ["openai.com", "platform.openai.com"],
+                "anthropic": ["anthropic.com", "docs.anthropic.com"],
+                "claude": ["anthropic.com", "docs.anthropic.com"],
+                "gemini": ["gemini.google.com", "ai.google.dev", "deepmind.google"],
+                "deepseek": ["deepseek.com", "platform.deepseek.com"],
+                "minimax": ["minimaxi.com", "platform.minimaxi.com"],
+                "fable": ["fable.ai"],
+                "fireworks": ["fireworks.ai", "docs.fireworks.ai"],
+                "together": ["together.ai"],
+                "langchain": ["langchain.com", "python.langchain.com"],
+                "pytorch": ["pytorch.org"],
+                "react": ["react.dev"],
+                "nextjs": ["nextjs.org", "nextjs.com"]
+            }
         },
         "official_page_extraction": {
             "_comment": "Fetch full page content from official/first-party search hits. DirectFetch runs first; Parallel/Firecrawl/Tavily Extract APIs run only when it cannot return usable content. Set enabled false to keep snippet-only evidence.",

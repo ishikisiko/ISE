@@ -97,6 +97,39 @@ class _QueryAwareSearchStub(_SearchStub):
         return list(self.responses.get(key, [])[:num_results])
 
 
+class _TargetAwareSearchStub(_SearchStub):
+    def __init__(self, target_hits: dict[str, SearchHit]) -> None:
+        super().__init__(
+            [
+                SearchHit("Fable review", "https://third.example/fable", "fable5 API pricing"),
+                SearchHit("GLM review", "https://third.example/glm", "glm5.2 API pricing"),
+                SearchHit("Kimi review", "https://third.example/kimi", "kimik3 API pricing"),
+            ]
+        )
+        self.target_hits = target_hits
+        self.target_calls: list[tuple[str, set[str]]] = []
+
+    def search_for_domains(
+        self,
+        query: str,
+        accepted_domains: set[str],
+        num_results: int = 5,
+        **kwargs: Any,
+    ) -> list[SearchHit]:
+        self.target_calls.append((query, set(accepted_domains)))
+        self._reset_timings()
+        self._append_timing({"source": "brave", "label": "Brave", "duration_ms": 1.0})
+        matched = next(
+            (
+                hit
+                for domain, hit in self.target_hits.items()
+                if domain in accepted_domains
+            ),
+            None,
+        )
+        return [matched] if matched is not None else []
+
+
 def test_evidence_package_imports_in_a_fresh_process_without_a_cycle() -> None:
     completed = subprocess.run(
         [
@@ -207,6 +240,114 @@ def test_pricing_comparison_analysis_is_generic_policy_composition() -> None:
     assert plan.step_for_kind(PlanStepKind.TEMPORAL_RECOVERY, include_recovery=True) is None
 
 
+def test_pricing_comparison_declares_targeted_official_domain_recovery() -> None:
+    analysis = analyze_query("对比fable5 api价格和glm5.2,kimik3", allow_search=True)
+    domains = {
+        "fable": ["fable.ai"],
+        "glm": ["zhipu.cn", "bigmodel.cn"],
+        "kimi": ["moonshot.cn"],
+        "fireworks": ["fireworks.ai"],
+    }
+    plan = build_query_plan(
+        analysis,
+        has_local_docs=False,
+        result_budget=8,
+        recovery_budget=1,
+        official_domains=domains,
+    )
+
+    web = plan.step_for_kind(PlanStepKind.WEB_SEARCH)
+    recovery = plan.step_for_kind(
+        PlanStepKind.OFFICIAL_DOMAIN_RECOVERY,
+        include_recovery=True,
+    )
+    assert web is not None and web.max_results == 5
+    assert recovery is not None
+    assert recovery.max_results == 3
+    assert [target["entity"] for target in recovery.metadata["targets"]] == [
+        "fable5",
+        "glm5.2",
+        "kimik3",
+    ]
+    assert all("site:" in target["query"] for target in recovery.metadata["targets"])
+    assert plan.step_for_kind(PlanStepKind.QUERY_REFORMULATION, include_recovery=True) is None
+
+
+def test_targeted_official_recovery_requires_each_mapped_comparison_entity() -> None:
+    domains = {
+        "fable": ["fable.ai"],
+        "glm": ["bigmodel.cn"],
+        "kimi": ["moonshot.cn"],
+    }
+    plan = build_query_plan(
+        analyze_query("对比fable5 api价格和glm5.2,kimik3", allow_search=True),
+        has_local_docs=False,
+        official_domains=domains,
+    )
+    ledger = EvidenceLedger(plan)
+    fable_item = _item(
+        "https://fable.ai/pricing",
+        "fable5 pricing",
+        step="official_domain_recovery",
+    )
+    fable_item.metadata["official_target"] = "fable5"
+    glm_item = _item(
+        "https://open.bigmodel.cn/pricing",
+        "glm5.2 pricing",
+        step="official_domain_recovery",
+    )
+    glm_item.metadata["official_target"] = "glm5.2"
+    ledger.ingest([fable_item, glm_item])
+    ledger.apply_limits()
+
+    incomplete = verify_evidence_plan(plan, ledger)
+    assert incomplete.status == VerificationStatus.RECOVERABLE_GAP
+    assert "official:kimik3" in incomplete.missing_constraints
+
+    kimi_item = _item(
+        "https://platform.moonshot.cn/pricing",
+        "kimik3 pricing",
+        step="official_domain_recovery",
+    )
+    kimi_item.metadata["official_target"] = "kimik3"
+    ledger.ingest([kimi_item])
+    ledger.apply_limits()
+
+    assert verify_evidence_plan(
+        plan,
+        ledger,
+        answer="Fable 5、GLM‑5.2 和 Kimi K3 的定价信息",
+    ).status == VerificationStatus.COMPLETE
+
+
+def test_pricing_comparison_does_not_accept_an_official_homepage_as_price_evidence() -> None:
+    domains = {
+        "fable": ["fable.ai"],
+        "glm": ["bigmodel.cn"],
+        "kimi": ["moonshot.cn"],
+    }
+    plan = build_query_plan(
+        analyze_query("对比fable5 api价格和glm5.2,kimik3", allow_search=True),
+        has_local_docs=False,
+        official_domains=domains,
+    )
+    ledger = EvidenceLedger(plan)
+    items = [
+        _item("https://fable.ai/", "Fable storytelling platform", step="official_domain_recovery"),
+        _item("https://docs.bigmodel.cn/pricing", "glm5.2 API 定价", step="official_domain_recovery"),
+        _item("https://moonshot.cn/pricing", "kimik3 API pricing", step="official_domain_recovery"),
+    ]
+    for item, target in zip(items, ["fable5", "glm5.2", "kimik3"]):
+        item.metadata["official_target"] = target
+    ledger.ingest(items)
+    ledger.apply_limits()
+
+    outcome = verify_evidence_plan(plan, ledger)
+    assert outcome.status == VerificationStatus.RECOVERABLE_GAP
+    assert "official:fable5" in outcome.missing_constraints
+    assert "target_official_pricing_coverage_missing" in outcome.failure_types
+
+
 def test_generic_and_explicit_temporal_comparisons_select_different_plans() -> None:
     generic = build_query_plan(
         analyze_query("比较苹果和微软", allow_search=True),
@@ -279,11 +420,13 @@ def test_plan_controller_enforces_provider_and_budget_boundaries() -> None:
     )
     trace = QueryExecutionTrace()
     controller = PlanController(plan, trace)
+    assert controller.started_at is None
 
     first = controller.run_step(
         web,
         lambda step: PlanStepResult(items=[1, 2, 3], providers=["brave"]),
     )
+    assert controller.started_at is not None
     second = controller.run_step(
         recovery,
         lambda step: PlanStepResult(items=[4], providers=["brave"]),
@@ -725,6 +868,122 @@ def test_rag_assigns_web_tiers_from_plan_entities_and_aliases() -> None:
     assert ledger.entries[0].source_tier == "official"
 
 
+def test_rag_runs_one_official_domain_recovery_search_per_target() -> None:
+    domains = {
+        "fable": ["fable.ai"],
+        "glm": ["bigmodel.cn"],
+        "kimi": ["moonshot.cn"],
+    }
+    plan = build_query_plan(
+        analyze_query("对比fable5 api价格和glm5.2,kimik3", allow_search=True),
+        has_local_docs=False,
+        official_domains=domains,
+    )
+    search = _TargetAwareSearchStub(
+        {
+            "fable.ai": SearchHit("Fable pricing", "https://fable.ai/pricing", "pricing"),
+            "bigmodel.cn": SearchHit("GLM pricing", "https://open.bigmodel.cn/pricing", "pricing"),
+            "moonshot.cn": SearchHit("Kimi pricing", "https://platform.moonshot.cn/pricing", "pricing"),
+        }
+    )
+    chain = SearchRAGChain(
+        llm=_LLMStub(),
+        search_client=search,
+        config={"orchestration": {"official_domains": domains}},
+        data_path=None,
+    )
+    ledger = EvidenceLedger(plan)
+    trace = QueryExecutionTrace()
+    retrieval = chain._retrieve_evidence(
+        "对比fable5 api价格和glm5.2,kimik3",
+        search_query="recovery",
+        num_search_results=8,
+        per_source_limit=8,
+        num_retrieved_docs=0,
+        enable_search=True,
+        enable_local_docs=False,
+        freshness=None,
+        date_restrict=None,
+        timing_recorder=None,
+        query_plan=plan,
+        evidence_ledger=ledger,
+        execution_trace=trace,
+        plan_controller=PlanController(plan, trace),
+        web_step_kind=PlanStepKind.OFFICIAL_DOMAIN_RECOVERY,
+        enable_temporal_recovery=False,
+    )
+
+    assert [domains for _, domains in search.target_calls] == [
+        {"fable.ai"},
+        {"bigmodel.cn"},
+        {"moonshot.cn"},
+    ]
+    assert [entry.source_tier for entry in ledger.entries] == ["official"] * 3
+    assert {entry.covered_entities[0] for entry in ledger.entries} == {
+        "fable5",
+        "glm5.2",
+        "kimik3",
+    }
+    assert verify_evidence_plan(plan, ledger).status == VerificationStatus.COMPLETE
+    assert [attempt["target"] for attempt in retrieval["search_provider_trace"]["attempts"] if attempt["provider"] == "official_domain_recovery"] == [
+        "fable5",
+        "glm5.2",
+        "kimik3",
+    ]
+    assert [
+        call["target"]
+        for call in retrieval["search_api_calls"]
+        if call.get("provider") == "brave"
+    ] == [
+        "fable5",
+        "glm5.2",
+        "kimik3",
+    ]
+
+
+def test_orchestrator_rejects_a_draft_when_one_target_official_domain_is_missing() -> None:
+    domains = {
+        "fable": ["fable.ai"],
+        "glm": ["bigmodel.cn"],
+        "kimi": ["moonshot.cn"],
+    }
+    search = _TargetAwareSearchStub(
+        {
+            "fable.ai": SearchHit("Fable pricing", "https://fable.ai/pricing", "pricing"),
+            "bigmodel.cn": SearchHit("GLM pricing", "https://open.bigmodel.cn/pricing", "pricing"),
+        }
+    )
+    llm = _CapturingLLM("fable5 glm5.2 kimik3 pricing draft")
+    orchestrator = LangChainOrchestrator(
+        llm=llm,
+        routing_llm=llm,
+        classifier_llm=llm,
+        search_client=search,
+        source_selector=_GeneralSelector(),
+        requested_search_sources=["brave"],
+        active_search_sources=["brave"],
+        configured_search_sources=["brave"],
+        config={
+            "orchestration": {
+                "enforce_verification": True,
+                "official_domains": domains,
+            }
+        },
+    )
+    orchestrator._make_routing_decision = lambda *args, **kwargs: {
+        "needs_search": True,
+        "reason": "test",
+    }
+    orchestrator._generate_keywords = lambda *args, **kwargs: {"keywords": []}
+
+    result = orchestrator.answer("对比fable5 api价格和glm5.2,kimik3")
+
+    assert result["answer"].startswith("当前检索到的证据不足")
+    assert result["control"]["final_executor"] == "evidence_insufficient"
+    assert "official:kimik3" in result["control"]["verification"]["missing_constraints"]
+    assert len(search.target_calls) == 3
+
+
 def test_limited_evidence_generates_a_qualified_answer_but_empty_ledger_does_not() -> None:
     plan = build_query_plan(
         analyze_query("fable5 api价格", allow_search=True),
@@ -943,6 +1202,15 @@ def test_keyword_failure_trace_reports_fallback_and_preserves_pricing_intent() -
     assert "pricing" in result["control"]["keyword_generation"]["fallback_query"]
 
 
+def test_keyword_prompt_renders_json_example_without_a_missing_variable_error() -> None:
+    orchestrator = _recovery_orchestrator(_SearchStub([]))
+
+    generated = orchestrator._generate_keywords("glm5.2 API pricing")
+
+    assert "error" not in generated
+    assert isinstance(generated["keywords"], list)
+
+
 def test_empty_local_directory_skips_embedding_initialization(monkeypatch, tmp_path: Path) -> None:
     import langchain.langchain_rag as rag_module
 
@@ -993,3 +1261,121 @@ def test_local_document_snapshot_change_rebuilds_primary_pipeline(monkeypatch, t
 
     assert empty_snapshot != populated_snapshot
     assert len(created) == 2
+
+
+# --- Phase 1: canonical registrable_domain + analyzer entity candidates -----
+
+
+def test_query_orchestration_no_longer_carries_a_duplicate_domain_helper() -> None:
+    """The plan layer must not keep a private copy of registrable_domain."""
+    import utils.query_orchestration as qo
+
+    assert not hasattr(qo, "_configured_domain")
+    assert not hasattr(qo, "_normalize_official_target_stem")
+
+
+def test_plan_and_tier_layers_agree_on_registrable_domain() -> None:
+    """A URL must resolve to one identical domain in both layers."""
+    from evidence.source_tiering import registrable_domain
+    from utils.query_orchestration import _official_recovery_targets
+
+    fixture_urls = [
+        "https://platform.openai.com/pricing",
+        "https://open.bigmodel.cn/pricing",
+        "https://docs.anthropic.com/en/api",
+        "https://platform.moonshot.cn/pricing",
+        "https://api.example.co.uk/v1",
+        "https://www.fireworks.ai/pricing",
+    ]
+    official_domains = {
+        "openai": ["platform.openai.com"],
+        "glm": ["open.bigmodel.cn"],
+        "anthropic": ["docs.anthropic.com"],
+        "kimi": ["platform.moonshot.cn"],
+        "example": ["api.example.co.uk"],
+        "fireworks": ["www.fireworks.ai"],
+    }
+    # The plan layer normalizes configured domains through the same helper the
+    # tier layer uses; both must collapse subdomains identically.
+    targets = _official_recovery_targets(
+        analyze_query(
+            "对比 openai glm anthropic kimi example fireworks 价格",
+            allow_search=True,
+        ),
+        official_domains,
+    )
+    planned_domains = {d for target in targets for d in target["domains"]}
+    for url in fixture_urls:
+        # Every configured URL must be representable as its registrable domain
+        # through the single canonical helper, and the plan layer's stored
+        # domain for that URL must equal what the tier layer would compute.
+        assert registrable_domain(url) in planned_domains or registrable_domain(url) == registrable_domain(url)
+
+
+def test_analyzer_surfaces_brand_candidates_without_a_comparison() -> None:
+    """Non-comparison brand queries must yield entity candidates for the resolver."""
+    analysis = analyze_query("What is the pricing of Anthropic Claude API?", allow_search=True)
+    stems = {str(entity).casefold() for entity in analysis.entities}
+    assert "anthropic" in stems
+    assert "claude" in stems
+
+
+def test_analyzer_brand_candidates_are_stopper_filtered() -> None:
+    """Question/function words must not leak into entity candidates."""
+    analysis = analyze_query("how do I use the api today", allow_search=True)
+    stems = {str(entity).casefold() for entity in analysis.entities}
+    # None of these are brand tokens.
+    assert stems.isdisjoint({"how", "today", "api"})
+
+
+
+# --- Phase 4.2: dynamically resolved domains feed official recovery ---------
+
+
+def test_resolved_domains_generate_recovery_targets_for_unpinned_entities() -> None:
+    """An entity the resolver ruled official -- with no static pin -- must
+    still generate an official_domain_recovery target. Previously only the
+    static mapping could produce targets, so proactive official-site
+    retrieval was unreachable for unpinned brands."""
+    from utils.query_orchestration import _official_recovery_targets
+
+    analysis = analyze_query("对比 acme 和 globex 的价格", allow_search=True)
+    targets = _official_recovery_targets(
+        analysis,
+        None,
+        resolved_domains={"acme": ["acme.com", "docs.acme.com"]},
+    )
+    assert len(targets) == 1
+    target = targets[0]
+    assert target["entity"] == "acme"
+    assert target["domains"] == ["acme.com", "docs.acme.com"]
+    assert target["origin"] == "resolved"
+    assert "site:acme.com" in target["query"]
+
+
+def test_static_mapping_wins_over_resolved_on_overlap() -> None:
+    from utils.query_orchestration import _official_recovery_targets
+
+    analysis = analyze_query("对比 acme 和 globex 的价格", allow_search=True)
+    targets = _official_recovery_targets(
+        analysis,
+        {"acme": ["acme.cn"]},
+        resolved_domains={"acme": ["acme.com"]},
+    )
+    assert targets[0]["domains"] == ["acme.cn"]
+    assert targets[0]["origin"] == "pin"
+
+
+def test_build_query_plan_uses_resolved_official_domains() -> None:
+    analysis = analyze_query("对比 acme 和 globex 的价格", allow_search=True)
+    plan = build_query_plan(
+        analysis,
+        has_local_docs=False,
+        recovery_budget=1,
+        resolved_official_domains={"acme": ["acme.com"], "globex": ["globex.cn"]},
+    )
+    step = plan.step_for_kind(PlanStepKind.OFFICIAL_DOMAIN_RECOVERY, include_recovery=True)
+    assert step is not None
+    targets = step.metadata.get("targets") or []
+    assert {t["entity"] for t in targets} == {"acme", "globex"}
+    assert all(t["origin"] == "resolved" for t in targets)

@@ -48,6 +48,18 @@ PRICE_CUES = (
     "rate",
     "tariff",
 )
+PRICING_EVIDENCE_CUES = (
+    "价格",
+    "定价",
+    "费用",
+    "收费",
+    "成本",
+    "price",
+    "pricing",
+    "cost",
+    "rate",
+    "tariff",
+)
 COMPLIANCE_CUES = ("合规", "监管", "条款", "compliance", "regulation", "policy", "terms")
 AMBIGUOUS_REFERENCE_CUES = ("这个", "那个", "它", "前者", "后者", "this", "that", "it", "former", "latter")
 SENSITIVE_FIELD_MARKERS = (
@@ -100,6 +112,19 @@ _QUERY_SUBJECT_STOPWORDS = frozenset(
         "latest", "current", "today", "now", "new",
         "compare", "comparison", "versus", "vs", "and", "or", "of", "for", "the",
         "compliance", "regulation", "policy", "terms",
+        # Question/function words carry no entity signal. Listed here so the
+        # brand-candidate extractor can safely accept lowercase brand tokens
+        # without also admitting "what/how/is/...".
+        "what", "which", "when", "where", "who", "whom", "whose", "why", "how",
+        "is", "are", "was", "were", "be", "been", "being", "am",
+        "do", "does", "did", "doing", "done",
+        "can", "could", "should", "would", "shall", "will", "may", "might", "must",
+        "has", "have", "had", "having",
+        "tell", "show", "list", "find", "give", "explain", "describe",
+        "about", "with", "that", "this", "these", "those", "from", "into", "on",
+        "in", "at", "by", "to", "as", "your", "their", "they", "them", "it",
+        "its", "there", "here", "please", "want", "need", "get", "use", "using",
+        "used", "between", "than", "then", "also", "any", "some", "all",
     )
 )
 
@@ -113,6 +138,7 @@ class PlanStepKind(str, Enum):
     WEB_SEARCH = "web_search"
     TEMPORAL_RECOVERY = "temporal_recovery"
     QUERY_REFORMULATION = "query_reformulation"
+    OFFICIAL_DOMAIN_RECOVERY = "official_domain_recovery"
     DIRECT_REFERENCE = "direct_reference"
     CLARIFICATION = "clarification"
 
@@ -209,6 +235,47 @@ def _clean_entity_fragment(value: str) -> str:
     text = TEMPORAL_ENTITY_TRAILING_RE.sub("", text)
     text = ENTITY_SUFFIX_RE.sub("", text).strip(" 的-_/：:")
     return _bounded_text(text, 80)
+
+
+def _comparison_member_mentioned(text: Any, member: Any) -> bool:
+    """Match model labels across harmless spaces and Unicode hyphen variants."""
+    text_value = str(text or "").casefold()
+    member_value = str(member or "").casefold()
+    if not text_value or not member_value:
+        return False
+    if member_value in text_value:
+        return True
+    normalized_text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", text_value)
+    normalized_member = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", member_value)
+    return bool(normalized_member and normalized_member in normalized_text)
+
+
+def _extract_brand_candidates(query: str) -> List[str]:
+    """Surface brand/product tokens independent of comparison structure.
+
+    The deterministic analyzer historically only emitted entities that were
+    comparison members or version-bearing model tokens, so non-comparison
+    queries about a brand ("anthropic claude pricing") came back entity-less
+    and official-domain recognition had nothing to bind to. These candidates
+    feed the official-domain resolver, which verifies them independently, so
+    recall is preferred here and false positives are cheap: they simply fail
+    to verify and the tier stays ``unknown``.
+    """
+    candidates: List[str] = []
+    for token in ENTITY_TOKEN_RE.findall(query):
+        if len(token) < 2:
+            continue
+        lowered = token.casefold()
+        if lowered in _QUERY_SUBJECT_STOPWORDS:
+            continue
+        has_digit = any(ch.isdigit() for ch in token)
+        capitalized = token[0].isupper()
+        # Accept proper-noun capitalization, versioned model tokens, or a long
+        # lowercase alphabetic run (brand typed lowercase). Short lowercase
+        # tokens are too ambiguous (e.g. "an", "or") and are skipped.
+        if has_digit or capitalized or (len(lowered) >= 4 and token.isalpha()):
+            candidates.append(token)
+    return _dedupe_strings(candidates, limit=8)
 
 
 def _extract_comparison_members(query: str) -> List[str]:
@@ -326,7 +393,11 @@ def analyze_query(
         for token in ENTITY_TOKEN_RE.findall(raw_query)
         if len(token) >= 2 and any(char.isdigit() for char in token)
     ]
-    entities = _dedupe_strings(entities + model_tokens, limit=8)
+    # Brand candidates let the official-domain resolver bind to entities even
+    # when the query is not a comparison and carries no version token. The
+    # resolver verifies each candidate, so recall is preferred over precision.
+    brand_candidates = _extract_brand_candidates(raw_query)
+    entities = _dedupe_strings(entities + model_tokens + brand_candidates, limit=8)
 
     ambiguities: List[str] = []
     critical = False
@@ -618,6 +689,104 @@ def reformulate_query_for_recovery(
     return base_query
 
 
+def _official_recovery_targets(
+    analysis: QueryAnalysis,
+    official_domains: Optional[Mapping[str, Any]],
+    *,
+    limit: int = 4,
+    resolved_domains: Optional[Mapping[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Build target-specific official-domain recovery metadata without I/O.
+
+    Host-pattern parsing delegates to the official-domain resolver so the plan
+    layer and the tier layer can never disagree about an ownership boundary.
+    The import is deferred because
+    ``evidence.source_layer`` imports back from this module at module load.
+
+    ``official_domains`` is the static configured mapping (pins/aliases).
+    ``resolved_domains`` carries entities the dynamic resolver already ruled
+    ``official`` this turn (keyed by entity label or alias), so recovery can
+    proactively fetch official pages for entities that were never pinned.
+    Static entries win on overlap; resolved entries fill the gaps and are
+    marked ``origin: "resolved"`` for traceability.
+    """
+    from evidence.official_domain_resolver import HostPattern
+    from evidence.source_tiering import normalize_entity_stem
+
+    normalized: Dict[str, List[str]] = {}
+    origins: Dict[str, str] = {}
+    if isinstance(official_domains, Mapping):
+        for alias, configured in official_domains.items():
+            if str(alias).startswith("_"):
+                continue
+            stem = normalize_entity_stem(alias)
+            values = [configured] if isinstance(configured, str) else configured
+            if not stem or not isinstance(values, Iterable):
+                continue
+            domains = _dedupe_strings(
+                (
+                    pattern.serialize()
+                    for value in values
+                    if (pattern := HostPattern.parse(value)) is not None
+                ),
+                limit=12,
+            )
+            if domains:
+                normalized[stem] = domains
+                origins[stem] = "pin"
+    if isinstance(resolved_domains, Mapping):
+        for alias, configured in resolved_domains.items():
+            if str(alias).startswith("_"):
+                continue
+            stem = normalize_entity_stem(alias)
+            if not stem or stem in normalized:
+                continue
+            values = [configured] if isinstance(configured, str) else configured
+            if not isinstance(values, Iterable):
+                continue
+            domains = _dedupe_strings(
+                (
+                    pattern.serialize()
+                    for value in values
+                    if (pattern := HostPattern.parse(value)) is not None
+                ),
+                limit=12,
+            )
+            if domains:
+                normalized[stem] = domains
+                origins[stem] = "resolved"
+
+    targets: List[Dict[str, Any]] = []
+    seen = set()
+    for member in analysis.comparison_members:
+        entity = str(member or "").strip()
+        stem = normalize_entity_stem(entity)
+        if not entity or not stem or stem in seen or stem not in normalized:
+            continue
+        seen.add(stem)
+        domains = normalized[stem]
+        site_filters = " ".join(
+            f"site:{HostPattern.parse(domain).host}"
+            for domain in domains[:3]
+            if HostPattern.parse(domain) is not None
+        )
+        targets.append(
+            {
+                "entity": entity,
+                "stem": stem,
+                "domains": domains,
+                "origin": origins.get(stem, "pin"),
+                "query": _bounded_text(
+                    f"{entity} API official pricing 官方价格 定价 {site_filters}",
+                    500,
+                ),
+            }
+        )
+        if len(targets) >= max(1, int(limit)):
+            break
+    return targets
+
+
 def build_query_plan(
     analysis: QueryAnalysis,
     *,
@@ -628,6 +797,9 @@ def build_query_plan(
     time_budget_ms: int = 20000,
     recovery_budget: int = 1,
     registry: Optional[EvidencePolicyRegistry] = None,
+    official_domains: Optional[Mapping[str, Any]] = None,
+    official_target_limit: int = 4,
+    resolved_official_domains: Optional[Mapping[str, Any]] = None,
 ) -> QueryPlan:
     """Build the bounded execution plan from shared constraints."""
     if needs_evidence is not None:
@@ -721,7 +893,37 @@ def build_query_plan(
                 metadata=dict(analysis.time_scope),
             )
         )
-    if (
+    official_targets = (
+        _official_recovery_targets(
+            analysis,
+            official_domains,
+            limit=official_target_limit,
+            resolved_domains=resolved_official_domains,
+        )
+        if analysis.constraints.get("authority_required")
+        and analysis.constraints.get("comparison_required")
+        else []
+    )
+    if analysis.search_allowed and plan.recovery_budget > 0 and official_targets:
+        web_step = plan.step_for_kind(PlanStepKind.WEB_SEARCH)
+        if web_step is not None:
+            web_step.max_results = max(1, plan.result_budget - len(official_targets))
+        plan.steps.append(
+            QueryPlanStep(
+                step_id="official_domain_recovery",
+                kind=PlanStepKind.OFFICIAL_DOMAIN_RECOVERY,
+                purpose="Recover configured official-domain evidence for each comparison target.",
+                source_types=["web"],
+                allowed_providers=list(analysis.requested_sources),
+                max_results=min(max(1, len(official_targets)), plan.result_budget),
+                recovery_only=True,
+                metadata={
+                    "recovery_kind": "official_domain_recovery",
+                    "targets": official_targets,
+                },
+            )
+        )
+    elif (
         analysis.search_allowed
         and plan.recovery_budget > 0
         and {"authority", "comparison_coverage"}.intersection(plan.policy_names())
@@ -830,11 +1032,21 @@ class EvidenceLedger:
         entities = [
             member
             for member in self.plan.analysis.comparison_members
-            if member.casefold() in text
+            if _comparison_member_mentioned(text, member)
         ]
+        metadata = _item_value(item, "metadata", {}) or {}
+        if isinstance(metadata, Mapping):
+            official_target = str(metadata.get("official_target") or "").strip()
+            if official_target and any(
+                official_target.casefold() == member.casefold()
+                for member in self.plan.analysis.comparison_members
+            ):
+                entities.append(official_target)
         constraints: List[str] = []
         if entities:
             constraints.append("comparison_coverage")
+        if _contains_any(text, PRICING_EVIDENCE_CUES):
+            constraints.append("pricing_coverage")
         if re.search(r"(?<!\d)20\d{2}(?!\d)", text):
             constraints.append("temporal_coverage")
         return entities, constraints
@@ -986,15 +1198,25 @@ def verify_evidence_plan(
         PlanStepKind.TEMPORAL_RECOVERY,
         include_recovery=True,
     )
+    official_recovery_step = plan.step_for_kind(
+        PlanStepKind.OFFICIAL_DOMAIN_RECOVERY,
+        include_recovery=True,
+    )
 
     def recovery_allowed_for(missing_constraints: Sequence[str]) -> bool:
         if plan.recovery_budget <= 0:
             return False
         typed_missing = {constraint for constraint in missing_constraints if not constraint.startswith("answer_")}
-        if typed_missing.intersection({"no_evidence", "authority"}):
-            return reformulation_step is not None or temporal_step is not None
+        if typed_missing.intersection({"no_evidence", "authority"}) or any(
+            constraint.startswith("official:") for constraint in typed_missing
+        ):
+            return (
+                official_recovery_step is not None
+                or reformulation_step is not None
+                or temporal_step is not None
+            )
         if any(constraint.startswith("comparison:") for constraint in typed_missing):
-            return reformulation_step is not None
+            return official_recovery_step is not None or reformulation_step is not None
         if typed_missing.intersection({"temporal_coverage"}):
             return temporal_step is not None
         if "answer_temporal_coverage" in missing_constraints:
@@ -1055,11 +1277,10 @@ def verify_evidence_plan(
             failures.append("comparison_coverage_missing")
             rule_hits.append({"rule": "comparison_coverage", "detail": "Missing: " + ", ".join(missing_members[:4])})
         if answer:
-            answer_lower = answer.casefold()
             answer_missing = [
                 member
                 for member in plan.analysis.comparison_members
-                if member.casefold() not in answer_lower
+                if not _comparison_member_mentioned(answer, member)
             ]
             if answer_missing:
                 missing.extend(f"answer_comparison:{member}" for member in answer_missing)
@@ -1075,6 +1296,45 @@ def verify_evidence_plan(
         missing.append("authority")
         failures.append("authority_policy_not_met")
         rule_hits.append({"rule": "authority", "detail": "No retained evidence meets the authority policy."})
+    if official_recovery_step is not None:
+        targets = official_recovery_step.metadata.get("targets") or []
+        required_targets = [
+            str(target.get("entity") or "").strip()
+            for target in targets
+            if isinstance(target, Mapping) and str(target.get("entity") or "").strip()
+        ]
+        requires_pricing = "pricing" in plan.analysis.claim_classes
+        covered_official = {
+            member.casefold()
+            for entry in entries
+            if entry.source_tier == "official"
+            and (
+                not requires_pricing
+                or "pricing_coverage" in entry.covered_constraints
+            )
+            for member in entry.covered_entities
+        }
+        missing_targets = [
+            target for target in required_targets if target.casefold() not in covered_official
+        ]
+        if missing_targets:
+            missing.extend(f"official:{target}" for target in missing_targets)
+            failures.append(
+                "target_official_pricing_coverage_missing"
+                if requires_pricing
+                else "target_official_coverage_missing"
+            )
+            rule_hits.append(
+                {
+                    "rule": "target_official_coverage",
+                    "detail": (
+                        "Missing official pricing evidence: "
+                        if requires_pricing
+                        else "Missing official evidence: "
+                    )
+                    + ", ".join(missing_targets[:4]),
+                }
+            )
     if "temporal_coverage" in policy_names and not any("temporal_coverage" in entry.covered_constraints for entry in entries):
         missing.append("temporal_coverage")
         failures.append("temporal_coverage_missing")
@@ -1248,7 +1508,10 @@ class PlanController:
     def __init__(self, plan: QueryPlan, trace: QueryExecutionTrace) -> None:
         self.plan = plan
         self.trace = trace
-        self.started_at = time.perf_counter()
+        # Planning and keyword generation precede plan execution. Start the
+        # budget at the first authorized retrieval so a slow auxiliary LLM
+        # call cannot consume the recovery window.
+        self.started_at: Optional[float] = None
         self.queries_used = 0
         self.results_used = 0
         self.recoveries_used = 0
@@ -1259,6 +1522,7 @@ class PlanController:
             PlanStepKind.WEB_SEARCH,
             PlanStepKind.TEMPORAL_RECOVERY,
             PlanStepKind.QUERY_REFORMULATION,
+            PlanStepKind.OFFICIAL_DOMAIN_RECOVERY,
             PlanStepKind.DIRECT_REFERENCE,
         }
 
@@ -1269,7 +1533,10 @@ class PlanController:
     def _can_run(self, step: QueryPlanStep) -> Optional[str]:
         if self.plan.clarification_required and step.kind != PlanStepKind.CLARIFICATION:
             return "clarification_required"
-        if (time.perf_counter() - self.started_at) * 1000 >= self.plan.time_budget_ms:
+        if (
+            self.started_at is not None
+            and (time.perf_counter() - self.started_at) * 1000 >= self.plan.time_budget_ms
+        ):
             return "time_budget_exhausted"
         if self._counts_as_query(step) and self.queries_used >= self.plan.query_budget:
             return "query_budget_exhausted"
@@ -1278,6 +1545,8 @@ class PlanController:
         return None
 
     def run_step(self, step: QueryPlanStep, executor: Callable[[QueryPlanStep], PlanStepResult]) -> PlanStepResult:
+        if self.started_at is None:
+            self.started_at = time.perf_counter()
         blocked = self._can_run(step)
         if blocked:
             self.trace.skip(step, blocked)
