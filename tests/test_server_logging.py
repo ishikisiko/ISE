@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import server
+from utils import server_logging
 
 
 def _read_events(directory: Path) -> list[dict[str, Any]]:
@@ -33,6 +35,51 @@ def _enable_test_logging(monkeypatch, directory: Path) -> None:
         },
     )
     monkeypatch.setattr(server, "load_base_config", lambda: {"LLM_PROVIDER": "stub"})
+
+
+def test_process_logging_keeps_terminal_output_and_avoids_duplicates(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    root = logging.Logger("test-server-root", level=logging.WARNING)
+    named_logger = logging.Logger("test-server-named", level=logging.INFO)
+
+    def get_logger(name: str | None = None) -> logging.Logger:
+        return named_logger if name else root
+
+    monkeypatch.setattr(server_logging.logging, "getLogger", get_logger)
+    settings = {
+        "enabled": True,
+        "dir": str(tmp_path),
+        "capture_stdio": False,
+    }
+
+    try:
+        server_logging.configure_process_logging(settings)
+        server_logging.configure_process_logging(settings)
+        console_handlers = [
+            handler
+            for handler in root.handlers
+            if isinstance(handler, logging.StreamHandler)
+            and not isinstance(handler, logging.FileHandler)
+        ]
+        file_handlers = [
+            handler
+            for handler in root.handlers
+            if isinstance(handler, logging.FileHandler)
+        ]
+
+        assert len(console_handlers) == 1
+        assert len(file_handlers) == 1
+        root.info("terminal-sync-check")
+        assert "terminal-sync-check" in capsys.readouterr().err
+        assert "terminal-sync-check" in (tmp_path / "server.log").read_text(
+            encoding="utf-8"
+        )
+    finally:
+        for handler in root.handlers:
+            handler.close()
 
 
 def test_json_answer_persists_request_steps_and_complete_response(

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from typing import Any, Dict, List, Optional, Type
 
 from langchain_core.callbacks import CallbackManagerForToolRun
@@ -54,6 +55,16 @@ class SkillQueryInput(BaseModel):
 class LocalDocInput(BaseModel):
     """Input schema for local document tool."""
     query: str = Field(description="The query for local documents")
+
+
+class FetchUrlInput(BaseModel):
+    """Input schema for the URL fetch tool."""
+
+    url: str = Field(description="The absolute http(s) URL to fetch and read")
+    objective: str = Field(
+        default="",
+        description="Optional context: the user question or what to look for on the page",
+    )
 
 
 class ReActSearchTool(BaseTool):
@@ -598,6 +609,185 @@ class ReActSkillTool(BaseTool):
         self._timing_recorder = recorder
 
 
+class ReActFetchUrlTool(BaseTool):
+    """LangChain Tool that fetches and reads the main text of a given URL.
+
+    Unlike ``web_search`` (which returns shallow snippets), this tool extracts
+    the full page content so the agent can ground answers in primary
+    documentation such as an official API reference. Extraction reuses the
+    shared :class:`ReferenceExtractorRouter`: a zero-key direct HTTP fetch is
+    tried first, then configured extraction APIs (Firecrawl/Tavily/Parallel)
+    act as fallback for JS-heavy pages.
+    """
+
+    name: str = "fetch_url"
+    description: str = (
+        "Fetch and read the main text content of a specific web page URL. "
+        "Use this when web_search snippets are too shallow to answer the "
+        "question, for example to read an official documentation page, an API "
+        "reference, a spec, or a changelog whose URL you already found. "
+        "Input is a URL and optionally an objective describing what you need. "
+        "Returns the extracted page text (truncated)."
+    )
+    args_schema: Type[BaseModel] = FetchUrlInput
+    return_direct: bool = False
+
+    app_config: Dict[str, Any] = Field(default_factory=dict, exclude=True)
+    max_calls_per_query: int = Field(default=3, exclude=True)
+    max_chars: int = Field(default=8000, exclude=True)
+    _calls_in_run: int = PrivateAttr(default=0)
+    _router: Any = PrivateAttr(default=None)
+    _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def __init__(
+        self,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        max_calls_per_query: int = 3,
+        max_chars: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
+        app_config = config or {}
+        if max_chars is None:
+            orch = app_config.get("orchestration") or {}
+            fetch_cfg = orch.get("fetch_url") if isinstance(orch, dict) else None
+            if isinstance(fetch_cfg, dict):
+                try:
+                    max_chars = int(fetch_cfg.get("max_chars") or 0) or None
+                except (TypeError, ValueError):
+                    max_chars = None
+        super().__init__(
+            app_config=app_config,
+            max_calls_per_query=max(1, int(max_calls_per_query)),
+            max_chars=max(200, int(max_chars or 8000)),
+            **kwargs,
+        )
+
+    def _get_router(self) -> Any:
+        """Build the extraction router lazily from runtime configuration."""
+        if self._router is not None:
+            return self._router
+        from search.reference_fetch import (
+            ReferenceExtractorRouter,
+            build_reference_extractors,
+        )
+
+        extractors = build_reference_extractors(self.app_config or {})
+        if not extractors:
+            self._router = None
+            return None
+        self._router = ReferenceExtractorRouter(extractors)
+        return self._router
+
+    def _run(
+        self,
+        url: str,
+        objective: str = "",
+        run_manager: Optional[CallbackManagerForToolRun] = None,
+    ) -> str:
+        """Fetch ``url`` and return its main text, truncated to ``max_chars``."""
+        self._last_evidence_records = []
+        if self._calls_in_run >= self.max_calls_per_query:
+            return json.dumps(
+                {
+                    "status": "budget_exhausted",
+                    "reason": "max_calls_per_query",
+                    "limit": self.max_calls_per_query,
+                },
+                ensure_ascii=False,
+            )
+
+        raw_url = str(url or "").strip()
+        objective = str(objective or "").strip()
+        if not raw_url:
+            return "Fetch failed: no URL provided."
+        if not (raw_url.startswith("http://") or raw_url.startswith("https://")):
+            return (
+                f"Fetch failed: URL must start with http:// or https:// "
+                f"(got: {raw_url[:80]})."
+            )
+
+        router = self._get_router()
+        if router is None:
+            # Do not burn budget on a misconfiguration; let the caller retry.
+            return (
+                "Fetch failed: no page extractor is configured. "
+                "Enable orchestration.directFetch to use this tool."
+            )
+
+        self._calls_in_run += 1
+        started_at = time.perf_counter()
+        try:
+            extraction = router.extract([raw_url], objective=objective or None)
+        except Exception as exc:  # noqa: BLE001 - surface fetch errors to the agent
+            return f"Fetch failed: {exc}"
+
+        content_obj = next(
+            (item for item in extraction.contents if (item.content or "").strip()),
+            None,
+        )
+        duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+
+        if content_obj is None:
+            failure = extraction.failures[0] if extraction.failures else None
+            error_type = str(
+                getattr(failure, "error_type", "") or "no_content"
+            ) if failure else "no_content"
+            return (
+                f"Fetch failed: could not extract content from {raw_url} "
+                f"({error_type}). The page may be blocked, JS-only, or require "
+                f"an extraction API key."
+            )
+
+        full_text = (content_obj.content or "").strip()
+        title = str(content_obj.title or "").strip()
+        provider = str(getattr(content_obj, "provider", "") or "").strip()
+        resolved_url = str(content_obj.url or raw_url).strip()
+        truncated = len(full_text) > self.max_chars
+        page_text = full_text[: self.max_chars]
+        if truncated:
+            page_text += f"\n... [truncated; {len(full_text)} chars total]"
+
+        self._last_evidence_records = [
+            {
+                "source_type": "web",
+                "source_tier": "fetched",
+                "reference": resolved_url,
+                "title": title or resolved_url,
+                "content": page_text,
+                "metadata": {
+                    "retrieval_kind": "fetch_url",
+                    "provider": provider,
+                    "content_chars": len(full_text),
+                    "truncated": truncated,
+                    "duration_ms": duration_ms,
+                },
+            }
+        ]
+
+        header_parts = [f"Title: {title or 'Untitled'}", f"URL: {resolved_url}"]
+        if provider:
+            header_parts.append(f"Extractor: {provider}")
+        header_parts.append(f"Chars: {len(full_text)}")
+        return "\n".join(header_parts) + "\n\n" + page_text
+
+    def reset_budget(self) -> None:
+        self._calls_in_run = 0
+        self._last_evidence_records = []
+
+    def set_analysis(self, analysis: Optional[QueryAnalysis]) -> None:
+        """Compatibility hook; fetch_url uses no query analysis."""
+
+    def get_last_evidence_records(self) -> List[Dict[str, Any]]:
+        return [dict(record) for record in self._last_evidence_records]
+
+    def get_budget_status(self) -> Dict[str, int]:
+        return {"limit": self.max_calls_per_query, "used": self._calls_in_run}
+
+
 def create_react_tools_from_config(
     config: Dict[str, Any],
     llm: Optional[BaseChatModel] = None,
@@ -650,6 +840,14 @@ def create_react_tools_from_config(
                 search_client=search_client,
                 config=config,
                 max_calls_per_query=tool_budget("web_search", 3),
+            )
+        )
+        # Let the agent read a specific page (e.g. official docs) that
+        # web_search only surfaced as a shallow snippet. Independent budget.
+        tools.append(
+            ReActFetchUrlTool(
+                config=config,
+                max_calls_per_query=tool_budget("fetch_url", 3),
             )
         )
         if llm:

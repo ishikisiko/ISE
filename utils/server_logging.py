@@ -196,6 +196,14 @@ def _has_file_handler(logger: logging.Logger, path: str) -> bool:
     )
 
 
+def _has_console_handler(logger: logging.Logger) -> bool:
+    return any(
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+        for handler in logger.handlers
+    )
+
+
 def configure_process_logging(settings: Dict[str, Any]) -> None:
     """Capture Python, Flask, and Werkzeug output in durable server files.
 
@@ -231,6 +239,19 @@ def configure_process_logging(settings: Dict[str, Any]) -> None:
             stderr = _TeeStream(sys.stderr, os.path.join(directory, "stderr.log"))
             _TEE_STREAMS.append(stderr)
             sys.stderr = stderr
+
+    # Installing the durable file handler prevents Werkzeug from configuring
+    # its usual terminal handler, so provide one explicitly.
+    if not _has_console_handler(root):
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s %(name)s %(message)s",
+                datefmt="%Y-%m-%dT%H:%M:%S%z",
+            )
+        )
+        root.addHandler(console_handler)
 
     logging.getLogger(__name__).info(
         "Persistent server logging enabled under %s", os.path.abspath(directory)

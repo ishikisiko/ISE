@@ -162,7 +162,8 @@ class ReactAgentOrchestrator:
             active_tools = [
                 tool
                 for tool in self.tools
-                if allow_search or tool.name not in {"web_search", "search_recovery"}
+                if allow_search
+                or tool.name not in {"web_search", "search_recovery", "fetch_url"}
             ]
             for tool in active_tools:
                 bind_recorder = getattr(tool, "set_timing_recorder", None)

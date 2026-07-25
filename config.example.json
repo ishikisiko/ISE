@@ -106,6 +106,7 @@
         "new_evidence_min_ratio": 0.1,
         "tool_budgets": {
             "web_search": 3,
+            "fetch_url": 3,
             "search_recovery": 2,
             "local_docs": 2
         },

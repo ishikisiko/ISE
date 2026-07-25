@@ -758,7 +758,7 @@ class ReactLoopGraphRunner:
 
             if (
                 self.timing_recorder is not None
-                and tool_name in {"web_search", "search_recovery"}
+                and tool_name in {"web_search", "search_recovery", "fetch_url"}
             ):
                 self.timing_recorder.record_tool_call(
                     tool=tool_name,
@@ -884,6 +884,7 @@ class ReactLoopGraphRunner:
         """
         source_type_map = {
             "web_search": "web",
+            "fetch_url": "web",
             "search_recovery": "web",
             "finance_market_data": "domain",
             "weather_conditions": "domain",

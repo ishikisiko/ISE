@@ -9,6 +9,7 @@ from pathlib import Path
 from langchain.langchain_orchestrator import LangChainOrchestrator
 from langchain.langchain_rag import SearchRAGChain
 from langchain.langchain_react_tools import (
+    ReActFetchUrlTool,
     ReActSearchTool,
     create_react_tools_from_config,
 )
@@ -65,6 +66,7 @@ def test_shipped_config_has_only_loop_and_per_tool_budgets() -> None:
     assert "postcheck" not in config
     assert config["termination"]["tool_budgets"] == {
         "web_search": 3,
+        "fetch_url": 3,
         "search_recovery": 2,
         "local_docs": 2,
     }
@@ -85,6 +87,44 @@ def test_web_tool_enforces_its_own_budget() -> None:
     assert tool.get_budget_status() == {"limit": 1, "used": 1}
     tool.reset_budget()
     assert tool.get_budget_status() == {"limit": 1, "used": 0}
+
+
+def test_fetch_url_tool_enforces_its_own_budget() -> None:
+    tool = ReActFetchUrlTool(config={}, max_calls_per_query=1)
+    # Burn the single allowed call without touching the network.
+    tool._calls_in_run = 1
+    exhausted = json.loads(tool._run("https://example.com"))
+    assert exhausted == {
+        "status": "budget_exhausted",
+        "reason": "max_calls_per_query",
+        "limit": 1,
+    }
+    assert tool.get_last_evidence_records() == []
+    tool.reset_budget()
+    assert tool.get_budget_status() == {"limit": 1, "used": 0}
+
+
+def test_fetch_url_rejects_non_http_input_without_burning_budget() -> None:
+    tool = ReActFetchUrlTool(config={}, max_calls_per_query=2)
+    for bad in ("", "not-a-url", "ftp://example.com/x"):
+        result = tool._run(bad)
+        assert result.startswith("Fetch failed:")
+    # All inputs were rejected before extraction, so no budget consumed.
+    assert tool.get_budget_status() == {"limit": 2, "used": 0}
+    assert tool.get_last_evidence_records() == []
+
+
+def test_fetch_url_is_registered_with_independent_budget() -> None:
+    tools = create_react_tools_from_config(
+        config={"termination": {"tool_budgets": {"web_search": 4, "fetch_url": 3}}},
+        search_client=_SearchClient(),
+    )
+    fetch_tools = [t for t in tools if t.name == "fetch_url"]
+    assert len(fetch_tools) == 1
+    assert fetch_tools[0].get_budget_status() == {"limit": 3, "used": 0}
+    # web_search keeps its own budget.
+    web_tools = [t for t in tools if t.name == "web_search"]
+    assert web_tools and web_tools[0].max_calls_per_query == 4
 
 
 def test_web_tool_emits_target_bound_structured_evidence() -> None:

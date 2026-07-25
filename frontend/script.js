@@ -392,9 +392,10 @@ document.addEventListener("DOMContentLoaded", () => {
             const result = turn && turn.result && typeof turn.result === "object" ? turn.result : null;
             const refs = appendTurn(turn.query || "", []);
             if (result) {
-                // Full restore: synthesize workflow steps and render sources,
-                // docs, notes and meta exactly like a live answer.
-                for (const step of synthesizeSteps(result)) refs.workflow.apply(step);
+                // Full restore: replay the recorded loop trace when present,
+                // otherwise synthesize steps, then render sources, docs,
+                // notes and meta exactly like a live answer.
+                for (const step of restoreSteps(result)) refs.workflow.apply(step);
                 renderResult(refs, result);
             } else {
                 // Legacy turns recorded before full-result persistence.
@@ -692,6 +693,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (finished) return;
                 finished = true;
                 stopTicker();
+                if (activeId && steps.has(activeId)) {
+                    const node = steps.get(activeId);
+                    node.root.classList.remove("is-active");
+                    node.root.classList.add("is-done");
+                }
                 activeId = null;
                 const doneCount = Array.from(steps.values()).filter((n) =>
                     n.root.classList.contains("is-done")
@@ -756,12 +762,34 @@ document.addEventListener("DOMContentLoaded", () => {
         local_rag: "本地检索",
         direct_llm: "直接回答",
         small_talk: "闲聊",
-        domain_api: "领域接口",
+        skill: "结构化 Skill",
         image_content_present: "图片理解",
         search_unavailable: "本地回退",
-        react_fallback: "深度检索",
-        react_agent: "ReAct",
+        agentic_loop: "Agentic Loop",
+        clarification_required: "需要澄清",
+        react_agent_error: "执行异常",
     };
+
+    function answerForDisplay(data) {
+        const answer = (data && data.answer ? String(data.answer) : "").trim() || "未能生成答案";
+        const structuredReferenceMarkers = [];
+
+        if (Array.isArray(data && data.search_hits) && data.search_hits.length) {
+            structuredReferenceMarkers.push("\n\n**网络来源：**");
+        }
+        if (Array.isArray(data && data.retrieved_docs) && data.retrieved_docs.length) {
+            structuredReferenceMarkers.push("\n\n**本地文档来源：**");
+        }
+
+        // The API keeps these Markdown reference lists for CLI consumers; the
+        // web UI renders the same records as structured source/document panels.
+        const markerPositions = structuredReferenceMarkers
+            .map((marker) => answer.indexOf(marker))
+            .filter((position) => position >= 0);
+        if (!markerPositions.length) return answer;
+
+        return answer.slice(0, Math.min(...markerPositions)).trim() || answer;
+    }
 
     function renderSources(turn, hits) {
         if (!Array.isArray(hits) || !hits.length) return;
@@ -886,12 +914,6 @@ document.addEventListener("DOMContentLoaded", () => {
             hasMeta = true;
         }
 
-        if (control.fallback_triggered) {
-            if (hasMeta) row.appendChild(el("span", "meta-sep", "·"));
-            row.appendChild(el("span", "meta-flag", "已启用深度检索恢复"));
-            hasMeta = true;
-        }
-
         if (hasMeta) turn.appendChild(row);
 
         // 耗时明细（受「耗时明细」设置控制）
@@ -921,7 +943,7 @@ document.addEventListener("DOMContentLoaded", () => {
     function renderResult(refs, data) {
         refs.workflow.finalize(data.response_times && data.response_times.total_ms);
 
-        const answer = (data && data.answer ? String(data.answer) : "").trim() || "未能生成答案";
+        const answer = answerForDisplay(data);
         const answerEl = el("div", "answer");
         answerEl.innerHTML = renderMarkdown(answer);
         highlightIn(answerEl);
@@ -936,8 +958,42 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // ------------------------------------------------------------------
-    // 降级路径：从最终结果合成步骤
+    // 降级路径：真实轨迹回放与结果合成步骤
     // ------------------------------------------------------------------
+    const LOOP_STATUS_META = {
+        succeeded: { text: "循环成功", tone: "ok", status: "done" },
+        exhausted: { text: "迭代用尽", tone: "warn", status: "done" },
+        stagnated: { text: "检索停滞", tone: "warn", status: "error" },
+        unrecoverable: { text: "不可恢复", tone: "err", status: "error" },
+        evidence_insufficient: { text: "证据不足", tone: "warn", status: "error" },
+        clarification_required: { text: "需要澄清", tone: "warn", status: "error" },
+    };
+
+    const LOOP_REASON_LABELS = {
+        constraints_satisfied: "约束满足",
+        continue: "继续检索",
+        final_answer_rejected: "答案未达标，继续补充",
+        exhausted: "迭代用尽",
+        stagnated: "检索停滞",
+        unrecoverable: "工具持续失败",
+        evidence_insufficient: "证据不足",
+        clarification_required: "需要澄清",
+        invalid_tool_request: "工具调用格式无效",
+        process_narration: "过程性文本，继续补充",
+    };
+
+    // M5 起每轮结果携带 control.react_trace：loop act/observe/evaluate 的
+    // 实际 tracer 事件。恢复会话或非流式降级时优先回放真实轨迹，保持与
+    // 实时 SSE 完全一致的呈现，不再合成 plan 时代的虚构步骤。
+    function replayTraceSteps(data) {
+        const control = (data && data.control) || {};
+        const trace = Array.isArray(control.react_trace) ? control.react_trace : [];
+        if (!trace.length) return null;
+        const events = trace.filter((event) => event && event.id);
+        return events.length ? events : null;
+    }
+
+    // 仅为没有 react_trace 的旧记录合成步骤（闲聊、图片、早期 loop 结果）。
     function synthesizeSteps(data) {
         const control = (data && data.control) || {};
         const times = (data && data.response_times) || {};
@@ -951,35 +1007,8 @@ document.addEventListener("DOMContentLoaded", () => {
             return steps;
         }
 
-        steps.push({
-            id: "intent",
-            title: "意图理解",
-            status: "done",
-            detail: control.domain && control.domain !== "general"
-                ? `识别领域：${control.domain}`
-                : mode === "small_talk" ? "识别为闲聊" : "通用问题",
-        });
-
-        if (control.decision) {
-            steps.push({
-                id: "route",
-                title: "路由决策",
-                status: "done",
-                detail: control.decision.needs_search ? "需要联网检索" : "无需检索，直接回答",
-                duration_ms: findCall("search_decision")?.duration_ms,
-            });
-        } else if (control.force_search_enabled) {
-            steps.push({ id: "route", title: "路由决策", status: "skipped", detail: "已跳过：强制联网" });
-        }
-
-        if (Array.isArray(control.keywords) && control.keywords.length) {
-            steps.push({
-                id: "keywords",
-                title: "生成检索词",
-                status: "done",
-                detail: control.keywords.slice(0, 4).join("、"),
-                duration_ms: findCall("keyword_generation")?.duration_ms,
-            });
+        if (mode === "small_talk") {
+            steps.push({ id: "intent", title: "意图理解", status: "done", detail: "识别为闲聊" });
         }
 
         if (control.search_performed) {
@@ -1041,46 +1070,15 @@ document.addEventListener("DOMContentLoaded", () => {
             duration_ms: answerCall?.duration_ms,
         });
 
-        const postcheck = control.postcheck;
-        if (postcheck) {
-            if (postcheck.eligible === false && postcheck.skipped_reason) {
-                steps.push({ id: "postcheck", title: "质量校验", status: "skipped", detail: "未启用或不适用" });
-            } else {
-                steps.push({
-                    id: "postcheck",
-                    title: "质量校验",
-                    status: "done",
-                    detail: postcheck.passes_postcheck ? "通过" : "未通过",
-                    duration_ms: findCall("postcheck_judge")?.duration_ms,
-                });
-            }
-        }
-
-        if (control.fallback_triggered) {
-            const loopStatus = control.loop_status;
-            const loopMeta = {
-                succeeded: { text: "循环成功", tone: "ok", status: "done" },
-                exhausted: { text: "迭代用尽", tone: "warn", status: "done" },
-                stagnated: { text: "检索停滞", tone: "warn", status: "error" },
-                unrecoverable: { text: "不可恢复", tone: "err", status: "error" },
-            }[loopStatus];
-            const reasonLabels = {
-                constraints_satisfied: "约束满足",
-                continue: "继续检索",
-                final_answer_rejected: "答案未达标，继续补充",
-                exhausted: "迭代用尽",
-                stagnated: "检索停滞",
-                unrecoverable: "工具持续失败",
-                invalid_tool_request: "工具调用格式无效",
-                process_narration: "过程性文本，继续补充",
-            };
+        if (control.loop_status) {
+            const loopMeta = LOOP_STATUS_META[control.loop_status];
             const verdicts = Array.isArray(control.loop_verdicts) ? control.loop_verdicts : [];
             const reactStep = {
                 id: "react",
-                title: "深度检索恢复",
+                title: "Agentic Loop",
                 status: loopMeta ? loopMeta.status : "done",
                 detail: loopMeta
-                    ? `${control.loop_iterations ?? "?"} 轮迭代 · ${control.engine || "langgraph"} 引擎`
+                    ? `${control.loop_iterations ?? "?"} 轮迭代`
                     : control.max_iterations
                         ? `最多 ${control.max_iterations} 轮迭代`
                         : "ReAct",
@@ -1091,7 +1089,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (verdicts.length) {
                 reactStep.items = verdicts.map((v) => ({
                     label: `第 ${v.iteration ?? "?"} 轮`,
-                    value: (reasonLabels[v.reason] || v.reason || "")
+                    value: (LOOP_REASON_LABELS[v.reason] || v.reason || "")
                         + (Array.isArray(v.constraints_missing) && v.constraints_missing.length
                             ? `（缺：${v.constraints_missing.join("、")}）`
                             : ""),
@@ -1101,6 +1099,10 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         return steps;
+    }
+
+    function restoreSteps(data) {
+        return replayTraceSteps(data) || synthesizeSteps(data);
     }
 
     // ------------------------------------------------------------------
@@ -1272,10 +1274,10 @@ document.addEventListener("DOMContentLoaded", () => {
             });
         } catch (err) {
             if (err && err.fallback) {
-                // 旧后端降级：一次性接口 + 事后合成步骤
+                // 非流式降级：一次性接口 + 事后回放/合成步骤
                 try {
                     const data = await legacyAnswer(payload);
-                    for (const step of synthesizeSteps(data)) refs.workflow.apply(step);
+                    for (const step of restoreSteps(data)) refs.workflow.apply(step);
                     finished = true;
                     renderResult(refs, data);
                     setStatus("回答已生成");
