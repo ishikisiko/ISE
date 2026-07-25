@@ -1,0 +1,8 @@
+{"query": "claude pro 向 fable 赠送 100 美元额度", "expect": "not_finance", "why": "产品补贴/赠送额度是商业政策，不是金融市场数据；出现货币金额不构成金融证据", "origin": "harden-finance-domain-routing 1.1"}
+{"query": "OpenAI API 的定价是多少", "expect": "not_finance", "why": "产品定价属于 general，结构化行情源无法回答", "origin": "harden-finance-domain-routing 1.1"}
+{"query": "某模型的免费配额政策", "expect": "not_finance", "why": "配额政策属于 general", "origin": "harden-finance-domain-routing 1.1"}
+{"query": "这家公司最新财报如何", "expect": "finance", "why": "财报属于金融市场数据", "origin": "harden-finance-domain-routing 1.2"}
+{"query": "请查看 $AAPL", "expect": "finance", "why": "显式 ticker 语法构成确定性金融证据，无需关键词佐证", "origin": "harden-finance-domain-routing 1.2"}
+{"query": "苹果股价", "expect": "finance", "why": "股价查询", "origin": "harden-finance-domain-routing 1.1"}
+{"query": "美元兑人民币汇率", "expect": "finance", "why": "汇率查询", "origin": "harden-finance-domain-routing 1.1"}
+{"query": "NVDA 行情", "expect": "finance", "why": "证券行情查询", "origin": "harden-finance-domain-routing 1.1"}
