@@ -62,9 +62,9 @@ class IntelligentSourceSelector:
                 "traffic", "bus", "subway", "congestion", "flight", "train"
             ],
             "finance": [
-                "股票", "股价", "金融", "汇率", "投资", "基金", "黄金", "原油",
-                "股價", "匯率", "投資", "基金", "黃金", "原油",
-                "stock", "finance", "exchange rate", "investment", "fund"
+                "股票", "股价", "金融", "汇率", "投资", "基金", "黄金", "原油", "行情", "财报",
+                "股價", "匯率", "投資", "基金", "黃金", "原油", "行情", "財報",
+                "stock", "finance", "exchange rate", "investment", "fund", "market quote", "earnings report"
             ],
             "sports": [
                 "体育", "足球", "篮球", "网球", "比赛", "比分", "NBA", "奥运", "世界杯", "英超",
@@ -857,14 +857,15 @@ class IntelligentSourceSelector:
             else:
                 quote = self._query_stock_price(symbol, timing_recorder=timing_recorder)
             
-            if quote:
+            if quote and not quote.get("error"):
                 quote["symbol"] = symbol
                 results.append(quote)
 
         if not results:
-             return {
-                "handled": True,
-                "error": "data_fetch_failed_for_all_symbols",
+            return {
+                "handled": False,
+                "reason": "data_fetch_failed",
+                "skipped": True,
                 "symbols": symbols,
             }
 
@@ -1031,21 +1032,25 @@ class IntelligentSourceSelector:
             if name in query:
                 symbols.add(sym)
 
-        # 3. Regex for Stock Symbols
-        
-        # Matches: (NVDA), (AMD)
-        matches_paren = re.findall(r'\(([A-Z]{1,5})\)', query_upper)
+        # 3. Explicit stock-symbol syntax and exchange codes.
+        matches_dollar = re.findall(
+            r'(?<![a-zA-Z0-9])\$([a-zA-Z]{1,5})(?![a-zA-Z])',
+            query,
+        )
+        symbols.update(match.upper() for match in matches_dollar)
+
+        # Parenthesized symbols must be uppercase in the original query. Using
+        # query_upper here would turn arbitrary words such as "(claude)" into
+        # ticker evidence.
+        matches_paren = re.findall(r'\(([A-Z]{1,5})\)', query)
         symbols.update(matches_paren)
         
         # Matches: 6 digits (CN/HK codes)
         matches_digits = re.findall(r'(?<!\d)\d{6}(?!\d)', query)
         symbols.update(matches_digits)
 
-        # Matches: NVDA, AMD, AMAZON (2-6 letters)
-        # Improved regex to handle mixed language boundaries and case insensitivity
-        # Look for 2-6 letter words not surrounded by other letters
-        candidates = re.findall(r'(?<![a-zA-Z])[a-zA-Z]{2,6}(?![a-zA-Z])', query)
-        
+        # Bare ticker candidates must already be uppercase in the user's text.
+        candidates = re.findall(r'(?<![a-zA-Z])[A-Z]{2,5}(?![a-zA-Z])', query)
         stopwords = {
             "AND", "THE", "FOR", "WHO", "WHY", "USD", "HKD", "RMB",
             "STOCK", "PRICE", "DAYS", "PAST", "COMPARE", "WITH", "FROM", "TO",
@@ -1067,15 +1072,25 @@ class IntelligentSourceSelector:
             "INTEL", "NVIDIA", "GOOGLE", "APPLE", "AMAZON", "TESLA",
         }
         
-        for m in candidates:
-            if m.upper() not in stopwords:
-                symbols.add(m.upper())
+        ambiguous_candidates = {
+            candidate
+            for candidate in candidates
+            if candidate not in stopwords and candidate not in symbols
+        }
 
-        # 4. If no symbols found, try LLM extraction
-        if not symbols and self.use_llm and self.llm_client:
-            llm_symbols = self._extract_symbols_with_llm(query)
+        # 4. Validate ambiguous uppercase candidates with the LLM. The same
+        # call can resolve a company name when deterministic extraction found
+        # nothing. Trusted explicit syntax and known mappings do not need LLM
+        # approval.
+        if self.use_llm and self.llm_client and (ambiguous_candidates or not symbols):
+            llm_symbols = self._extract_symbols_with_llm(
+                query,
+                candidates=sorted(ambiguous_candidates),
+            )
             if llm_symbols:
                 symbols.update(llm_symbols)
+        else:
+            symbols.update(ambiguous_candidates)
         
         # 5. If still no symbols, try Google Search fallback
         if not symbols and self.google_api_key and self.google_cx:
@@ -1083,17 +1098,26 @@ class IntelligentSourceSelector:
             if search_symbols:
                 symbols.update(search_symbols)
 
-        return list(symbols)
+        return sorted(symbols)
     
-    def _extract_symbols_with_llm(self, query: str) -> List[str]:
+    def _extract_symbols_with_llm(
+        self,
+        query: str,
+        *,
+        candidates: Optional[List[str]] = None,
+    ) -> List[str]:
         """Use LLM to extract company names and convert to stock symbols."""
         if not self.llm_client:
             return []
-        
+
+        candidate_text = ", ".join(candidates or []) or "无"
         prompt = (
-            "从用户的金融查询中提取所有公司名称，并返回它们对应的股票代码。\n"
+            "确认用户是否明确询问证券、基金、指数或加密资产，并返回对应的交易代码。\n"
             "输出JSON格式，例如：{\"symbols\": [\"AAPL\", \"MSFT\"]}\n"
             "规则：\n"
+            f"- 正则找到的待确认大写候选：{candidate_text}\n"
+            "- 只保留确实代表用户所问金融资产的候选；普通缩写、产品名和计划名必须排除\n"
+            "- 如用户明确提到未映射的上市公司，可返回其确定的交易代码\n"
             "- 美股使用标准代码（如AAPL, MSFT, GOOGL）\n"
             "- 港股使用.HK后缀（如0700.HK）\n"
             "- A股使用.SS（上海）或.SZ（深圳）后缀（如600519.SS）\n"
