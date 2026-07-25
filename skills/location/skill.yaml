@@ -1,0 +1,24 @@
+version: 1
+name: location
+handler: skills.location.handler:LocationSkillHandler
+tool:
+  name: nearby_places
+  description: >-
+    Find named place types or businesses near an explicit reference location.
+    Never infer the user's current location from phrases such as near me.
+  args_schema:
+    type: object
+    additionalProperties: false
+    required: [query]
+    properties:
+      query:
+        type: string
+        description: Complete nearby-place request with target and reference location.
+budget:
+  max_calls_per_query: 2
+  timeout_seconds: 15
+  max_evidence_items: 1
+availability:
+  any_of:
+    - config:GOOGLE_API_KEY
+    - config:googleSearch.api_key

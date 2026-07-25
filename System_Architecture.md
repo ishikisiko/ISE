@@ -8,19 +8,22 @@
 ```mermaid
 graph TD
     User[User] -->|Query| Server[Flask API Server]
-    Server -->|Orchestrate| Orchestra[Smart Search Orchestrator]
-    Orchestra -->|Analyze| Time[Time Parser]
-    Orchestra -->|Classify & route| Selector[Intelligent Source Selector]
-    Selector -->|Domain Data| APIs[External APIs (Google/Finance/Weather)]
-    Orchestra -->|Decision| Router{Search Check}
-    Router -->|No| LocalRAG[Local RAG Pipeline]
-    Router -->|Yes| SearchRAG[Search RAG Pipeline]
-    LocalRAG -->|Retrieve| VectorDB[(FAISS Vector Store)]
-    SearchRAG -->|Search| SearchAPI[SerpAPI / Google / You]
-    SearchRAG -->|Rerank| Reranker[Qwen Reranker]
-    SearchRAG -->|Synthesize| LLM[LLM (GLM-4)]
-    LocalRAG -->|Synthesize| LLM
-    LLM -->|Response| User
+    Server --> Orchestra[LangChain Orchestrator]
+    Orchestra -->|Deterministic analysis| Analysis[QueryAnalysis]
+    Orchestra -->|Non-shortcut query| Loop[LangGraph Agentic Loop]
+    Loop -->|Select| Registry[Registry Skill Tools]
+    Loop -->|Select| Web[Web Search / Recovery]
+    Loop -->|Select| Local[Local Documents]
+    Registry --> APIs[Structured Provider APIs]
+    Web --> SearchAPI[Configured Search Providers]
+    Local --> VectorDB[(FAISS Vector Store)]
+    APIs --> Ledger[EvidenceLedger]
+    SearchAPI --> Ledger
+    VectorDB --> Ledger
+    Ledger --> Critic[Deterministic Critic + Optional Judge]
+    Critic -->|Continue / Return / Hard terminal| Loop
+    Loop --> Trace[QueryExecutionTrace + Audit]
+    Loop -->|Response| User
 ```
 
 #### Advanced Logic Flow
@@ -28,30 +31,31 @@ graph TD
 sequenceDiagram
     participant U as User
     participant O as Orchestrator
-    participant S as SourceSelector
-    participant L as LLM/Classifier
-    participant R as RAG Pipelines
+    participant L as LangGraph Loop
+    participant T as Eligible Tools
+    participant C as Shared Critic
+    participant A as Ledger / Trace
 
     U->>O: Submit Query (Text/Image)
-    O->>O: Parse Time Constraints
+    O->>O: Parse time + analyze query
     alt Image Present
-        O->>O: Perform Visual Retrieval (Google Vision)
-        O->>L: Vision LLM Analysis
-    end
-    O->>S: Select Sources
-    S->>L: Classify Domain
-    L-->>S: Domain (Weather/Finance/Transport/etc.)
-    S->>S: Fetch Domain Data (APIs)
-    S-->>O: Domain Context & Enhanced Query
-    O->>L: Decision: Need Search?
-    alt No Search (Direct/Local)
-        O->>R: Execute Local RAG / Direct Answer
-    else Need Search
-        O->>R: Execute Search RAG
-        R->>R: Generate Keywords
-        R->>R: Web Search
-        R->>R: Rerank Results (Qwen)
-        R->>L: Synthesize Answer
+        O->>O: Bounded visual handler
+    else Small talk
+        O->>O: Direct small-talk handler
+    else Critical ambiguity
+        O-->>U: Clarification request
+    else Normal query
+        O->>L: Start act / observe / evaluate
+        loop Until shared terminal or budget
+            L->>T: Select and call eligible tool
+            T->>T: Deterministic preflight + provider
+            T-->>L: Structured evidence or error
+            L->>A: Append actual call and evidence
+            L->>C: Evaluate coverage, progress, budget
+            C-->>L: Continue or terminal verdict
+        end
+        L->>A: Final ledger + termination trace
+        L-->>O: Compatible response
     end
     O-->>U: Final Response
 ```
@@ -61,7 +65,7 @@ sequenceDiagram
 *   **Backend Framework**: Flask (Python)
 *   **LLM Provider**:
     *   **Primary**: GLM-4.6 (ZhipuAI/Zai) - Default for generation.
-    *   **Routing/Classification**: GLM-4.5-air - Optimized for speed/cost.
+    *   **Termination Judge**: Optional configured model for semantic sufficiency; it cannot override deterministic gaps or budgets.
     *   **Vision Support**: Google Vision API + Vision-capable LLMs.
 *   **Vector Database**:
     *   **Implementation**: LangChain VectorStore (FAISS based).
@@ -81,25 +85,32 @@ sequenceDiagram
 
 本章节详细阐述了系统的核心方法论与具体实现细节。系统设计采用了模块化、分层架构，通过各组件的协同工作实现智能化、精准化的信息检索与生成。
 
-### 1. 智能选择与动态路由 (Intelligent Selection & Dynamic Routing)
+### 1. Registry Skill 路由 (Registry Skill Routing)
 
-系统核心采用了一个混合决策机制（Hybrid Decision Mechanism），由 `search/source_selector.py` 中的 `IntelligentSourceSelector` 类实现。该机制旨在根据用户的自然语言查询精准地路由到最合适的数据获取渠道，平衡了响应速度、成本与回答质量。
-
-*   **双层分类架构 (Two-Layer Classification Architecture)**:
-    1.  **LLM 语义分类 (Semantic Classification)**: 系统首先尝试调用轻量级 LLM (配置为 `GLM-4.5-air`) 执行语义意图识别。使用的 System Prompt 明确定义了七大核心领域：`weather` (天气), `transportation` (交通), `finance` (金融), `sports` (体育), `temporal_change` (时序变化), `location` (地理位置), 以及 `general` (通用)。 Prompt 强制模型输出严格的 JSON 格式（如 `{"domain": "finance"}`），确保下游处理的确定性。
-    2.  **关键词规则回退 (Keyword-based Fallback)**: 为了提高系统的鲁棒性，当 LLM 调用超时或返回非标准格式时，系统会自动降级到 `_classify_with_keywords` 方法。该方法维护了一个详尽的 `domain_keywords` 字典（例如，"股价"、"PE"、"市值" 映射到 `finance` 领域；"比分"、"排名"、"NBA" 映射到 `sports` 领域），通过高效的字符串匹配兜底。
+系统不再使用统一领域分类器。`skills/registry.py` 从每个 package 的 `skill.yaml` 构建实际可用
+工具面；weather、location、transportation、finance 与 sports handler 分别执行确定性 preflight。
+缺少显式地点、球队、标的或起终点时直接拒绝，编排器再回落通用 Web，不让弱分类猜测终止检索。
 
 *   **领域专用数据源 (Domain-Specific Sources)**:
     针对识别出的特定领域，系统集成了专门的 API 以提供比通用网页搜索更结构化、更权威的数据：
     *   **Weather**: 集成 **Google Weather API** (`weather.googleapis.com`)，获取实时气温、降水概率及未来预报。
     *   **Finance**: 集成 **Yahoo Finance** (`yfinance`) 和 **Finnhub**，能获取实时股价、公司财报及市场指数。
-    *   **Sports**: 集成 **TheSportsDB** 和 **API-Football**，支持查询球队阵容、历史比分及实时赛况。
+    *   **Sports**: 集成 **TheSportsDB**，提供明确球队或赛事的近期结果与后续赛程。
     *   **Transportation/Location**: 集成 **Google Routes API** 和 **Google Places API**，处理导航规划与地点检索。
 
-*   **查询增强 (Query Enhancement)**:
-    在确定领域后，`generate_domain_specific_query` 方法会对原始查询进行“上下文中注入”。例如，对于 `sports` 领域查询，会自动追加 "latest stats, rankings, team roster" 等后缀；对于 `temporal_change` 查询，会补充 "historical data year over year" 等提示词，显著提升了检索结果的相关性。
+*   **统一证据与降级 (Evidence and Fallback)**:
+    skill provider 输出统一归一化为 `EvidenceItem`，保留 provider、tool-call 与来源等级 provenance。
+    provider 错误、空数据或 preflight 拒绝都由唯一的 LangGraph loop 观察，并由模型选择其他可用工具。
 
-### 2. 本地 RAG 架构与实施 (Local RAG Architecture & Implementation)
+### 2. 统一终止判据 (Unified Termination Critic)
+
+    LangGraph `evaluate` 节点把证据覆盖、来源等级、约束、进度与剩余预算交给
+    `utils/query_orchestration.py::evaluate_termination`。该函数返回
+可审计的 action、缺项、failure types、hard-stop 标志和 rule hits。可选 `termination.judge` 只补充语义
+    充分性：负向结论可以否决规则通过，正向结论不能清除确定性缺口或延长预算。静态计划和旧 LangChain
+    `AgentExecutor` 均已删除，缺少 LangGraph 时明确失败，避免同一运行时存在第二套执行或停止逻辑。
+
+### 3. 本地 RAG 架构与实施 (Local RAG Architecture & Implementation)
 
 本地检索增强生成 (Local RAG) 模块旨在利用私有知识库回答问题，确保数据隐私并弥补通用大模型的知识盲区。该模块在 `rag/local_rag.py` 及 `langchain/langchain_support.py` 中实现。
 
@@ -118,7 +129,7 @@ sequenceDiagram
     *   系统执行相似度搜索 (`similarity_search`)，默认检索 Top-5 最相关的文档块 (`k=5`)。
     *   检索到的文本块被拼接成一个 Context 字符串，并注入到 LLM 的 Prompt 中：*"基于以下已知信息...请回答用户问题"*。这种 In-Context Learning 的方式有效抑制了大模型的幻觉。
 
-### 3. 多阶段检索优化：重排序与过滤 (Multi-stage Retrieval Optimization: Reranking & Filtering)
+### 4. 多阶段检索优化：重排序与过滤 (Multi-stage Retrieval Optimization: Reranking & Filtering)
 
 为了解决传统搜索引擎返回结果中存在的噪声问题，本系统在 `rag/search_rag.py` 和 `search/rerank.py` 中引入了先进的 **Re-ranking (重排序)** 机制。
 
@@ -138,21 +149,24 @@ sequenceDiagram
 *   **时序查询的细粒度回退 (Granular Fallback for Temporal Queries)**:
     针对 "QS ranking 2015-2023" 这类复杂的时序变迁查询，系统实现了 `_perform_granular_search_fallback`。如果初次宽泛搜索未能覆盖所有请求的年份，系统会通过 LLM 生成一系列特定年份的子查询 (e.g., "QS world university ranking 2015 CUHK", "QS world university ranking 2016 CUHK")，并行执行检索，最后将结果聚合。这种 "Scatter-Gather" 模式极大增强了系统处理纵向数据对比的能力。
 
-### 4. Agent Workflow与多步推理 (Agent Workflow & Multi-step Reasoning)
+### 5. Agent Workflow与多步推理 (Agent Workflow & Multi-step Reasoning)
 
-当前默认由 `langchain/langchain_orchestrator.py` 中的 `LangChainOrchestrator` 充当系统的主编排器，协调感知、决策、执行与回退的完整 Agent 工作流。`SmartSearchOrchestrator` 保留为兼容路径，不再是默认执行主线。
+当前默认由 `langchain/langchain_orchestrator.py` 中的 `LangChainOrchestrator` 负责确定性预处理，
+随后把所有非短路查询交给唯一的 LangGraph loop。运行时不存在第二条执行路径：legacy
+`SmartSearchOrchestrator` 已删除，缺少 LangChain/LangGraph 依赖时 CLI 明确失败而不降级。
 
 *   **时间感知与解析 (Time Awareness & Parsing)**:
     内置的 `TimeParser` 工具 (`utils/time_parser.py`) 利用正则表达式能够精准识别自然语言中的时间限制 (如 "最近3天", "past 6 months")。解析出的 `TimeConstraint` 对象会被转换为搜索引擎接受的参数 (如 Google 的 `dateRestrict=d3` 或 Tavily 的 `time_range=month`)，从源头保证信息的时效性。
 
 *   **决策与编排 (Decision & Orchestration)**:
-    *   **Search Check**: 在处理非领域特定查询时，Orchestrator 会调用 LLM (`DECISION_SYSTEM_PROMPT`) 进行二元分类，判断查询是否需要联网。这避免了对简单常识性问题 (如 "你好", "主要颜色的定义") 进行不必要的网络搜索，降低延迟。
-    *   **上下文注入 (Context Injection)**: 这是一个关键的中间步骤。如果 Source Selector 获取到了结构化的领域数据 (如 API 返回的股票实时数据)，这些数据会作为 "Pre-context" 注入到 Prompt 中。LLM 被要求优先基于这些硬数据回答，并利用网络搜索结果作为定性补充。
+    *   **Tool Choice**: 不再运行二元联网分类器或静态 query plan；模型在 loop 内通过选不选工具表达决策，`allow_search=false` 则确定性移除网络工具。
+    *   **上下文注入 (Context Injection)**: 每次工具观察归一化为带实际 call provenance 的 `EvidenceItem` 并进入统一 ledger；缺项由同一 critic 决定继续还是终止。
 
 *   **反思与闲聊处理 (Reflection & Small Talk)**:
-    系统内置统一的小聊识别与搜索路由逻辑，快速拦截单纯的问候语。对于复杂任务，默认搜索主链路会先生成首答，再通过 post-check 判断是否需要升级到 ReAct fallback 进行补救，而不是直接将 ReAct 作为顶层默认模式。
+    系统只对闲聊、视觉输入和关键歧义保留确定性短路。其他查询从第一轮起就在 ReAct loop 内执行；
+    不存在首答后的 post-check 升级或第二个 fallback executor。
 
-### 5. 多模态交互与视觉理解 (Multi-modal Interaction & Visual Understanding)
+### 6. 多模态交互与视觉理解 (Multi-modal Interaction & Visual Understanding)
 
 系统突破了纯文本的限制，在 `server.py` 和 Orchestrator 中构建了完整的多模态处理链路。
 

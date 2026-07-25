@@ -57,7 +57,7 @@ with bounded JSONL retention and best-effort writes.
 
 #### Scenario: Complete search record
 - **WHEN** 一轮带搜索的问答完成且 `include_answer=true`
-- **THEN** 该行 SHALL 含 `steps`、`control.postcheck`、`search_query`、`response_times.total_ms`、`answer`
+- **THEN** 该行 SHALL 含 `steps`、`control.execution_trace`、`search_query`、`response_times.total_ms`、`answer`
 
 #### Scenario: Compact record omits answer
 - **WHEN** `include_answer=false`

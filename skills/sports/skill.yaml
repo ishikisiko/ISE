@@ -1,0 +1,21 @@
+version: 1
+name: sports
+handler: skills.sports.handler:SportsSkillHandler
+tool:
+  name: sports_schedule
+  description: >-
+    Look up recent or upcoming events for an explicit sports team, or search a
+    specifically named event. Not a general sports-news or rules tool.
+  args_schema:
+    type: object
+    additionalProperties: false
+    required: [query]
+    properties:
+      query:
+        type: string
+        description: Complete sports schedule or result request naming a team or event.
+budget:
+  max_calls_per_query: 2
+  timeout_seconds: 15
+  max_evidence_items: 1
+availability: {}

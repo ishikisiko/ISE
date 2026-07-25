@@ -1,8 +1,4 @@
-"""React Agent Orchestrator - LangChain ReAct-based query handling.
-
-This module provides an alternative orchestrator implementation using
-LangChain's ReAct agent for iterative reasoning and tool calling.
-"""
+"""Production ReAct orchestrator backed by the explicit LangGraph loop."""
 
 from __future__ import annotations
 
@@ -18,13 +14,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from langchain.langchain_react_tools import (
     create_react_tools_from_config,
-    ReActSearchTool,
-    ReActSearchRecoveryTool,
-    ReActDomainTool,
     ReActLocalDocTool,
 )
-from langchain.langchain_orchestrator import LangChainOrchestrator
 from search.search import SearchClient
+from utils.query_orchestration import normalize_termination_config
 from utils.timing_utils import TimingRecorder
 
 
@@ -32,7 +25,7 @@ class ReactAgentOrchestrator:
     """ReAct-based orchestrator using LangChain agent for iterative reasoning.
 
     This orchestrator uses LangChain's ReAct agent to iteratively reason about
-    queries and call tools (web search, domain API, local docs) as needed.
+    queries and call tools (web search, registered skills, local docs) as needed.
     """
 
     def __init__(
@@ -45,7 +38,6 @@ class ReactAgentOrchestrator:
         data_path: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
         show_timings: bool = False,
-        engine: Optional[str] = None,
         judge_llm: Optional[BaseChatModel] = None,
     ) -> None:
         """Initialize the ReactAgentOrchestrator.
@@ -58,8 +50,6 @@ class ReactAgentOrchestrator:
             data_path: Optional path to local documents
             config: Optional configuration dictionary
             show_timings: Whether to record and return timing information
-            engine: "langgraph" for the explicit state-machine loop, "legacy"
-                for the AgentExecutor loop; defaults to config reactAgent.engine
             judge_llm: Optional LLM used by the langgraph loop judge
         """
         self.llm = llm
@@ -79,29 +69,10 @@ class ReactAgentOrchestrator:
                 data_path=data_path,
             )
 
-        configured_engine = (
-            engine
-            or (self.config.get("reactAgent", {}) or {}).get("engine")
-            or "langgraph"
-        )
-        self.engine = str(configured_engine).strip().lower() or "legacy"
+        from orchestrators.react_loop_graph import langgraph_available
 
-        self._agent_executor = None
-        if self.engine == "langgraph":
-            from orchestrators.react_loop_graph import langgraph_available
-
-            if not langgraph_available():
-                print("[react_agent] langgraph 未安装，回退到 legacy AgentExecutor 引擎")
-                self.engine = "legacy"
-
-        if self.engine != "langgraph":
-            self.engine = "legacy"
-            # Create the ReAct agent executor
-            self._agent_executor = LangChainOrchestrator.create_react_agent(
-                llm=llm,
-                tools=self.tools,
-                max_iterations=max_iterations,
-            )
+        if not langgraph_available():
+            raise RuntimeError("langgraph is required for the unified M4 termination critic")
 
     def answer(
         self,
@@ -116,9 +87,10 @@ class ReactAgentOrchestrator:
         reference_limit: Optional[int] = None,
         force_search: bool = False,
         images: Optional[List[Dict[str, str]]] = None,
-        fallback_context: Optional[Dict[str, Any]] = None,
         conversation_id: Optional[str] = None,
         tracer: Optional[Any] = None,
+        analysis: Optional[Any] = None,
+        execution_trace: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Answer a query using ReAct agent.
 
@@ -133,126 +105,45 @@ class ReactAgentOrchestrator:
             reference_limit: Limit on reference sources in response
             force_search: Force search even if agent decides not to
             images: Optional image data (not currently used in ReAct mode)
+            analysis: Optional shared ``QueryAnalysis`` (from ``analyze_query``).
+                When supplied (M1 loop main path) the loop derives its success
+                checklist from it instead of recomputing one from the query.
 
         Returns:
             Dictionary with answer, control metadata, and search_hits
         """
+        self._reset_tool_budgets()
         timing_recorder = TimingRecorder(enabled=self.show_timings)
         timing_recorder.start()
 
-        if self.engine == "langgraph":
-            return self._answer_with_langgraph(
-                query,
-                allow_search=allow_search,
-                fallback_context=fallback_context,
-                conversation_id=conversation_id,
-                tracer=tracer,
-                timing_recorder=timing_recorder,
-            )
-
-        try:
-            # Build input for the agent
-            agent_input = {"input": self._build_agent_input(query, fallback_context)}
-
-            # Execute the agent
-            result = self._agent_executor.invoke(agent_input)
-
-            # Parse the output
-            output = result.get("output", "")
-
-            # Build response structure compatible with other orchestrators
-            search_hits = self._extract_search_hits(output)
-
-            response: Dict[str, Any] = {
-                "query": query,
-                "answer": output,
-                "search_hits": search_hits or list(fallback_context.get("search_hits") or []) if fallback_context else search_hits,
-                "evidence_items": list(fallback_context.get("evidence_items") or []) if fallback_context else [],
-                "evidence_sources_active": list(fallback_context.get("evidence_sources_active") or []) if fallback_context else [],
-                "evidence_sources_used": list(fallback_context.get("evidence_sources_used") or []) if fallback_context else [],
-                "evidence_source_types_active": list(fallback_context.get("evidence_source_types_active") or []) if fallback_context else [],
-                "evidence_source_types_used": list(fallback_context.get("evidence_source_types_used") or []) if fallback_context else [],
-                "llm_raw": None,
-                "llm_warning": None,
-                "llm_error": None,
-            }
-
-            # Add control metadata
-            control: Dict[str, Any] = {
-                "search_performed": len(search_hits) > 0,
-                "decision": {
-                    "needs_search": len(search_hits) > 0,
-                    "reason": "react_agent_iteration" if not fallback_context else "react_fallback_iteration",
-                },
-                "search_mode": "react_agent" if not fallback_context else "react_fallback",
-                "keywords": [],
-                "hybrid_mode": False,
-                "local_docs_present": self._has_local_docs_tool(),
-                "search_allowed": allow_search,
-                "max_iterations": self.max_iterations,
-                "engine": self.engine,
-                "final_executor": "react_fallback" if fallback_context else "react_agent",
-                "fallback_triggered": bool(fallback_context),
-                "evidence_sources_active": response.get("evidence_sources_active") or [],
-                "evidence_sources_used": response.get("evidence_sources_used") or [],
-                "evidence_source_types_active": response.get("evidence_source_types_active") or [],
-                "evidence_source_types_used": response.get("evidence_source_types_used") or [],
-            }
-            if fallback_context:
-                control["fallback_context"] = self._fallback_context_meta(fallback_context)
-
-            response["control"] = control
-
-            # Add timing information if enabled
-            if timing_recorder.enabled:
-                timing_recorder.stop()
-                timing_payload = timing_recorder.to_dict()
-                if timing_payload:
-                    timing_payload["领域智能类型"] = "ReAct Agent"
-                    response["response_times"] = timing_payload
-
-            return response
-
-        except Exception as exc:
-            return {
-                "query": query,
-                "answer": f"Agent execution failed: {exc}",
-                "search_hits": [],
-                "llm_raw": None,
-                "llm_warning": None,
-                "llm_error": str(exc),
-                "control": {
-                    "search_performed": False,
-                    "decision": {
-                        "needs_search": False,
-                        "reason": f"react_agent_error: {exc}",
-                    },
-                    "search_mode": "react_agent_error",
-                    "keywords": [],
-                    "hybrid_mode": False,
-                    "local_docs_present": self._has_local_docs_tool(),
-                    "search_allowed": allow_search,
-                    "engine": self.engine,
-                },
-            }
+        return self._answer_with_langgraph(
+            query,
+            allow_search=allow_search,
+            conversation_id=conversation_id,
+            tracer=tracer,
+            timing_recorder=timing_recorder,
+            analysis=analysis,
+            execution_trace=execution_trace,
+        )
 
     def _answer_with_langgraph(
         self,
         query: str,
         *,
         allow_search: bool,
-        fallback_context: Optional[Dict[str, Any]],
         tracer: Optional[Any],
         timing_recorder: TimingRecorder,
         conversation_id: Optional[str] = None,
+        analysis: Optional[Any] = None,
+        execution_trace: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Run the explicit LangGraph loop and build a compatible response."""
         from orchestrators.react_loop_graph import ReactLoopGraphRunner
         from utils.workflow_trace import ensure_tracer
 
         tracer = ensure_tracer(tracer)
-        evaluation_config = (self.config.get("reactAgent", {}) or {}).get("evaluation")
-        user_input = self._build_agent_input(query, fallback_context)
+        termination_config = self.config.get("termination") or {}
+        user_input = query
         history_window = 5
         resumed = False
         if conversation_id:
@@ -268,16 +159,30 @@ class ReactAgentOrchestrator:
 
         tracer.begin("react_loop", "ReAct 循环", detail="langgraph 引擎")
         try:
+            active_tools = [
+                tool
+                for tool in self.tools
+                if allow_search or tool.name not in {"web_search", "search_recovery"}
+            ]
+            for tool in active_tools:
+                bind_recorder = getattr(tool, "set_timing_recorder", None)
+                if callable(bind_recorder):
+                    bind_recorder(timing_recorder)
+                bind_analysis = getattr(tool, "set_analysis", None)
+                if callable(bind_analysis):
+                    bind_analysis(analysis)
             runner = ReactLoopGraphRunner(
                 llm=self.llm,
-                tools=self.tools,
+                tools=active_tools,
                 max_iterations=self.max_iterations,
-                evaluation_config=evaluation_config,
+                termination_config=termination_config,
                 judge_llm=self.judge_llm,
                 query=query,
-                fallback_context=fallback_context,
                 history_window=history_window,
                 tracer=tracer,
+                analysis=analysis,
+                timing_recorder=timing_recorder,
+                execution_trace=execution_trace,
             )
             loop_result = runner.run(user_input, conversation_id=conversation_id)
             resumed = resumed or bool(loop_result.get("conversation_resumed"))
@@ -301,7 +206,6 @@ class ReactAgentOrchestrator:
                     "hybrid_mode": False,
                     "local_docs_present": self._has_local_docs_tool(),
                     "search_allowed": allow_search,
-                    "engine": self.engine,
                 },
             }
 
@@ -312,6 +216,8 @@ class ReactAgentOrchestrator:
             "exhausted": "迭代用尽",
             "stagnated": "检索停滞",
             "unrecoverable": "工具持续失败",
+            "evidence_insufficient": "证据不足",
+            "clarification_required": "需要澄清",
             "invalid_tool_request": "工具调用格式无效",
             "process_narration": "过程性文本，继续补充",
         }
@@ -330,6 +236,8 @@ class ReactAgentOrchestrator:
             "exhausted": {"text": "迭代用尽", "tone": "warn"},
             "stagnated": {"text": "检索停滞", "tone": "warn"},
             "unrecoverable": {"text": "不可恢复", "tone": "err"},
+            "evidence_insufficient": {"text": "证据不足", "tone": "warn"},
+            "clarification_required": {"text": "需要澄清", "tone": "warn"},
         }
         loop_status = loop_result.get("loop_status")
         badge = status_badges.get(loop_status)
@@ -343,53 +251,115 @@ class ReactAgentOrchestrator:
             badge=badge,
         )
 
-        search_hits = list(fallback_context.get("search_hits") or []) if fallback_context else []
+        search_hits: List[Dict[str, Any]] = []
         response: Dict[str, Any] = {
             "query": query,
             "answer": loop_result.get("answer") or "",
             "search_hits": search_hits,
-            "evidence_items": list(fallback_context.get("evidence_items") or []) if fallback_context else [],
-            "evidence_sources_active": list(fallback_context.get("evidence_sources_active") or []) if fallback_context else [],
-            "evidence_sources_used": list(fallback_context.get("evidence_sources_used") or []) if fallback_context else [],
-            "evidence_source_types_active": list(fallback_context.get("evidence_source_types_active") or []) if fallback_context else [],
-            "evidence_source_types_used": list(fallback_context.get("evidence_source_types_used") or []) if fallback_context else [],
+            "evidence_items": [],
+            "evidence_records": list(loop_result.get("evidence_records") or []),
+            "evidence_sources_active": [],
+            "evidence_sources_used": [],
+            "evidence_source_types_active": [],
+            "evidence_source_types_used": [],
             "llm_raw": None,
             "llm_warning": None,
             "llm_error": None,
         }
 
+        evidence_records = list(loop_result.get("evidence_records") or [])
+        seen_references: set[str] = set()
+        for record in evidence_records:
+            if not isinstance(record, dict) or record.get("source_type") != "web":
+                continue
+            reference = str(record.get("reference") or "").strip()
+            if not reference or reference in seen_references:
+                continue
+            seen_references.add(reference)
+            search_hits.append(
+                {
+                    "title": str(record.get("title") or reference),
+                    "url": reference,
+                    "snippet": str(record.get("content") or ""),
+                }
+            )
+        response["search_hits"] = search_hits
+        record_source_types = sorted(
+            {str(rec.get("source_type") or "").strip() for rec in evidence_records if isinstance(rec, dict)}
+            - {""}
+        )
+        skill_tools_used = sorted(
+            {
+                str(rec.get("tool_name") or "").strip()
+                for rec in evidence_records
+                if isinstance(rec, dict) and rec.get("source_type") == "domain"
+            }
+        )
+        used_tools = sorted(
+            {
+                str(record.get("tool_name") or "").strip()
+                for record in evidence_records
+                if isinstance(record, dict) and str(record.get("tool_name") or "").strip()
+            }
+        )
+        response["evidence_sources_active"] = [
+            {"source_type": "tool", "source_id": tool.name, "display_name": tool.name}
+            for tool in active_tools
+        ]
+        response["evidence_sources_used"] = [
+            {"source_type": "tool", "source_id": name, "display_name": name}
+            for name in used_tools
+        ]
+        response["evidence_source_types_active"] = sorted(
+            {"tool" for _tool in active_tools}
+        )
+        response["evidence_source_types_used"] = record_source_types
+
         control: Dict[str, Any] = {
-            "search_performed": bool(loop_result.get("search_hits")) or bool(search_hits),
+            "search_performed": bool(loop_result.get("search_hits")) or bool(search_hits) or bool(evidence_records),
             "decision": {
                 "needs_search": True,
-                "reason": "react_agent_iteration" if not fallback_context else "react_fallback_iteration",
+                "reason": "agentic_loop_iteration",
             },
-            "search_mode": "react_agent" if not fallback_context else "react_fallback",
+            "search_mode": "agentic_loop",
             "keywords": [],
             "hybrid_mode": False,
             "local_docs_present": self._has_local_docs_tool(),
             "search_allowed": allow_search,
             "max_iterations": self.max_iterations,
-            "engine": self.engine,
             "loop_status": loop_result.get("loop_status"),
             "loop_iterations": loop_result.get("iterations"),
             "loop_verdicts": list(loop_result.get("verdicts") or []),
             "loop_termination_reason": loop_result.get("termination_reason"),
             "react_trace": list(loop_result.get("trace_events") or []),
             "react_trace_truncated": bool(loop_result.get("trace_truncated")),
-            "final_executor": "react_fallback" if fallback_context else "react_agent",
-            "fallback_triggered": bool(fallback_context),
+            "final_executor": "agentic_loop",
             "conversation_resumed": resumed,
             "evidence_sources_active": response.get("evidence_sources_active") or [],
             "evidence_sources_used": response.get("evidence_sources_used") or [],
             "evidence_source_types_active": response.get("evidence_source_types_active") or [],
-            "evidence_source_types_used": response.get("evidence_source_types_used") or [],
+            "evidence_source_types_used": response.get("evidence_source_types_used") or record_source_types,
+            "loop_evidence_records": len(evidence_records),
+            "skill_tools_used": skill_tools_used,
+            "termination_policy": {
+                "max_iterations": self.max_iterations,
+                "judge_interval": int(
+                    (self.config.get("termination") or {}).get("judge_interval", 2) or 2
+                ),
+                "judge_enabled": bool(
+                    ((self.config.get("termination") or {}).get("judge") or {}).get(
+                        "enabled", True
+                    )
+                ),
+                "tool_budgets": {
+                    tool.name: status()
+                    for tool in active_tools
+                    if callable(status := getattr(tool, "get_budget_status", None))
+                },
+            },
         }
         if loop_result.get("judge_error"):
             control["loop_judge_error"] = loop_result["judge_error"]
-        if fallback_context:
-            control["fallback_context"] = self._fallback_context_meta(fallback_context)
-
         response["control"] = control
 
         if timing_recorder.enabled:
@@ -401,102 +371,17 @@ class ReactAgentOrchestrator:
 
         return response
 
-    def _extract_search_hits(self, output: str) -> List[Dict[str, Any]]:
-        """Extract search hits from agent output if present."""
-        # ReAct agent output doesn't typically contain structured search_hits
-        # This is a placeholder that can be enhanced if needed
-        return []
-
-    def _build_agent_input(
-        self,
-        query: str,
-        fallback_context: Optional[Dict[str, Any]],
-    ) -> str:
-        """Build the ReAct agent input, optionally with fallback context.
-
-        When ``fallback_context`` carries a ``user_feedback`` key the message is
-        framed as a human follow-up on the previous answer; otherwise the
-        existing recovery-agent framing is used.
-        """
-        if not fallback_context:
-            return query
-
-        user_feedback = str(fallback_context.get("user_feedback") or "").strip()
-        if user_feedback:
-            lines = [
-                "用户对上一轮回答提出反馈，请据此调整。",
-                "",
-                f"用户反馈：{user_feedback}",
-            ]
-            previous_answer = str(fallback_context.get("previous_answer") or "").strip()
-            if previous_answer:
-                lines.extend(["", f"上一轮回答：\n{previous_answer}"])
-            missing_constraints = fallback_context.get("missing_constraints") or []
-            if missing_constraints:
-                lines.extend(["", f"需覆盖的约束：{', '.join(map(str, missing_constraints))}"])
-            inherited_time = str(fallback_context.get("inherited_time_constraint") or "").strip()
-            if inherited_time:
-                lines.extend(["", f"继承的时间约束：{inherited_time}"])
-            lines.extend(
-                [
-                    "",
-                    "可直接修改上一轮回答（无需重新检索），或在需要时调用工具补充信息后重新作答。",
-                ]
-            )
-            return "\n".join(lines)
-
-        lines = [
-            f"Original Query:\n{query}",
-            "",
-            "You are acting as a recovery agent. Improve the previous answer using tools only when needed.",
-        ]
-
-        previous_answer = str(fallback_context.get("previous_answer") or "").strip()
-        if previous_answer:
-            lines.extend(["", f"Previous Answer:\n{previous_answer}"])
-
-        failure_types = fallback_context.get("failure_types") or []
-        if failure_types:
-            lines.extend(["", f"Post-check Failure Types: {', '.join(map(str, failure_types))}"])
-
-        missing_constraints = fallback_context.get("missing_constraints") or []
-        if missing_constraints:
-            lines.extend(["", f"Missing Constraints: {', '.join(map(str, missing_constraints))}"])
-
-        evidence_summary = str(fallback_context.get("evidence_summary") or "").strip()
-        if evidence_summary:
-            lines.extend(["", f"Available Evidence Summary:\n{evidence_summary}"])
-
-        evidence_source_types = fallback_context.get("evidence_source_types_used") or []
-        if evidence_source_types:
-            lines.extend(["", f"Available Evidence Source Types: {', '.join(map(str, evidence_source_types))}"])
-
-        recovery_goal = str(fallback_context.get("recovery_goal") or "").strip()
-        if recovery_goal:
-            lines.extend(["", f"Recovery Goal:\n{recovery_goal}"])
-
-        return "\n".join(lines)
-
-    def _fallback_context_meta(self, fallback_context: Dict[str, Any]) -> Dict[str, Any]:
-        """Return safe metadata about the fallback context."""
-        return {
-            "failure_types": list(fallback_context.get("failure_types") or []),
-            "missing_constraints": list(fallback_context.get("missing_constraints") or []),
-            "has_previous_answer": bool(fallback_context.get("previous_answer")),
-            "has_evidence_summary": bool(fallback_context.get("evidence_summary")),
-            "evidence_source_types_active": list(fallback_context.get("evidence_source_types_active") or []),
-            "evidence_source_types_used": list(fallback_context.get("evidence_source_types_used") or []),
-        }
-
     def _has_local_docs_tool(self) -> bool:
         """Check if local docs tool is available."""
         return any(
             isinstance(t, ReActLocalDocTool) for t in self.tools
         )
 
-    def _has_search_recovery_tool(self) -> bool:
-        """Check if high-level search recovery tool is available."""
-        return any(isinstance(t, ReActSearchRecoveryTool) for t in self.tools)
+    def _reset_tool_budgets(self) -> None:
+        for tool in self.tools:
+            reset = getattr(tool, "reset_budget", None)
+            if callable(reset):
+                reset()
 
     @classmethod
     def create_from_config(
@@ -537,7 +422,8 @@ class ReactAgentOrchestrator:
         # Get max iterations from config if not in kwargs
         max_iterations = kwargs.pop("max_iterations", None)
         if max_iterations is None:
-            max_iterations = config.get("reactAgent", {}).get("max_iterations", 5)
+            termination_raw = config.get("termination") or {}
+            max_iterations = normalize_termination_config(termination_raw)["max_iterations"]
 
         # Create tools from config
         tools = create_react_tools_from_config(
@@ -548,6 +434,16 @@ class ReactAgentOrchestrator:
         )
 
         show_timings = kwargs.pop("show_timings", config.get("displayResponseTimes", False))
+        judge_llm = kwargs.pop("judge_llm", None)
+        judge_cfg = (config.get("termination") or {}).get("judge") or {}
+        if judge_llm is None and judge_cfg.get("enabled", False):
+            provider = judge_cfg.get("provider") or judge_cfg.get("model")
+            if provider:
+                from langchain.langchain_llm import create_role_chat_model
+
+                judge_llm = create_role_chat_model(config, judge_cfg)
+            else:
+                judge_llm = llm
 
         return cls(
             llm=llm,
@@ -557,5 +453,6 @@ class ReactAgentOrchestrator:
             data_path=data_path,
             config=config,
             show_timings=show_timings,
+            judge_llm=judge_llm,
             **kwargs,
         )

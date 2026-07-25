@@ -1,0 +1,24 @@
+version: 1
+name: weather
+handler: skills.weather.handler:WeatherSkillHandler
+tool:
+  name: weather_conditions
+  description: >-
+    Get current weather, daily forecasts, or current air quality for an explicit
+    location. Do not use when the user has not supplied a location.
+  args_schema:
+    type: object
+    additionalProperties: false
+    required: [query]
+    properties:
+      query:
+        type: string
+        description: Complete weather request including the location and time scope.
+budget:
+  max_calls_per_query: 2
+  timeout_seconds: 15
+  max_evidence_items: 1
+availability:
+  any_of:
+    - config:GOOGLE_API_KEY
+    - config:googleSearch.api_key

@@ -1,5 +1,10 @@
 # NLP 项目：智能搜索引擎系统技术报告
 
+> **状态：迁移前快照，非当前架构。** 本报告描述 agentic loop 迁移（roadmap M0–M5）之前的系统：
+> 领域分类器、智能源头选择器、`SmartSearchOrchestrator` 与静态查询计划。这些组件均已删除。
+> 当前架构见 [System_Architecture.md](System_Architecture.md) 与
+> [docs/agentic_loop_roadmap.md](docs/agentic_loop_roadmap.md)。保留本文作为历史记录，不再更新。
+
 ## 1. 项目的整体结构和目的
 
 ### 1.1 项目定位

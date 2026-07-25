@@ -1,10 +1,10 @@
 # Skills
 
-Skill 包在 **M2** 才正式建立（契约、registry、handler、preflight），见
-[docs/agentic_loop_roadmap.md](../docs/agentic_loop_roadmap.md)。
+M2 已建立 runtime skill 契约：`contracts.py` 定义协议与 preflight 结果，`registry.py` 校验
+`skill.yaml`、执行可用性门并构建模型工具面。每个 handler 继承统一的 `EvidenceSource`，输出可直接
+进入 ledger 与 audit。
 
-目前这里只有 M0 抢救下来的 eval 用例——`harden-finance-domain-routing` 中被回退的分类知识，
-以数据形态先落到目的地，避免随代码回退一起丢失。M2 建 finance skill 时补齐
-`skill.yaml` / `SKILL.md` / `handler.py`，并把这些用例接入 pytest。
-
-在 M2 之前，这些 `.jsonl` 不被任何代码消费。
+`finance/`、`weather/`、`location/`、`transportation/`、`sports/` 均为端到端 skill；每个目录的
+`SKILL.md` 与 `evals/cases.jsonl` 分别向模型和 pytest 表达同一组正反例。新增 skill 必须同时提供
+manifest、handler、模型说明和可执行 eval。结构化能力只从 registry 进入 plan、loop 与 legacy
+入口；不存在统一领域 router 或兜底 `domain_api` 工具。

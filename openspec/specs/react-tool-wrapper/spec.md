@@ -1,71 +1,82 @@
 # react-tool-wrapper Specification
 
-> **Status:** reframing at M2 — 能力存续但立论框架会变，可修补，不要在现框架上做大投入。 分类依据见 `docs/agentic_loop_roadmap.md`。
+> **Status:** active - roadmap M5 per-tool wrapper contract.
 
 ## Purpose
-Define the LangChain ReAct tool wrappers used by the fallback executor, including web search, domain evidence access, local evidence access, and high-level search recovery built on the unified evidence layer.
+Define the independently budgeted tools available to the sole agentic loop.
+
 ## Requirements
-### Requirement: WebSearchTool 封装
-系统 SHALL 将 `search_client.search()` 封装为 LangChain BaseTool，名为 `web_search`。
+### Requirement: Web search SHALL expose normalized structured evidence
+The system SHALL wrap the configured `SearchClient` as `web_search` and SHALL normalize returned hits through `WebEvidenceSource` before observation.
 
-#### Scenario: 执行网络搜索
-- **WHEN** Agent 调用 `web_search` 工具并传入查询字符串
-- **THEN** 工具 SHALL 调用 `search_client.search(query, num_results=5)`
-- **AND** 返回格式化后的搜索结果字符串
+#### Scenario: Web search succeeds
+- **WHEN** the loop calls `web_search` with a query
+- **THEN** the tool SHALL return a bounded readable result to the model
+- **AND** it SHALL expose structured records containing reference, content, source tier, and provider-safe metadata
 
-#### Scenario: 搜索结果格式化
-- **WHEN** search 返回 SearchHit 列表
-- **THEN** 工具 SHALL 将结果格式化为可读字符串，每条结果包含序号、标题、URL、摘要
-- **AND** 如果无结果，返回 "未找到相关结果"
+#### Scenario: Web search returns no usable results
+- **WHEN** no evidence item remains after deterministic filtering
+- **THEN** the tool SHALL return a no-results outcome
+- **AND** it SHALL NOT fabricate a structured evidence record
 
-### Requirement: DomainApiTool 封装
-系统 SHALL 将 `IntelligentSourceSelector` 封装为 LangChain BaseTool，名为 `domain_api`。
+### Requirement: Registry skills SHALL remain independent tools
+Each available registry skill SHALL be exposed as its own LangChain tool; the runtime SHALL NOT provide a unified domain router.
 
-#### Scenario: 获取领域专业数据
-- **WHEN** Agent 调用 `domain_api` 工具并传入领域查询
-- **THEN** 工具 SHALL 通过统一 `domain` EvidenceSource 获取领域证据
-- **AND** 如果领域可直接回答，工具 SHALL 返回自然语言回答
-- **AND** 返回内容 SHALL 保留来源标识或引用信息
+#### Scenario: Skill preflight accepts the query
+- **WHEN** the loop calls a skill with complete valid parameters
+- **THEN** the wrapper SHALL run deterministic preflight before the provider
+- **AND** successful `EvidenceItem` records SHALL retain skill, tool, provider, and reference provenance
 
-#### Scenario: 通用领域查询
-- **WHEN** Agent 调用 `domain_api` 但无匹配领域
-- **THEN** 工具 SHALL 返回空或提示"无相关领域数据"
+#### Scenario: Skill preflight rejects the query
+- **WHEN** a required explicit parameter is missing or invalid
+- **THEN** the wrapper SHALL return structured `rejected` data and a bounded reason
+- **AND** the provider SHALL NOT be called
 
-### Requirement: LocalDocTool 封装
-系统 SHALL 将本地知识库工具封装为 LangChain BaseTool，名为 `local_docs`，并通过统一 `EvidenceSource` / `EvidenceItem` 层复用默认主链路的本地证据检索能力，而不是直接依赖 legacy `LocalRAG`。
+### Requirement: Local documents SHALL use the unified evidence layer
+The `local_docs` tool SHALL retrieve through the local `EvidenceSource` and return structured local evidence rather than invoke legacy `LocalRAG` directly.
 
-#### Scenario: 查询本地知识库
-- **WHEN** Agent 调用 `local_docs` 工具并传入查询
-- **THEN** 工具 SHALL 通过 `source_type=local` 的统一来源层检索本地证据
-- **AND** 返回结果 SHALL 包含可读的证据摘要与文档来源信息
+#### Scenario: Local documents are available
+- **WHEN** the loop calls `local_docs`
+- **THEN** the tool SHALL return bounded content and document references
+- **AND** structured records SHALL use `source_type=local`
 
-#### Scenario: 无本地文档
-- **WHEN** `data_path` 未配置或文档不存在
-- **THEN** 工具 SHALL 返回"本地知识库不可用"
+#### Scenario: No local documents are available
+- **WHEN** the configured data path contains no indexable document
+- **THEN** the tool SHALL return a deterministic unavailable/no-results outcome
 
-### Requirement: ReAct tools SHALL expose high-level search recovery capabilities
-系统 SHALL 为 ReAct fallback 提供高层搜索恢复工具，使 Agent 能复用当前默认 pipeline 的统一 EvidenceSource、归一化证据和融合能力，而不只依赖基础网页搜索或 legacy RAG 类。
+### Requirement: Search recovery SHALL be a normal high-level tool
+The loop SHALL be able to select `search_recovery` to reuse unified retrieval, filtering, optional local retrieval, and synthesis; it SHALL NOT be invoked by a post-generation fallback controller.
 
-#### Scenario: Agent uses high-level search tool during fallback
-- **WHEN** ReAct fallback 需要补检索、补证据或重新综合搜索结果
-- **THEN** Agent SHALL 可调用高层搜索工具
-- **AND** 该工具 SHALL 复用统一来源层、统一证据归一化和适用的过滤/重排能力
+#### Scenario: The model selects recovery
+- **WHEN** current observations leave an evidence or synthesis gap
+- **THEN** `search_recovery` SHALL execute through the same evidence normalization layer
+- **AND** its structured evidence SHALL enter the same ledger as other tools
 
-#### Scenario: High-level search tool returns structured recovery output
-- **WHEN** 高层搜索工具完成一次恢复性检索
-- **THEN** 工具 SHALL 返回足以支持后续推理的结果
-- **AND** 返回内容 SHALL 至少包含回答或证据摘要以及对应来源信息
+#### Scenario: A current query is recovered
+- **WHEN** analysis requires freshness but not historical coverage
+- **THEN** recovery SHALL NOT fan out into per-year historical searches
 
-### Requirement: ReAct fallback tools SHALL preserve domain and local-context recovery
-系统 SHALL 在 fallback 场景中保留对领域数据和本地知识库的复用能力，并允许与统一来源层中的其他证据来源组合使用。
+#### Scenario: Explicit multi-year history is requested
+- **WHEN** analysis marks `historical_coverage_required=true`
+- **THEN** recovery MAY perform its bounded granular temporal search
+- **AND** every provider request SHALL remain observable
 
-#### Scenario: Agent combines domain data and search recovery
-- **WHEN** 查询既需要领域 API 数据也需要网络搜索补证据
-- **THEN** Agent SHALL 能在同一次 fallback 中组合使用领域工具与高层搜索工具
-- **AND** 最终结果 SHALL 能整合多种来源的信息
+### Requirement: Every tool SHALL enforce its own call budget
+Each wrapper SHALL reset and enforce `max_calls_per_query` independently and SHALL expose `limit` and `used` after the run.
 
-#### Scenario: Agent reuses local documents during fallback
-- **WHEN** 查询涉及已上传的本地文档且 post-check 判断证据不足
-- **THEN** Agent SHALL 仍可访问本地知识库工具
-- **AND** 工具输出 SHALL 保留文档来源信息以便最终回答引用
+#### Scenario: A tool budget is exhausted
+- **WHEN** the loop calls a tool after its limit is spent
+- **THEN** the wrapper SHALL return structured `budget_exhausted`
+- **AND** no provider call SHALL occur
 
+#### Scenario: Another tool remains available
+- **WHEN** one tool is exhausted and another has remaining calls
+- **THEN** the latter SHALL retain its full independent budget
+
+### Requirement: Wrapper records SHALL be audit safe
+Tool wrappers SHALL expose bounded structured evidence and provider-call snapshots without credentials, URL query strings, complete prompts, or hidden reasoning.
+
+#### Scenario: The execution trace consumes wrapper output
+- **WHEN** one invocation yields several evidence records
+- **THEN** `QueryExecutionTrace` SHALL record one tool-call event with the aggregate item count
+- **AND** `EvidenceLedger` SHALL retain per-item references to that call

@@ -125,7 +125,7 @@ def test_search_rag_emits_one_safe_trace_step_per_provider_call() -> None:
     event = next(
         event
         for event in tracer.events
-        if event["id"] == "search_api_web_search_1" and event["status"] == "done"
+        if event["id"] == "search_api_web_1" and event["status"] == "done"
     )
     assert event["record_kind"] == "search_results"
     assert event["record_label"] == "搜索结果 · 1"

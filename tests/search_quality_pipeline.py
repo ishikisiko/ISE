@@ -92,30 +92,30 @@ def parse_args() -> argparse.Namespace:
         help="Force search for every query during collection. Useful for search-result judging sets.",
     )
 
-    parity_parser = subparsers.add_parser(
-        "parity",
-        help="Run the same queries through legacy and langgraph ReAct engines and compare outcomes.",
+    loop_audit_parser = subparsers.add_parser(
+        "loop-audit",
+        help="Run queries through the unified LangGraph loop and collect termination verdicts.",
     )
-    parity_parser.add_argument(
+    loop_audit_parser.add_argument(
         "--queries-file",
         required=True,
         help="UTF-8 text file with one query per line. Blank lines and # comments are ignored.",
     )
-    parity_parser.add_argument(
+    loop_audit_parser.add_argument(
         "--output-file",
         default=None,
-        help="Optional path to save the parity report as JSON.",
+        help="Optional path to save the loop audit report as JSON.",
     )
-    parity_parser.add_argument(
+    loop_audit_parser.add_argument(
         "--config",
         default=None,
         help="Optional path to config.json. Defaults to NLP_CONFIG_PATH env or ./config.json.",
     )
-    parity_parser.add_argument(
+    loop_audit_parser.add_argument(
         "--max-iterations",
         type=int,
         default=4,
-        help="Maximum ReAct iterations for both engines.",
+        help="Maximum ReAct iterations for the unified loop.",
     )
 
     evaluate_parser = subparsers.add_parser(
@@ -432,11 +432,11 @@ def choose_ideal_route(record: Dict[str, Any]) -> str:
 
     mapping = {
         "chat": "small_talk",
-        "weather_api": "domain_api",
-        "sports_api": "domain_api",
-        "finance_api": "domain_api",
-        "time_api": "domain_api",
-        "calculator": "domain_api",
+        "weather_api": "skill",
+        "sports_api": "skill",
+        "finance_api": "skill",
+        "time_api": "skill",
+        "calculator": "skill",
     }
     if expected_route in mapping:
         return mapping[expected_route]
@@ -1242,8 +1242,8 @@ def print_summary(report: Dict[str, Any], *, print_details: bool = False) -> Non
         )
 
 
-def run_engine_parity(args: argparse.Namespace) -> Dict[str, Any]:
-    """Run the same query set through legacy and langgraph ReAct engines."""
+def run_loop_audit(args: argparse.Namespace) -> Dict[str, Any]:
+    """Run a query set through the unified LangGraph response loop."""
     queries = read_queries(args.queries_file)
     if not queries:
         raise SystemExit("No queries found in the provided file.")
@@ -1252,25 +1252,23 @@ def run_engine_parity(args: argparse.Namespace) -> Dict[str, Any]:
 
     from orchestrators.react_agent_orchestrator import ReactAgentOrchestrator
 
-    orchestrators: Dict[str, Any] = {}
-    for engine in ("legacy", "langgraph"):
-        orchestrators[engine] = ReactAgentOrchestrator.create_from_config(
-            config=config,
-            engine=engine,
-            max_iterations=args.max_iterations,
-        )
+    orchestrator = ReactAgentOrchestrator.create_from_config(
+        config=config,
+        engine="langgraph",
+        max_iterations=args.max_iterations,
+    )
 
-    status_counts: Dict[str, Dict[str, int]] = {"legacy": {}, "langgraph": {}}
+    status_counts: Dict[str, int] = {}
     records: List[Dict[str, Any]] = []
     for index, query in enumerate(queries, start=1):
+        print(f"[loop-audit] {index}/{len(queries)}: {query}")
         row: Dict[str, Any] = {"query_id": index, "query": query}
-        for engine, orchestrator in orchestrators.items():
-            print(f"[parity] {index}/{len(queries)} {engine}: {query}")
-            try:
-                result = orchestrator.answer(query)
-                control = result.get("control") or {}
-                status = control.get("loop_status") or "completed"
-                row[engine] = {
+        try:
+            result = orchestrator.answer(query)
+            control = result.get("control") or {}
+            status = control.get("loop_status") or "completed"
+            row.update(
+                {
                     "engine": control.get("engine"),
                     "loop_status": status,
                     "iterations": control.get("loop_iterations"),
@@ -1278,11 +1276,11 @@ def run_engine_parity(args: argparse.Namespace) -> Dict[str, Any]:
                     "llm_error": result.get("llm_error"),
                     "verdicts": control.get("loop_verdicts") or [],
                 }
-            except Exception as exc:  # noqa: BLE001 - parity records errors as data
-                row[engine] = {"error": str(exc)}
-                status = "error"
-            counts = status_counts[engine]
-            counts[status] = counts.get(status, 0) + 1
+            )
+        except Exception as exc:  # noqa: BLE001 - audit records errors as data
+            row["error"] = str(exc)
+            status = "error"
+        status_counts[status] = status_counts.get(status, 0) + 1
         records.append(row)
 
     return {
@@ -1290,8 +1288,8 @@ def run_engine_parity(args: argparse.Namespace) -> Dict[str, Any]:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "num_queries": len(records),
             "max_iterations": args.max_iterations,
-            "loop_judge": "disabled",
-            "note": "legacy engine has no loop evaluation; its status is always 'completed' unless it errors.",
+            "engine": "langgraph",
+            "note": "All verdicts come from the unified deterministic critic and optional termination judge.",
         },
         "status_distribution": status_counts,
         "records": records,
@@ -1301,14 +1299,14 @@ def run_engine_parity(args: argparse.Namespace) -> Dict[str, Any]:
 def main() -> None:
     args = parse_args()
 
-    if args.command == "parity":
-        report = run_engine_parity(args)
+    if args.command == "loop-audit":
+        report = run_loop_audit(args)
         print(json.dumps(report["status_distribution"], ensure_ascii=False, indent=2))
         if args.output_file:
             ensure_parent_dir(args.output_file)
             with open(args.output_file, "w", encoding="utf-8") as handle:
                 json.dump(report, handle, ensure_ascii=False, indent=2)
-            print(f"Saved parity report to {args.output_file}")
+            print(f"Saved loop audit report to {args.output_file}")
         return
 
     if args.command == "map-external":

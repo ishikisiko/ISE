@@ -2,86 +2,35 @@
 
 ## 摘要
 
-本系统是一个基于检索增强生成（Retrieval-Augmented Generation, RAG）技术的智能搜索引擎，旨在提供精确、上下文感知的答案。该系统通过智能选择数据源、结合本地知识库与网络搜索、实施高级重排算法，并支持多模态输入，实现了对复杂查询的高质量响应。系统采用智能编排器模式，能够自动决策是否需要实时搜索，并根据查询类型选择最适合的处理流程。
+本系统是一个基于检索增强生成（Retrieval-Augmented Generation, RAG）技术的智能搜索引擎，旨在提供精确、上下文感知的答案。系统把本地知识库、网络搜索、结构化 skill 和高级重排作为独立工具交给唯一的 Agentic Loop；模型选择工具，确定性 preflight、证据策略、critic 和预算负责裁决与收口，并支持多模态输入。
 
 ## 系统架构
 
 ### 高级架构图
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        用户查询                                   │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
-│  │   图片输入       │  │   文本查询       │  │   混合输入       │  │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   SmartSearchOrchestrator                        │
-│                   智能编排控制器                                  │
-│  ┌───────────────┐ ┌───────────────┐ ┌─────────────────────────┐ │
-│  │ 时间约束解析   │ │ 领域分类器     │ │ 小对话检测             │ │
-│  └───────────────┘ └───────────────┘ └─────────────────────────┘ │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │              IntelligentSourceSelector                      │ │
-│  │                智能源头选择器                               │ │
-│  │   [天气] [交通] [金融] [体育] [通用]                         │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                ┌─────────────┴─────────────┐
-                │                           │
-                ▼                           ▼
-┌──────────────────────────┐    ┌──────────────────────────┐
-│       决策引擎            │    │      强制搜索            │
-│   ┌───────────────┐      │    │   (force_search模式)      │
-│   │ 是否需要搜索？ │      │    └──────────────────────────┘
-│   └───────────────┘      │
-│       │  │               │
-│       ▼  ▼               ▼
-│   ┌──────────┐ ┌──────────────────┐
-│   │ 不需要搜索│ │   需要搜索        │
-│   └──────────┘ └──────────────────┘
-└──────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      管道选择层                                   │
-│  ┌────────────────┐ ┌────────────────┐ ┌──────────────────────┐ │
-│  │   LocalRAG     │ │  SearchRAG     │ │   SearchRAG (Hybrid) │ │
-│  │   本地RAG      │ │  搜索RAG       │ │    混合RAG           │ │
-│  └────────────────┘ └────────────────┘ └──────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-                │           │                     │
-                ▼           ▼                     ▼
-┌──────────────────┐ ┌───────────────┐ ┌──────────────────────────┐
-│   向量存储       │ │  搜索客户端    │ │   搜索客户端 + 本地文档   │
-│  (FAISS索引)    │ │  (SerpAPI等)   │ │   + 向量存储            │
-└──────────────────┘ └───────────────┘ └──────────────────────────┘
-                              │
-                              ▼
-                    ┌─────────────────┐
-                    │  重排序器       │
-                    │ (Qwen3 Rerank) │
-                    └─────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      LLM生成层                                   │
-│  ┌────────────────┐ ┌────────────────┐ ┌──────────────────────┐ │
-│  │   OpenAI      │ │   Anthropic    │ │     GLM/智谱AI        │ │
-│  │   Claude      │ │   Gemini       │ │    MiniMax等        │ │
-│  └────────────────┘ └────────────────┘ └──────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      响应结果                                    │
-│  ┌───────────────┐ ┌───────────────┐ ┌─────────────────────────┐ │
-│  │   答案内容     │ │   来源引用     │ │    搜索元数据          │ │
-│  └───────────────┘ └───────────────┘ └─────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+```text
+用户查询（CLI / Flask）
+        |
+        v
+LangChainOrchestrator
+  时间解析 + QueryAnalysis
+  闲聊 / 视觉 / 关键歧义短路
+        |
+        v
+LangGraph Agentic Loop: act -> observe -> evaluate
+  |-- web_search / search_recovery
+  |-- local_docs -> FAISS
+  `-- registry skills -> provider APIs
+        |
+        v
+EvidenceLedger
+  归一化、来源等级、去重、provenance、保留决策
+        |
+        v
+统一 critic + 可选语义 judge + 全局/每工具预算
+        |
+        v
+答案 + 引用 + QueryExecutionTrace + durable audit
 ```
 
 ### 技术栈
@@ -117,48 +66,52 @@
 
 ## 方法论与实施细节
 
-### 1. 智能源头选择 (Intelligent Source Selection)
+### 1. Registry Skill 路由
 
-系统采用多层次决策机制来选择最合适的数据源：
+结构化能力是独立 skill，不再先经过统一领域分类器。`SkillRegistry` 只注册依赖和配置满足的
+skill；各 handler 用确定性 preflight 判断是否接受查询，拒绝或 provider 无数据时回落 Web。
 
-#### 1.1 领域检测与路由
+#### 1.1 Skill 工具面
 ```python
-# 支持的领域分类
-domains = {
-    "weather": "天气查询",
-    "transportation": "交通路线",
-    "finance": "股票金融",
-    "sports": "体育赛事",
-    "general": "通用查询"
+# 模型可见的是独立工具，而不是一个统一 domain router
+tools = {
+    "weather_conditions",
+    "nearby_places",
+    "route_directions",
+    "finance_market_data",
+    "sports_schedule",
 }
 ```
 
 **实现机制**:
-- **正则表达式**: 检测显式时间限制（如"昨天"、"最近一周"、"上个月"）
-- **LLM隐式检测**: 当正则未检测到时间限制时，LLM辅助识别隐含的时间敏感查询
-- **上下文增强**: 将当前日期注入查询，提供实时上下文
+- **可用性门**: 按 Python 依赖、配置 key 和 disabled 配置生成实际工具面
+- **确定性 preflight**: 要求显式实体、地点或起终点，不猜用户位置或标的
+- **统一执行**: 唯一的 LangGraph loop 使用 registry 派生的工具面
 
 #### 1.2 API数据源集成
 ```python
-# 领域特定API调用示例
-def fetch_domain_data(self, query: str, domain: str) -> Dict:
-    if domain == "weather":
-        # 调用天气API
-        return self._call_weather_api(query)
-    elif domain == "finance":
-        # 调用金融API (yfinance)
-        return self._fetch_stock_data(query)
-    elif domain == "transportation":
-        # 调用路线规划API
-        return self._get_route_info(query)
+# LangGraph loop 的 registry 工具执行入口
+result = skill_registry.execute(
+    "weather",
+    {"query": query},
+    options=retrieval_options,
+)
 ```
 
 **特性**:
-- **智能跳过**: 如果API已能完全回答查询，则跳过搜索流程
-- **上下文注入**: 将API数据作为额外上下文传递给搜索流程
+- **循环收敛**: skill 证据满足约束时 critic 允许直接结束，否则模型可继续选择其他工具
+- **统一证据**: provider 结果归一化为带 skill/tool-call provenance 的 `EvidenceItem`
 - **错误处理**: API调用失败时自动回退到搜索模式
 
-#### 1.3 多模态查询处理
+#### 1.3 统一终止 critic
+
+LangGraph loop 把当前证据、约束、进度和预算归一化为 `TerminationContext`，并且只调用
+`evaluate_termination` 作出继续、澄清、证据不足、预算终止或返回决定。
+顶层 `termination` 是轮数、停滞/错误阈值、judge 频率和 judge 模型的唯一配置块。确定性规则和预算
+优先于语义 judge：judge 可以否决规则通过，但不能清除证据缺口、逆转 hard stop 或扩充预算。
+每次 verdict 的 `action`、`rule_hits`、`deterministic_pass` 与 `hard_stop` 都进入 trace。
+
+#### 1.4 多模态查询处理
 ```python
 # 视觉检索流程
 def _perform_visual_retrieval(self, images: List[Dict]) -> Optional[Dict]:
@@ -297,50 +250,40 @@ max_per_domain: int = 1          # 每个域名最大结果数
 #### 4.1 多步推理实现
 
 **决策流程图**:
-```
+```text
 用户查询
     │
     ▼
-[时间约束解析]
+[时间约束解析 + QueryAnalysis]
     │
     ▼
 [小对话检测] ───→ 是 ──→ 直接LLM响应
     │
     否
     ▼
-[领域分类与API调用]
+[LangGraph act：模型选择当前可用工具或提议最终答案]
     │
     ▼
-[是否需要继续搜索?] ──── 否 ──→ 返回API结果
-    │
-    是
-    ▼
-[LLM决策引擎] ───→ 不需要搜索 ──→ 直接回答
-    │
-    需要搜索
-    ▼
-[关键词生成] ──── 英文/中文双语关键词
+[observe：preflight + provider + EvidenceItem]
     │
     ▼
-[搜索管道] (SearchRAG/Hybrid)
+[EvidenceLedger：来源等级、去重、provenance、保留决策]
     │
     ▼
-[重排序与过滤]
-    │
-    ▼
-[LLM生成最终答案]
+[evaluate：critic + 可选 judge + 预算]
+    ├── continue ──→ 下一轮 act
+    └── terminal ──→ 返回答案/不足说明 + trace
 ```
 
 **复杂查询示例**: *"英伟达最新财报对股价的影响"*
 
 **执行步骤**:
 1. **时间解析**: 识别"最新" → 注入当前日期
-2. **领域分类**: finance (金融)
-3. **API预检**: 调用yfinance获取NVDA股票数据
-4. **关键词生成**: `["NVIDIA earnings", "NVDA stock price", "财报", "股价", "最新"]`
-5. **搜索执行**: 使用关键词进行web搜索
-6. **重排序**: 使用Qwen3对结果排序
-7. **答案生成**: 结合股票数据和搜索结果生成分析
+2. **工具选择**: 模型选择 `finance_market_data`
+3. **确定性预检**: 解析 NVDA 与 quote/history 时间窗后再调用 provider
+4. **观察与评估**: finance 证据进入 ledger，critic 检查权威性、时间和回答覆盖
+5. **补充检索**: 如仍缺定性影响证据，模型可调用 `web_search` 或 `search_recovery`
+6. **终止**: 候选答案通过同一 critic 后返回，或在预算上限给出明确不足说明
 
 #### 4.2 并行处理能力
 
@@ -420,13 +363,12 @@ pages = loader.load()
 
 **管道缓存**:
 ```python
-def _ensure_search_rag_pipeline(self, snapshot: Optional[tuple]):
-    # 缓存检查: 基于search_client ID和文档快照
-    search_signature = (id(self.search_client), snapshot)
-    if self._search_rag_pipeline is None or \
-       self._search_rag_signature != search_signature:
-        # 重建管道
-        self._search_rag_pipeline = SearchRAG(...)
+class ReActSearchRecoveryTool:
+    def _get_chain(self):
+        # 同一工具实例懒加载并复用统一 SearchRAGChain；每轮调用预算单独重置
+        if self._rag_chain is None:
+            self._rag_chain = SearchRAGChain(...)
+        return self._rag_chain
 ```
 
 **文档快照**:
@@ -459,15 +401,18 @@ LLM请求: timeout=60秒
 重排序API: timeout=15秒
 ```
 
-#### 6.3 温度控制
+#### 6.3 循环与工具预算
 
-**任务特定温度**:
+**统一配置**:
 ```python
-temperature_config = {
-    "direct_answer": 0.3,
-    "search_decision": 0.0,  # 决策需要确定性
-    "keyword_generation": 0.2,
-    "time_detection": 0.1
+termination = {
+    "max_iterations": 5,
+    "judge_interval": 2,
+    "tool_budgets": {
+        "web_search": 3,
+        "search_recovery": 2,
+        "local_docs": 2,
+    },
 }
 ```
 
@@ -481,9 +426,8 @@ temperature_config = {
     "总响应时间": "1500ms",
     "LLM调用次数": 3,
     "LLM调用时间": [
-        {"label": "search_decision", "duration": "200ms"},
-        {"label": "keyword_generation", "duration": "150ms"},
-        {"label": "final_answer", "duration": "800ms"}
+        {"label": "loop_act", "duration": "800ms"},
+        {"label": "termination_judge", "duration": "500ms"}
     ],
     "工具调用时间": [
         {"tool": "google_vision", "duration": "350ms"},
@@ -496,9 +440,9 @@ temperature_config = {
 #### 7.2 错误处理
 
 **错误类型**:
-- `decision_llm_error`: 决策LLM调用失败
-- `decision_parse_error`: JSON解析失败
-- `domain_api_error`: 领域API调用失败
+- `invalid_tool_request`: 模型工具调用格式无效
+- `tool_errors_unrecoverable`: 工具错误达到配置上限且没有成功观察
+- `skill_error`: registered skill 调用失败
 - `search_unavailable`: 搜索不可用
 
 **回退策略**:

@@ -1,7 +1,6 @@
 """Unified evidence retrieval and normalization primitives."""
 
 from .source_layer import (
-    DomainEvidenceSource,
     EvidenceItem,
     EvidenceSource,
     EvidenceSourceType,
@@ -25,7 +24,6 @@ from .source_tiering import (
 )
 
 __all__ = [
-    "DomainEvidenceSource",
     "EvidenceItem",
     "EvidenceSource",
     "EvidenceSourceType",

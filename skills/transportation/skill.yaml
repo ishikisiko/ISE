@@ -1,0 +1,24 @@
+version: 1
+name: transportation
+handler: skills.transportation.handler:TransportationSkillHandler
+tool:
+  name: route_directions
+  description: >-
+    Compute a route between an explicit origin and destination. Supports driving,
+    transit, walking, and bicycling. It does not provide train or flight timetables.
+  args_schema:
+    type: object
+    additionalProperties: false
+    required: [query]
+    properties:
+      query:
+        type: string
+        description: Complete route request containing both origin and destination.
+budget:
+  max_calls_per_query: 3
+  timeout_seconds: 15
+  max_evidence_items: 1
+availability:
+  any_of:
+    - config:GOOGLE_API_KEY
+    - config:googleSearch.api_key

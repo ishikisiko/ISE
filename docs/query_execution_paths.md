@@ -1,20 +1,23 @@
 # Query Execution Path Map
 
 `utils/query_orchestration.py` is the shared contract boundary. It owns
-`QueryAnalysis`, `QueryPlan`, `EvidenceLedger`, `VerificationOutcome`, and the
-bounded `QueryExecutionTrace` projection.
+`QueryAnalysis`, `EvidenceLedger`, the sole `evaluate_termination` critic,
+and the bounded `QueryExecutionTrace`.
 
-| Entry or exit path | Adapter and contract behavior |
+| Entry or exit path | Contract behavior |
 | --- | --- |
-| CLI | `main.py` builds the LangChain orchestrator and passes the normal `answer` options. CLI audit owns the JSONL write in external mode. |
-| Flask | `server.py` builds the same orchestrator through `build_pipeline`; `/api/answer` preserves additive `control` fields and stream tracing remains separate. |
-| Direct and small-talk | `LangChainOrchestrator.answer` records analysis and adds a direct plan only at finalization. No evidence executor is started. |
-| Local-only | `allow_search=false` creates a local/direct plan before `_handle_local_only`; the primary RAG layer receives the plan and only enables the local source. |
-| Structured domain API | Only weather, transportation, finance, sports, and location can create a domain API step. The call is controller-traced and its normalized result enters the ledger. |
-| Default search | The orchestrator binds a plan before keyword generation. `SearchRAGChain` executes only plan-authorized web/local steps, captures provider attempts before later calls reset client state, and sends retained ledger evidence to answer construction. |
-| Temporal recovery | The granular historical search is callable only from a declared `temporal_recovery` step and consumes controller query/recovery budget. |
-| ReAct fallback | Existing post-check fallback remains compatible, but a nonrecoverable plan verification outcome blocks it; the trace records the fallback decision. |
+| CLI | `main.py` builds `LangChainOrchestrator` and calls the same `answer` entrypoint as the API. |
+| Flask | `server.py` builds the same orchestrator through `build_pipeline`; SSE events and durable audit use the shared tracer. |
+| Small talk | The deterministic small-talk shortcut answers directly and does not open a tool loop. |
+| Visual input | The bounded visual handler remains separate because the loop has no image tool. |
+| Critical ambiguity | `QueryAnalysis` requests clarification before tools; accepted deterministic skill preflight may resolve a generic entity reference first. |
+| All other queries | `LangChainOrchestrator -> ReactAgentOrchestrator -> ReactLoopGraphRunner` runs `act -> observe -> evaluate`. |
+| Search disabled | The same loop runs with `web_search` and `search_recovery` removed from its tool surface. |
+| Registered skills | The model selects registry-derived tools; each tool enforces deterministic preflight and its manifest call budget. |
+| Web/local retrieval | Tool results carry source tier, canonical reference, and actual tool-call provenance into one `EvidenceLedger`. |
+| Termination | The deterministic critic, optional semantic judge, global iteration ceiling, and per-tool budgets produce the sole terminal verdict. |
 
-Existing `answer`, `search_hits`, `retrieved_docs`, `control`, and timing
-fields remain available. Plan, coverage, verification, and trace facts are
-additive under `control`.
+Responses keep `answer`, `search_hits`, `retrieved_docs`, `control`, and
+timing fields. Additive control metadata exposes query analysis, ledger coverage,
+actual execution trace, terminal verdicts, and per-tool budget use. There is no
+runtime engine switch, static query plan, or post-generation fallback executor.

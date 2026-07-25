@@ -1,15 +1,15 @@
 """LangGraph-based ReAct loop with explicit per-iteration evaluation.
 
-This module implements an explicit state machine (`act -> observe -> evaluate`)
-as an alternative engine to the legacy LangChain AgentExecutor loop. Success
-and failure of the loop are decided by the evaluate node: the model proposes,
-the evaluator disposes.
+This module implements the sole ReAct state machine (`act -> observe -> evaluate`).
+Success and failure are decided by the shared M4 termination critic: the model
+proposes, the critic disposes.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -17,25 +17,31 @@ from uuid import uuid4
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 
-from langchain.postcheck import (
-    _extract_numbers,
+from utils.query_orchestration import (
+    CriticBudgetState,
+    CriticEvidenceState,
+    TerminationAction,
+    TerminationContext,
     check_constraint_coverage,
     evidence_increment_ratio,
+    evaluate_termination,
+    extract_numbers,
+    normalize_termination_config,
 )
 from utils.retrieval_trace import emit_search_call_step, search_call_snapshots
 from utils.search_routing import extract_json_object
+from utils.timing_utils import extract_token_usage
 from utils.time_parser import TimeConstraint
 from utils.workflow_trace import WorkflowTracer, ensure_tracer
 
-DEFAULT_EVALUATION_CONFIG: Dict[str, Any] = {
-    "judge_interval": 2,
-    "repeat_threshold": 2,
-    "no_progress_threshold": 2,
-    "tool_error_threshold": 2,
-    "new_evidence_min_ratio": 0.1,
-}
-
-LOOP_STATUSES = ("succeeded", "exhausted", "stagnated", "unrecoverable")
+LOOP_STATUSES = (
+    "succeeded",
+    "exhausted",
+    "stagnated",
+    "unrecoverable",
+    "evidence_insufficient",
+    "clarification_required",
+)
 
 _FUNCTION_TAG = re.compile(
     r"<function>\s*(?P<name>[^<]{1,80}?)\s*</function>",
@@ -95,28 +101,11 @@ _VERDICT_REASON_LABELS = {
     "exhausted": "迭代用尽",
     "stagnated": "检索停滞",
     "unrecoverable": "工具持续失败",
+    "evidence_insufficient": "证据不足",
+    "clarification_required": "需要澄清",
     "invalid_tool_request": "工具调用格式无效",
     "process_narration": "过程性文本，继续补充",
 }
-
-
-def normalize_evaluation_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Merge user evaluation config over defaults with safe coercion."""
-    merged = dict(DEFAULT_EVALUATION_CONFIG)
-    if not config:
-        return merged
-    for key in merged:
-        if key not in config:
-            continue
-        value = config[key]
-        try:
-            if key == "new_evidence_min_ratio":
-                merged[key] = float(value)
-            else:
-                merged[key] = int(value)
-        except (TypeError, ValueError):
-            continue
-    return merged
 
 
 def langgraph_available() -> bool:
@@ -140,6 +129,12 @@ class LoopVerdict:
     reason: str = "continue"
     judge_used: bool = False
     judge_error: Optional[str] = None
+    action: str = TerminationAction.CONTINUE.value
+    deterministic_pass: bool = False
+    hard_stop: bool = False
+    failure_types: List[str] = field(default_factory=list)
+    rule_hits: List[Dict[str, str]] = field(default_factory=list)
+    evidence_sufficiency: str = "unknown"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -151,6 +146,12 @@ class LoopVerdict:
             "reason": self.reason,
             "judge_used": self.judge_used,
             "judge_error": self.judge_error,
+            "action": self.action,
+            "deterministic_pass": self.deterministic_pass,
+            "hard_stop": self.hard_stop,
+            "failure_types": list(self.failure_types),
+            "rule_hits": list(self.rule_hits),
+            "evidence_sufficiency": self.evidence_sufficiency,
         }
 
 
@@ -173,23 +174,27 @@ class ReactLoopGraphRunner:
         llm: BaseChatModel,
         tools: List[Any],
         max_iterations: int = 5,
-        evaluation_config: Optional[Dict[str, Any]] = None,
+        termination_config: Optional[Dict[str, Any]] = None,
         judge_llm: Optional[BaseChatModel] = None,
         query: str = "",
         time_constraint: Optional[TimeConstraint] = None,
-        fallback_context: Optional[Dict[str, Any]] = None,
         history_window: int = 5,
         tracer: Optional[Any] = None,
+        analysis: Optional[Any] = None,
+        timing_recorder: Optional[Any] = None,
+        execution_trace: Optional[Any] = None,
     ) -> None:
         self.llm = llm
         self.tools = list(tools or [])
         self.tools_by_name = {getattr(t, "name", ""): t for t in self.tools}
         self.max_iterations = max(1, int(max_iterations or 5))
-        self.eval_cfg = normalize_evaluation_config(evaluation_config)
+        self.eval_cfg = normalize_termination_config(termination_config)
         self.judge_llm = judge_llm
         self.query = query
         self.time_constraint = time_constraint
-        self.fallback_context = fallback_context or {}
+        self.analysis = analysis
+        self.timing_recorder = timing_recorder
+        self.execution_trace = execution_trace
         self.history_window = max(1, int(history_window))
         # Keep a private recorder for direct callers so the final response can
         # expose the same bounded facts even when no SSE listener is attached.
@@ -232,23 +237,26 @@ class ReactLoopGraphRunner:
     # Setup helpers
     # ------------------------------------------------------------------
     def _derive_checklist(self) -> List[str]:
-        """Derive the initial constraint checklist from fallback context or query."""
-        missing = [str(c) for c in (self.fallback_context.get("missing_constraints") or []) if c]
-        failure_types = [str(f) for f in (self.fallback_context.get("failure_types") or []) if f]
+        """Derive the initial constraint checklist.
+
+        Shared ``QueryAnalysis.constraints`` is authoritative. A direct caller
+        without analysis gets a deterministic fallback checklist.
+        """
         checklist: List[str] = []
-        for item in missing + failure_types:
-            if item and item not in checklist:
-                checklist.append(item)
-        if checklist:
-            return checklist
+        analysis_constraints = getattr(self.analysis, "constraints", None)
+        if isinstance(analysis_constraints, dict) and analysis_constraints:
+            if analysis_constraints.get("temporal_required"):
+                checklist.append("time_constraint")
+            if analysis_constraints.get("comparison_required"):
+                checklist.append("comparison")
+            if checklist:
+                return checklist
+
         _, derived = check_constraint_coverage(self.query, "", "", self.time_constraint)
         return derived
 
     def _format_success_criteria(self) -> str:
         parts: List[str] = []
-        recovery_goal = str(self.fallback_context.get("recovery_goal") or "").strip()
-        if recovery_goal:
-            parts.append(f"补救目标：{recovery_goal}")
         if self.initial_checklist:
             parts.append("本次回答必须满足：" + "、".join(self.initial_checklist))
         if not parts:
@@ -356,9 +364,37 @@ class ReactLoopGraphRunner:
         except Exception:
             return []
 
+    def _has_remaining_tool_budget(self) -> bool:
+        """Return whether at least one enabled tool can still be attempted."""
+        for tool in self.tools:
+            status = getattr(tool, "get_budget_status", None)
+            if not callable(status):
+                return True
+            try:
+                budget = status() or {}
+                if int(budget.get("used") or 0) < int(budget.get("limit") or 0):
+                    return True
+            except (TypeError, ValueError):
+                return True
+        return False
+
     @staticmethod
     def _is_textual_tool_error(content: str) -> bool:
-        return (content or "").lstrip().casefold().startswith(_TEXTUAL_TOOL_ERRORS)
+        text = (content or "").lstrip()
+        if text.casefold().startswith(_TEXTUAL_TOOL_ERRORS):
+            return True
+        if text.startswith("{"):
+            try:
+                payload = json.loads(text)
+            except (TypeError, ValueError):
+                return False
+            return isinstance(payload, dict) and payload.get("status") in {
+                "rejected",
+                "no_data",
+                "error",
+                "budget_exhausted",
+            }
+        return False
 
     def _trace_invalid_tool_request(self, iteration: int, reason: str) -> None:
         step_id = f"react_invalid_tool_{iteration}"
@@ -439,6 +475,11 @@ class ReactLoopGraphRunner:
         reason = _VERDICT_REASON_LABELS.get(verdict.reason, verdict.reason)
         items = [
             {"label": "判定", "value": reason},
+            {"label": "动作", "value": verdict.action},
+            {
+                "label": "确定性 critic",
+                "value": "通过" if verdict.deterministic_pass else "未通过",
+            },
             {"label": "新证据", "value": "是" if verdict.new_evidence else "否"},
         ]
         if verdict.constraints_met:
@@ -461,6 +502,20 @@ class ReactLoopGraphRunner:
             items.append({"label": "评审", "value": "失败，已使用规则"})
         else:
             items.append({"label": "评审", "value": "规则评估"})
+        if verdict.rule_hits:
+            items.append(
+                {
+                    "label": "规则命中",
+                    "value": self._safe_trace_text(
+                        "、".join(
+                            str(hit.get("rule") or "")
+                            for hit in verdict.rule_hits[:6]
+                            if isinstance(hit, dict)
+                        ),
+                        limit=180,
+                    ),
+                }
+            )
 
         detail = reason
         if verdict.constraints_missing:
@@ -506,6 +561,7 @@ class ReactLoopGraphRunner:
             {
                 "messages": Annotated[list, add_messages],
                 "evidence_pool": List[str],
+                "evidence_records": List[Dict[str, Any]],
                 "iteration": int,
                 "verdicts": List[Dict[str, Any]],
                 "constraints_met": List[str],
@@ -554,6 +610,8 @@ class ReactLoopGraphRunner:
         iteration = int(state["iteration"]) + 1
         iteration_step_id = self._iteration_step_id(iteration)
         self.tracer.begin(iteration_step_id, f"第 {iteration} 轮", detail="模型正在决定下一步")
+        started = time.perf_counter()
+        response: Any = None
         try:
             if self._use_native_tools:
                 messages = [SystemMessage(content=self.system_prompt)] + list(state["messages"])
@@ -566,6 +624,15 @@ class ReactLoopGraphRunner:
                 detail="模型调用失败：" + self._safe_trace_text(type(exc).__name__, limit=80),
             )
             raise
+        finally:
+            if self.timing_recorder is not None:
+                self.timing_recorder.record_llm_call(
+                    label="loop_act",
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    provider=getattr(self.llm, "provider", None),
+                    model=getattr(self.llm, "model_name", None),
+                    extra=extract_token_usage(response),
+                )
 
         tool_calls = getattr(response, "tool_calls", None) or []
         invalid_tool_request: Optional[str] = None
@@ -624,11 +691,13 @@ class ReactLoopGraphRunner:
 
         tool_messages: List[ToolMessage] = []
         new_observations: List[str] = []
+        new_records: List[Dict[str, Any]] = []
         error_streak = state["tool_error_streak"]
         had_success = state["had_successful_observation"]
         fingerprints: List[str] = []
 
         for position, call in enumerate(tool_calls, start=1):
+            record_start = len(new_records)
             fingerprints.append(self._fingerprint(call))
             tool_name = str(call.get("name") or "")
             tool_step_id = self._tool_step_id(iteration, position)
@@ -640,6 +709,7 @@ class ReactLoopGraphRunner:
             )
             tool = self.tools_by_name.get(tool_name)
             failed = False
+            tool_started = time.perf_counter()
             if tool is None:
                 content = f"Error: unknown tool '{tool_name}'"
                 error_streak += 1
@@ -655,10 +725,47 @@ class ReactLoopGraphRunner:
                         error_streak = 0
                         had_success = True
                         new_observations.append(content)
+                        structured_records = self._tool_evidence_records(tool)
+                        if structured_records:
+                            for raw_record in structured_records:
+                                record = dict(raw_record)
+                                record.update(
+                                    {
+                                        "tool_name": tool_name,
+                                        "query": query or "",
+                                        "iteration": iteration,
+                                        "position": position,
+                                        "status": "done",
+                                    }
+                                )
+                                record.setdefault("content", content)
+                                record.setdefault("item_count", 1)
+                                new_records.append(record)
+                        else:
+                            new_records.append(
+                                self._evidence_record(
+                                    tool_name=tool_name,
+                                    query=query,
+                                    iteration=iteration,
+                                    position=position,
+                                    content=content,
+                                )
+                            )
                 except Exception as exc:  # noqa: BLE001 - tool errors are loop data
                     content = f"Error: tool '{tool_name}' failed: {exc}"
                     error_streak += 1
                     failed = True
+
+            if (
+                self.timing_recorder is not None
+                and tool_name in {"web_search", "search_recovery"}
+            ):
+                self.timing_recorder.record_tool_call(
+                    tool=tool_name,
+                    duration_ms=(time.perf_counter() - tool_started) * 1000,
+                    success=not failed,
+                    extra={"kind": "loop_search_tool"},
+                )
 
             if tool is not None:
                 for api_position, snapshot in enumerate(
@@ -673,6 +780,50 @@ class ReactLoopGraphRunner:
 
             items = self._tool_trace_items(call, result_value=content, failed=failed)
             count = self._tool_result_count(call, content)
+            if self.execution_trace is not None:
+                observed_records = new_records[record_start:]
+                source_types = [
+                    str(record.get("source_type") or "")
+                    for record in observed_records
+                    if isinstance(record, dict)
+                ]
+                source_tiers = [
+                    str(record.get("source_tier") or "")
+                    for record in observed_records
+                    if isinstance(record, dict)
+                ]
+                preferred_tier = next(
+                    (
+                        tier
+                        for tier in ("official", "first_party", "authoritative", "local")
+                        if tier in source_tiers
+                    ),
+                    next((tier for tier in source_tiers if tier), None),
+                )
+                self.execution_trace.record_tool_call(
+                    tool=tool_name or "unknown",
+                    status="error" if failed else "done",
+                    iteration=iteration,
+                    position=position,
+                    query=query,
+                    source_type=next(
+                        (source_type for source_type in source_types if source_type),
+                        None,
+                    ),
+                    source_tier=preferred_tier,
+                    item_count=(
+                        0
+                        if failed
+                        else len(observed_records)
+                        if observed_records
+                        else int(count or 0)
+                    ),
+                    reason=(
+                        self._safe_trace_text(content, limit=160)
+                        if failed
+                        else None
+                    ),
+                )
             if failed:
                 detail = "调用失败"
             elif count is not None:
@@ -703,6 +854,7 @@ class ReactLoopGraphRunner:
         return {
             "messages": tool_messages,
             "evidence_pool": list(state["evidence_pool"]) + new_observations,
+            "evidence_records": list(state.get("evidence_records") or []) + new_records,
             "tool_error_streak": error_streak,
             "had_successful_observation": had_success,
             "last_fingerprint": combined_fingerprint or state["last_fingerprint"],
@@ -717,148 +869,316 @@ class ReactLoopGraphRunner:
             return ToolMessage(content=content, tool_call_id=call.get("id", ""))
         return HumanMessage(content=f"[工具 {call.get('name', '')} 返回]\n{content}")
 
+    @staticmethod
+    def _evidence_record(
+        *,
+        tool_name: str,
+        query: Optional[str],
+        iteration: int,
+        position: int,
+        content: str,
+    ) -> Dict[str, Any]:
+        """Build a provenance record for one successful tool observation.
+
+        Maps tool names onto the source vocabulary understood by the ledger.
+        """
+        source_type_map = {
+            "web_search": "web",
+            "search_recovery": "web",
+            "finance_market_data": "domain",
+            "weather_conditions": "domain",
+            "nearby_places": "domain",
+            "route_directions": "domain",
+            "sports_schedule": "domain",
+            "local_docs": "local",
+        }
+        return {
+            "tool_name": tool_name,
+            "source_type": source_type_map.get(tool_name, "web"),
+            "source_tier": (
+                "authoritative"
+                if source_type_map.get(tool_name) == "domain"
+                else "local" if source_type_map.get(tool_name) == "local" else "unknown"
+            ),
+            "query": query or "",
+            "iteration": int(iteration),
+            "position": int(position),
+            "content": content,
+        }
+
+    @staticmethod
+    def _tool_evidence_records(tool: Any) -> List[Dict[str, Any]]:
+        getter = getattr(tool, "get_last_evidence_records", None)
+        if not callable(getter):
+            return []
+        try:
+            return [
+                dict(record)
+                for record in list(getter() or [])
+                if isinstance(record, dict)
+            ]
+        except Exception:  # noqa: BLE001 - provenance cannot fail the tool call
+            return []
+
     def _evaluate(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        iteration = state["iteration"]
+        iteration = int(state["iteration"])
         self.tracer.begin(
             self._evaluation_step_id(iteration),
             f"第 {iteration} 轮评估",
-            detail="正在检查证据与约束",
+            detail="统一 critic 正在检查证据、约束与预算",
         )
-        final_proposed = state["final_proposed"]
-        invalid_tool_request = state.get("invalid_tool_request")
-        invalid_final_response = state.get("invalid_final_response")
+        final_proposed = bool(state["final_proposed"])
+        invalid_tool_request = bool(state.get("invalid_tool_request"))
+        invalid_final_response = bool(state.get("invalid_final_response"))
         draft = self._last_ai_text(state["messages"])
         pool_text = "\n".join(state["evidence_pool"])
 
-        met, missing = check_constraint_coverage(self.query, pool_text, draft, self.time_constraint)
-        met = [c for c in met if c in self.initial_checklist]
-        missing = [c for c in missing if c in self.initial_checklist]
+        met, missing = check_constraint_coverage(
+            self.query,
+            pool_text,
+            draft,
+            self.time_constraint,
+        )
+        met = [value for value in met if value in self.initial_checklist]
+        missing = [value for value in missing if value in self.initial_checklist]
 
-        no_progress_streak = state["no_progress_streak"]
+        no_progress_streak = int(state["no_progress_streak"])
         if not final_proposed:
-            no_progress_streak = 0 if state["last_round_new_evidence"] else no_progress_streak + 1
+            no_progress_streak = (
+                0
+                if state["last_round_new_evidence"]
+                else no_progress_streak + 1
+            )
 
         unsupported: List[str] = []
         if final_proposed and draft:
             numbers = [
                 token
-                for token in _extract_numbers(draft)
+                for token in extract_numbers(draft)
                 if token not in {"1", "2", "3", "4", "5"}
             ]
-            unsupported = [token for token in numbers if token.lower() not in pool_text.lower()]
+            unsupported = [
+                token for token in numbers if token.casefold() not in pool_text.casefold()
+            ]
 
-        forced = self._forced_termination(state, final_proposed, no_progress_streak, missing, unsupported)
+        context = self._termination_context(
+            state,
+            draft=draft,
+            final_proposed=final_proposed,
+            constraints_met=met,
+            constraints_missing=missing,
+            unsupported=unsupported,
+            no_progress_streak=no_progress_streak,
+        )
+        preliminary = evaluate_termination(context)
 
-        judge_used = False
-        judge_error = state["judge_error"]
         judge_payload: Optional[Dict[str, Any]] = None
-        if self.judge_llm is not None and not invalid_tool_request and not invalid_final_response:
-            due_interval = iteration > 0 and iteration % self.eval_cfg["judge_interval"] == 0
-            if due_interval or forced:
-                judge_payload, judge_error = self._run_judge(draft, met, missing, state)
-                judge_used = judge_payload is not None
+        judge_error = state.get("judge_error")
+        should_judge = (
+            self.judge_llm is not None
+            and not invalid_tool_request
+            and not invalid_final_response
+            and preliminary.action != TerminationAction.CLARIFY
+            and (
+                final_proposed
+                or preliminary.hard_stop
+                or (iteration > 0 and iteration % self.eval_cfg["judge_interval"] == 0)
+            )
+        )
+        if should_judge:
+            judge_payload, judge_error = self._run_judge(
+                draft,
+                preliminary.constraints_met,
+                preliminary.missing_constraints,
+                state,
+            )
+        context.judge_payload = judge_payload
+        context.judge_error = judge_error
+        decision = evaluate_termination(context)
 
-        if judge_payload:
-            passes = judge_payload.get("passes_postcheck")
-            judge_missing = judge_payload.get("missing_constraints") or []
-            if isinstance(judge_missing, str):
-                judge_missing = [judge_missing]
-            if passes is True:
-                missing = []
-            elif passes is False:
-                merged = list(dict.fromkeys(missing + [str(m) for m in judge_missing if m]))
-                missing = merged or missing
+        reason = decision.reason
+        if invalid_tool_request:
+            reason = "invalid_tool_request"
+        elif invalid_final_response:
+            reason = "process_narration"
+        elif decision.action == TerminationAction.RETURN:
+            reason = "constraints_satisfied"
+        elif decision.action == TerminationAction.CONTINUE and final_proposed:
+            reason = "final_answer_rejected"
+        elif decision.action == TerminationAction.RETURN_INSUFFICIENT:
+            reason = "evidence_insufficient"
 
         verdict = LoopVerdict(
             iteration=iteration,
             new_evidence=bool(state["last_round_new_evidence"]),
-            constraints_met=met,
-            constraints_missing=missing,
-            judge_used=judge_used,
-            judge_error=judge_error if not judge_used and judge_error else None,
+            constraints_met=list(decision.constraints_met),
+            constraints_missing=list(decision.missing_constraints),
+            should_continue=decision.should_continue,
+            reason=reason,
+            judge_used=decision.judge_used,
+            judge_error=decision.judge_error,
+            action=decision.action.value,
+            deterministic_pass=decision.deterministic_pass,
+            hard_stop=decision.hard_stop,
+            failure_types=list(decision.failure_types),
+            rule_hits=list(decision.rule_hits),
+            evidence_sufficiency=decision.evidence_sufficiency,
         )
 
         update: Dict[str, Any] = {
-            "constraints_met": met,
-            "constraints_missing": missing,
+            "constraints_met": list(decision.constraints_met),
+            "constraints_missing": list(decision.missing_constraints),
             "no_progress_streak": no_progress_streak,
             "judge_error": judge_error,
         }
 
         termination_reason: Optional[str] = None
         final_answer: Optional[str] = None
-
-        if invalid_tool_request:
-            if iteration >= self.max_iterations:
-                termination_reason = "exhausted"
-                final_answer = self._best_effort_answer("", "exhausted")
-                verdict.should_continue = False
-            else:
-                update["messages"] = [
-                    HumanMessage(
-                        content=(
-                            "上一轮工具调用格式无效，工具未执行。请使用可用工具的结构化调用"
-                            "或直接给出最终答案。"
-                        )
+        if decision.action == TerminationAction.RETURN:
+            termination_reason = "succeeded"
+            final_answer = draft
+        elif decision.action in {
+            TerminationAction.EXHAUSTED,
+            TerminationAction.STAGNATED,
+            TerminationAction.UNRECOVERABLE,
+            TerminationAction.RETURN_INSUFFICIENT,
+            TerminationAction.CLARIFY,
+        }:
+            termination_reason = {
+                TerminationAction.RETURN_INSUFFICIENT: "evidence_insufficient",
+                TerminationAction.CLARIFY: "clarification_required",
+            }.get(decision.action, decision.action.value)
+            final_answer = self._best_effort_answer(draft, termination_reason)
+        elif invalid_tool_request:
+            update["messages"] = [
+                HumanMessage(
+                    content=(
+                        "上一轮工具调用格式无效，工具未执行。请使用可用工具的结构化调用"
+                        "或直接给出最终答案。"
                     )
-                ]
-                verdict.should_continue = True
-            verdict.reason = "invalid_tool_request"
+                )
+            ]
         elif invalid_final_response:
-            if iteration >= self.max_iterations:
-                termination_reason = "exhausted"
-                final_answer = self._best_effort_answer("", "exhausted")
-                verdict.should_continue = False
-            else:
-                update["messages"] = [
-                    HumanMessage(
-                        content=(
-                            "上一轮只描述了检索计划，并非可展示的最终答案。请使用可用工具的"
-                            "结构化调用，或直接给出面向用户的最终答案；不要说明你准备做什么。"
-                        )
+            update["messages"] = [
+                HumanMessage(
+                    content=(
+                        "上一轮只描述了检索计划，并非可展示的最终答案。请使用可用工具的"
+                        "结构化调用，或直接给出面向用户的最终答案；不要说明你准备做什么。"
                     )
-                ]
-                verdict.should_continue = True
-            verdict.reason = "process_narration"
-        elif forced:
-            termination_reason = forced
-            final_answer = self._best_effort_answer(draft, forced)
-            verdict.should_continue = False
-            verdict.reason = forced
-        elif final_proposed:
-            if not missing and not unsupported:
-                termination_reason = "succeeded"
-                final_answer = draft
-                verdict.should_continue = False
-                verdict.reason = "constraints_satisfied"
-            elif iteration >= self.max_iterations:
-                termination_reason = "exhausted"
-                final_answer = self._best_effort_answer(draft, "exhausted")
-                verdict.should_continue = False
-                verdict.reason = "exhausted"
-            else:
-                rejected = list(missing)
-                if unsupported:
-                    rejected.append("unsupported_specific_detail")
-                feedback = HumanMessage(
+                )
+            ]
+        elif final_proposed and decision.should_continue:
+            rejected = list(decision.missing_constraints) or ["semantic_sufficiency"]
+            update["messages"] = [
+                HumanMessage(
                     content=(
                         "你的回答尚未满足以下约束："
                         + "、".join(rejected)
                         + "。请继续使用工具收集信息，然后重新作答。"
                     )
                 )
-                update["messages"] = [feedback]
-                verdict.should_continue = True
-                verdict.reason = "final_answer_rejected"
-        else:
-            verdict.should_continue = True
-            verdict.reason = "continue"
+            ]
 
         update["termination_reason"] = termination_reason
         update["final_answer"] = final_answer
         update["verdicts"] = list(state["verdicts"]) + [verdict.to_dict()]
         self._trace_verdict(iteration, verdict)
         return update
+
+    def _termination_context(
+        self,
+        state: Dict[str, Any],
+        *,
+        draft: str,
+        final_proposed: bool,
+        constraints_met: List[str],
+        constraints_missing: List[str],
+        unsupported: List[str],
+        no_progress_streak: int,
+    ) -> TerminationContext:
+        records = [
+            record
+            for record in list(state.get("evidence_records") or [])
+            if isinstance(record, dict)
+        ]
+        evidence_text = " ".join(
+            str(record.get("content") or "") for record in records
+        )
+        analysis_constraints = getattr(self.analysis, "constraints", None)
+        analysis_constraints = (
+            analysis_constraints if isinstance(analysis_constraints, dict) else {}
+        )
+        policies: List[str] = []
+        if analysis_constraints.get("authority_required"):
+            policies.append("authority")
+        if analysis_constraints.get("comparison_required"):
+            policies.append("comparison_coverage")
+        if analysis_constraints.get("historical_coverage_required"):
+            policies.append("temporal_coverage")
+
+        comparison_members = list(
+            getattr(self.analysis, "comparison_members", None) or []
+        )
+        covered_entities = [
+            member
+            for member in comparison_members
+            if member.casefold() in evidence_text.casefold()
+        ]
+        authoritative_tiers = {"official", "first_party", "authoritative"}
+        authoritative_count = sum(
+            1
+            for record in records
+            if str(record.get("source_tier") or "").casefold() in authoritative_tiers
+        )
+        covered_constraints = (
+            ("temporal_coverage",)
+            if re.search(r"(?<!\d)20\d{2}(?!\d)", evidence_text)
+            else ()
+        )
+        requires_evidence = bool(
+            getattr(self.analysis, "requires_evidence", False)
+        )
+        return TerminationContext(
+            phase="loop",
+            requires_evidence=requires_evidence,
+            final_proposed=final_proposed,
+            answer=draft,
+            critical_ambiguities=(
+                list(getattr(self.analysis, "ambiguities", None) or [])
+                if bool(getattr(self.analysis, "critical_ambiguity", False))
+                else []
+            ),
+            policies=policies,
+            comparison_members=comparison_members,
+            evidence=CriticEvidenceState(
+                retained_count=len(records),
+                available_count=len(records),
+                authoritative_count=authoritative_count,
+                covered_entities=tuple(covered_entities),
+                covered_constraints=covered_constraints,
+            ),
+            constraints_met=constraints_met,
+            constraints_missing=constraints_missing,
+            unsupported_details=unsupported,
+            empty_answer=final_proposed and not bool(draft.strip()),
+            invalid_tool_request=bool(state.get("invalid_tool_request")),
+            invalid_final_response=bool(state.get("invalid_final_response")),
+            new_evidence=bool(state.get("last_round_new_evidence")),
+            fingerprint_streak=int(state.get("fingerprint_streak") or 0),
+            no_progress_streak=no_progress_streak,
+            tool_error_streak=int(state.get("tool_error_streak") or 0),
+            had_successful_observation=bool(
+                state.get("had_successful_observation")
+            ),
+            repeat_threshold=self.eval_cfg["repeat_threshold"],
+            no_progress_threshold=self.eval_cfg["no_progress_threshold"],
+            tool_error_threshold=self.eval_cfg["tool_error_threshold"],
+            can_continue=self._has_remaining_tool_budget(),
+            budget=CriticBudgetState(
+                iteration=int(state.get("iteration") or 0),
+                max_iterations=self.max_iterations,
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Routing
@@ -875,31 +1195,6 @@ class ReactLoopGraphRunner:
     # ------------------------------------------------------------------
     # Evaluation helpers
     # ------------------------------------------------------------------
-    def _forced_termination(
-        self,
-        state: Dict[str, Any],
-        final_proposed: bool,
-        no_progress_streak: int,
-        missing: List[str],
-        unsupported: List[str],
-    ) -> Optional[str]:
-        if (
-            state["tool_error_streak"] >= self.eval_cfg["tool_error_threshold"]
-            and not state["had_successful_observation"]
-        ):
-            return "unrecoverable"
-        if final_proposed:
-            return None
-        if state["fingerprint_streak"] >= self.eval_cfg["repeat_threshold"]:
-            return "stagnated"
-        if no_progress_streak >= self.eval_cfg["no_progress_threshold"]:
-            return "stagnated"
-        if state["iteration"] >= self.max_iterations:
-            accepted = final_proposed and not missing and not unsupported
-            if not accepted:
-                return "exhausted"
-        return None
-
     def _run_judge(
         self,
         draft: str,
@@ -912,7 +1207,7 @@ class ReactLoopGraphRunner:
         system_prompt = (
             "You are a strict judge for an iterative search agent loop. "
             "Return JSON only with keys: "
-            "passes_postcheck, missing_constraints, evidence_sufficiency, reason."
+            "passes, missing_constraints, evidence_sufficiency, reason."
         )
         user_prompt = (
             f"Query:\n{self.query}\n\n"
@@ -921,8 +1216,10 @@ class ReactLoopGraphRunner:
             f"Constraints Missing: {json.dumps(missing, ensure_ascii=False)}\n\n"
             f"Latest Observations:\n{observations_preview}\n\n"
             "Judge whether the current evidence and draft already satisfy the user's request. "
-            "Set passes_postcheck=true only when the loop can stop with a satisfactory answer."
+            "Set passes=true only when the loop can stop with a satisfactory answer."
         )
+        started = time.perf_counter()
+        response: Any = None
         try:
             response = self.judge_llm.invoke(
                 [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
@@ -934,6 +1231,15 @@ class ReactLoopGraphRunner:
             return payload, None
         except Exception as exc:  # noqa: BLE001 - judge failure must not break the loop
             return None, str(exc)
+        finally:
+            if self.timing_recorder is not None:
+                self.timing_recorder.record_llm_call(
+                    label="termination_judge",
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    provider=getattr(self.judge_llm, "provider", None),
+                    model=getattr(self.judge_llm, "model_name", None),
+                    extra=extract_token_usage(response),
+                )
 
     @staticmethod
     def _fingerprint(tool_call: Dict[str, Any]) -> str:
@@ -963,11 +1269,19 @@ class ReactLoopGraphRunner:
     @staticmethod
     def _best_effort_answer(draft: str, reason: str) -> str:
         if draft:
-            return draft
+            is_chinese = any("\u4e00" <= char <= "\u9fff" for char in draft)
+            qualification = (
+                "现有证据或执行预算不足，以下仅为当前候选信息，可能不完整或不准确：\n"
+                if is_chinese
+                else "Available evidence or execution budget was insufficient; the following is only a provisional result and may be incomplete or inaccurate:\n"
+            )
+            return qualification + draft
         reasons = {
             "exhausted": "迭代次数用尽，未能获得完整答案。",
             "stagnated": "检索陷入停滞，未能获得新的有效信息。",
             "unrecoverable": "工具连续失败，无法完成检索。",
+            "evidence_insufficient": "现有证据不足，无法可靠完成回答。",
+            "clarification_required": "需要补充关键实体或约束后才能继续。",
         }
         return reasons.get(reason, "未能获得完整答案。")
 
@@ -979,6 +1293,7 @@ class ReactLoopGraphRunner:
         return {
             "messages": [HumanMessage(content=user_input)],
             "evidence_pool": [],
+            "evidence_records": [],
             "iteration": 0,
             "verdicts": [],
             "constraints_met": [],
@@ -1125,6 +1440,7 @@ class ReactLoopGraphRunner:
             "constraints_missing": list(final_state.get("constraints_missing") or []),
             "judge_error": final_state.get("judge_error"),
             "search_hits": [],
+            "evidence_records": list(final_state.get("evidence_records") or []),
             "conversation_resumed": resume,
         }
         trace_events, trace_truncated = self._trace_events()

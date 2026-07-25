@@ -218,8 +218,9 @@ def _compact_control_projection(record: Dict[str, Any]) -> bool:
     for key in (
         "search_mode",
         "final_executor",
-        "fallback_triggered",
-        "verification",
+        "loop_status",
+        "loop_iterations",
+        "termination_policy",
         "providers",
         "evidence_coverage",
     ):

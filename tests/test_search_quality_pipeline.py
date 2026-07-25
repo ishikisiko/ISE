@@ -171,7 +171,7 @@ def test_evaluate_records_aggregates_detailed_and_top3_only_modes():
 def test_filter_dataset_rows_by_category():
     rows = [
         {"id": "Q001", "category": "small_talk", "query": "a", "dataset_layers": ""},
-        {"id": "Q002", "category": "domain_api", "query": "b", "dataset_layers": ""},
+        {"id": "Q002", "category": "skill", "query": "b", "dataset_layers": ""},
         {"id": "Q003", "category": "small_talk", "query": "c", "dataset_layers": ""},
     ]
 
@@ -183,7 +183,7 @@ def test_filter_dataset_rows_by_category():
 def test_filter_dataset_rows_by_query_id():
     rows = [
         {"id": "Q001", "category": "small_talk", "query": "a", "dataset_layers": ""},
-        {"id": "Q002", "category": "domain_api", "query": "b", "dataset_layers": ""},
+        {"id": "Q002", "category": "skill", "query": "b", "dataset_layers": ""},
         {"id": "Q003", "category": "small_talk", "query": "c", "dataset_layers": ""},
     ]
 
@@ -195,13 +195,13 @@ def test_filter_dataset_rows_by_query_id():
 def test_filter_dataset_rows_supports_combined_filters_and_limit():
     rows = [
         {"id": "Q001", "category": "small_talk", "query": "a", "dataset_layers": ""},
-        {"id": "Q002", "category": "domain_api", "query": "b", "dataset_layers": ""},
-        {"id": "Q003", "category": "domain_api", "query": "c", "dataset_layers": ""},
+        {"id": "Q002", "category": "skill", "query": "b", "dataset_layers": ""},
+        {"id": "Q003", "category": "skill", "query": "c", "dataset_layers": ""},
     ]
 
     filtered = filter_dataset_rows(
         rows,
-        categories=["domain_api"],
+        categories=["skill"],
         query_ids=["Q002", "Q003"],
         limit=1,
     )

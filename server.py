@@ -400,9 +400,6 @@ def build_pipeline(
     max_per_domain = max(1, int(rerank_config.get("max_per_domain", 1)))
     show_timings = bool(config.get("displayResponseTimes", False))
 
-    if config.get("orchestrator_mode") == "react":
-        print("[server] orchestrator_mode=react is deprecated as a top-level mode; using LangChain orchestrator with ReAct fallback")
-
     return create_langchain_orchestrator(
         config=config,
         llm=llm,
@@ -432,12 +429,8 @@ def index() -> Any:
 def health() -> Any:
     """Health check endpoint to verify the server and agent are properly initialized."""
     try:
-        config = copy.deepcopy(load_base_config())
-        return jsonify({
-            "status": "ok",
-            "orchestrator_mode": "langchain",
-            "requested_orchestrator_mode": config.get("orchestrator_mode", "langchain"),
-        })
+        load_base_config()
+        return jsonify({"status": "ok"})
     except Exception as exc:
         return jsonify({
             "status": "error",

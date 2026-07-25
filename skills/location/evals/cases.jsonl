@@ -1,0 +1,5 @@
+{"query":"nearest KFC to HKUST","expect":"location","preflight":"accepted"}
+{"query":"香港科技大学附近的医院在哪里","expect":"location","preflight":"accepted"}
+{"query":"Find coffee shops near me.","expect":"location","preflight":"explicit_location_required"}
+{"query":"Where is the nearest hospital?","expect":"location","preflight":"explicit_location_required"}
+{"query":"Population of Canada","expect":"not_location","preflight":"not_location_query"}

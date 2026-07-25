@@ -12,7 +12,7 @@ from langchain.langchain_orchestrator import create_langchain_orchestrator
 from llm.api import LLMClient
 from llm.google_api import build_google_endpoint, build_google_payload
 from main import build_llm_client, build_reranker, build_search_client
-from search.source_selector import IntelligentSourceSelector
+from skills import SkillRegistry
 
 
 def _provider_config() -> dict:
@@ -67,7 +67,7 @@ def test_model_id_can_resolve_its_provider():
     assert model.model_name == "glm-4.5-air"
 
 
-def test_orchestrator_uses_role_models_and_skips_disabled_postcheck():
+def test_orchestrator_only_builds_shared_termination_judge():
     config = _provider_config()
     config.update(
         {
@@ -75,7 +75,9 @@ def test_orchestrator_uses_role_models_and_skips_disabled_postcheck():
             "routingAndKeywords": {"provider": "zai", "model": "glm-4.5-air"},
             "postcheck": {
                 "enabled": False,
-                "judge": {"enabled": True, "provider": "missing-provider"},
+            },
+            "termination": {
+                "judge": {"enabled": True, "provider": "zai", "model": "glm-4.5-air"},
             },
         }
     )
@@ -83,9 +85,9 @@ def test_orchestrator_uses_role_models_and_skips_disabled_postcheck():
 
     orchestrator = create_langchain_orchestrator(config=config, llm=primary)
 
-    assert orchestrator.classifier_llm.model_name == "glm-4.5-air"
-    assert orchestrator.routing_llm.model_name == "glm-4.5-air"
-    assert orchestrator.postcheck_llm is primary
+    assert orchestrator.termination_judge_llm.model_name == "glm-4.5-air"
+    assert not hasattr(orchestrator, "classifier_llm")
+    assert not hasattr(orchestrator, "routing_llm")
 
 
 def test_opencode_go_glm_uses_openai_compatible_endpoint(monkeypatch):
@@ -291,19 +293,14 @@ def test_rerank_enabled_flag_is_authoritative():
     assert enabled is not None
 
 
-def test_source_selector_reads_google_cx_from_config():
-    selector = IntelligentSourceSelector(
-        use_llm=False,
-        config={
-            "GOOGLE_API_KEY": "google-key",
-            "GOOGLE_CX": "google-cx",
-            "FINNHUB_API_KEY": "finnhub-key",
-        },
+def test_skill_registry_reads_nested_google_key_from_config():
+    registry = SkillRegistry.from_config(
+        {"googleSearch": {"api_key": "google-key"}}
     )
 
-    assert selector.google_api_key == "google-key"
-    assert selector.google_cx == "google-cx"
-    assert selector.finnhub_api_key == "finnhub-key"
+    assert registry.get("weather") is not None
+    assert registry.get("location") is not None
+    assert registry.get("transportation") is not None
 
 
 def test_example_placeholders_are_not_treated_as_credentials():
@@ -312,15 +309,9 @@ def test_example_placeholders_are_not_treated_as_credentials():
 
     assert config["LLM_PROVIDER"] == "opencode-go"
     assert config["providers"]["opencode-go"]["model"] == "deepseek-v4-flash"
-    assert config["domainClassifier"] == {
-        "provider": "opencode-go",
-        "model": "deepseek-v4-flash",
-    }
-    assert config["routingAndKeywords"] == {
-        "provider": "opencode-go",
-        "model": "deepseek-v4-flash",
-    }
-    assert config["postcheck"]["judge"] == {
+    assert "domainClassifier" not in config
+    assert "routingAndKeywords" not in config
+    assert config["termination"]["judge"] == {
         "enabled": True,
         "provider": "opencode-go",
         "model": "deepseek-v4-flash",

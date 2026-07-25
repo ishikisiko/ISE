@@ -1,6 +1,5 @@
 """Tests for conversation resume: checkpointer state retention, message
 trimming, conversation store CRUD, and follow-up intent classification.
-
 All tests use scripted fake models/tools and a temporary SQLite database; no
 real LLM or search backend is required.
 """
@@ -78,13 +77,12 @@ def _fake_tool(name: str, outputs: List[str]):
     return fake_tool
 
 
-def _runner(replies, tools, *, query: str = "苹果和微软的区别", fallback_context=None):
+def _runner(replies, tools, *, query: str = "苹果和微软的区别"):
     return ReactLoopGraphRunner(
         llm=ScriptedChatModel(replies=replies),
         tools=tools,
         max_iterations=5,
         query=query,
-        fallback_context=fallback_context,
     )
 
 
@@ -243,41 +241,3 @@ class TestEndToEndResume:
         runner = _runner([_tool_call("web_search"), "答案" * 30], tools)
         result = runner.run("苹果和微软的区别", conversation_id="fresh-conv")
         assert result["conversation_resumed"] is False
-
-
-# ---------------------------------------------------------------------------
-# Follow-up intent classification (LangChainOrchestrator)
-# ---------------------------------------------------------------------------
-class TestFollowupIntent:
-    def _orchestrator_for_intent(self, reply_content: Any):
-        from langchain.langchain_orchestrator import LangChainOrchestrator
-
-        # _classify_followup_intent only needs routing_llm; bypass heavy __init__.
-        orch = LangChainOrchestrator.__new__(LangChainOrchestrator)
-        orch.routing_llm = ScriptedChatModel(replies=[reply_content])
-        orch.show_timings = False
-        return orch
-
-    def test_continuation_default_on_parse_garbage(self, temp_manager):
-        orch = self._orchestrator_for_intent("乱七八糟不可解析")
-        turns = [{"query": "苹果和微软", "answer": "苹果更强"}]
-        assert orch._classify_followup_intent("再多说点", turns) == "continuation"
-
-    def test_new_topic_detected(self, temp_manager):
-        orch = self._orchestrator_for_intent("new_topic")
-        turns = [{"query": "苹果和微软", "answer": "苹果更强"}]
-        assert orch._classify_followup_intent("北京天气怎么样", turns) == "new_topic"
-
-    def test_continuation_detected(self, temp_manager):
-        orch = self._orchestrator_for_intent("continuation")
-        turns = [{"query": "苹果和微软", "answer": "苹果更强"}]
-        assert orch._classify_followup_intent("精简一点", turns) == "continuation"
-
-    def test_no_history_is_new_topic(self, temp_manager):
-        orch = self._orchestrator_for_intent("continuation")
-        assert orch._classify_followup_intent("anything", []) == "new_topic"
-
-    def test_classifier_exception_defaults_to_continuation(self, temp_manager):
-        orch = self._orchestrator_for_intent(RuntimeError("routing down"))
-        turns = [{"query": "q", "answer": "a"}]
-        assert orch._classify_followup_intent("反馈", turns) == "continuation"

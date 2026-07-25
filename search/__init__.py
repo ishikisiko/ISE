@@ -31,11 +31,6 @@ from .reference_fetch import (
 )
 
 try:
-    from .source_selector import IntelligentSourceSelector
-except ImportError:  # pragma: no cover - optional runtime dependency path
-    IntelligentSourceSelector = None
-
-try:
     from .sports_api import SportsAPI
 except ImportError:  # pragma: no cover - optional runtime dependency path
     SportsAPI = None
@@ -69,6 +64,5 @@ __all__ = [
     "BaseReranker",
     "Qwen3Reranker",
     "RerankedHit",
-    "IntelligentSourceSelector",
     "SportsAPI",
 ]

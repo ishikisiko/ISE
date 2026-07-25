@@ -288,11 +288,73 @@ class UniversalChatModel(BaseChatModel):
         
         data = response.json()
         content = self._extract_content(data)
-        
+        usage = self._extract_usage(data)
+        message = AIMessage(content=content)
+        if usage:
+            # Attach usage so downstream timing/audit can read cost without
+            # re-deriving it from the raw payload. LangChain consumers look
+            # at ``usage_metadata``; ``response_metadata`` keeps the original
+            # shape for anything that still inspects it.
+            message.usage_metadata = usage
+            message.response_metadata = {"token_usage": usage}
+
         return ChatResult(
-            generations=[ChatGeneration(message=AIMessage(content=content))],
+            generations=[ChatGeneration(message=message)],
             llm_output={"raw": data},
         )
+
+    def _extract_usage(self, data: Dict[str, Any]) -> Optional[Dict[str, int]]:
+        """Best-effort token-usage extraction across provider response shapes.
+
+        OpenAI-compatible endpoints report ``usage.prompt_tokens`` /
+        ``completion_tokens`` / ``total_tokens``; Anthropic-compatible
+        endpoints report ``usage.input_tokens`` / ``output_tokens``. Returns
+        ``None`` when no usable block is present so callers can skip writing
+        an empty placeholder.
+        """
+
+        if not isinstance(data, dict):
+            return None
+        usage = data.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            usage = (data.get("message") or {}).get("usage") if isinstance(data.get("message"), dict) else None
+        if not isinstance(usage, dict) or not usage:
+            return None
+
+        def _to_int(value: Any) -> Optional[int]:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        input_tokens = _to_int(
+            usage.get("input_tokens")
+            if usage.get("input_tokens") is not None
+            else usage.get("prompt_tokens")
+        )
+        output_tokens = _to_int(
+            usage.get("output_tokens")
+            if usage.get("output_tokens") is not None
+            else usage.get("completion_tokens")
+        )
+        total_tokens = _to_int(
+            usage.get("total_tokens")
+            if usage.get("total_tokens") is not None
+            else usage.get("total_tokens_billable")
+        )
+        normalized: Dict[str, int] = {}
+        if input_tokens is not None:
+            normalized["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            normalized["output_tokens"] = output_tokens
+        if total_tokens is not None:
+            normalized["total_tokens"] = total_tokens
+        if not normalized:
+            return None
+        if "total_tokens" not in normalized and "input_tokens" in normalized and "output_tokens" in normalized:
+            normalized["total_tokens"] = normalized["input_tokens"] + normalized["output_tokens"]
+        return normalized
+
 
     def _extract_content(self, data: Dict[str, Any]) -> str:
         """Extract content from API response."""

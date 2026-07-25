@@ -1,108 +1,92 @@
-"""Deterministic finance symbol extraction and structured-lookup fallback.
+"""Finance preflight regressions retained under the M2 skill package."""
 
-These cover the preflight half of the archived `harden-finance-domain-routing`
-change. The classification half was reverted under roadmap M0 (see
-`docs/agentic_loop_roadmap.md`); its cases live in
-`skills/finance/evals/cases.jsonl` until M2 builds the finance skill.
-"""
+from pathlib import Path
 
-import json
-
-from search.source_selector import IntelligentSourceSelector
+from evidence import RetrievalOptions
+from skills import SkillRegistry
+from skills.contracts import SkillManifest
+from skills.finance.handler import FinanceSkillHandler
 
 
-class StubFinanceLLM:
-    def __init__(self, *, symbols=None):
-        self.symbols = list(symbols or [])
-        self.calls = []
-        self.provider = "stub"
-        self.model_id = "stub-model"
-
-    def chat(self, **kwargs):
-        self.calls.append(kwargs)
-        return {"content": json.dumps({"symbols": self.symbols})}
+def build_handler(config=None):
+    manifest = SkillManifest(
+        name="finance",
+        version=1,
+        handler="skills.finance.handler:FinanceSkillHandler",
+        tool_name="finance_market_data",
+        description="finance",
+        args_schema={"type": "object", "properties": {"query": {"type": "string"}}},
+        budget={"max_calls_per_query": 2, "timeout_seconds": 15, "max_evidence_items": 5},
+        availability={},
+        package_dir=str(Path("skills/finance")),
+    )
+    return FinanceSkillHandler(config=config or {}, manifest=manifest)
 
 
 def test_lowercase_product_words_are_not_ticker_symbols():
-    selector = IntelligentSourceSelector(use_llm=False)
+    handler = build_handler()
 
-    assert selector._extract_finance_symbols("claude pro fable") == []
+    assert handler.extract_symbols("claude pro fable") == []
+    assert handler.preflight({"query": "claude pro fable"}).reason == "not_finance_query"
 
 
-def test_explicit_and_original_uppercase_symbols_are_preserved_without_llm():
-    selector = IntelligentSourceSelector(use_llm=False)
+def test_explicit_and_original_uppercase_symbols_are_preserved():
+    handler = build_handler()
 
-    symbols = selector._extract_finance_symbols(
-        "比较 $AAPL、(NVDA)、600519 和 MSFT"
-    )
+    symbols = handler.extract_symbols("比较 $AAPL、(NVDA)、600519 和 MSFT 股票")
 
     assert set(symbols) == {"AAPL", "NVDA", "600519", "MSFT"}
 
 
-def test_llm_rejects_ambiguous_uppercase_candidates():
-    llm = StubFinanceLLM(symbols=[])
-    selector = IntelligentSourceSelector(llm_client=llm, use_llm=True)
+def test_ambiguous_uppercase_product_candidates_are_rejected_deterministically():
+    handler = build_handler()
 
-    symbols = selector._extract_finance_symbols("AI PRO 赠送额度")
+    decision = handler.preflight({"query": "AI PRO 赠送额度"})
 
-    assert symbols == []
-    assert "AI, PRO" in llm.calls[0]["user_prompt"]
+    assert decision.accepted is False
+    assert decision.reason == "not_finance_query"
 
 
-def test_llm_can_resolve_unmapped_company_when_no_symbol_exists():
-    selector = IntelligentSourceSelector(
-        llm_client=StubFinanceLLM(symbols=["PLTR"]),
-        use_llm=True,
-    )
+def test_unmapped_company_requires_explicit_symbol_instead_of_llm_guessing():
+    handler = build_handler()
 
-    assert selector._extract_finance_symbols("查询 Palantir 的股价") == ["PLTR"]
+    decision = handler.preflight({"query": "查询 Palantir 的股价"})
+
+    assert decision.accepted is False
+    assert decision.reason == "symbol_required"
 
 
 def test_all_finance_provider_errors_fall_back_to_general_handling(monkeypatch):
-    selector = IntelligentSourceSelector(use_llm=False)
+    handler = build_handler()
     monkeypatch.setattr(
-        selector,
-        "_extract_finance_symbols",
-        lambda query: ["AAPL", "MSFT"],
-    )
-    monkeypatch.setattr(
-        selector,
-        "_query_stock_price",
-        lambda symbol, timing_recorder=None: {"error": f"no data for {symbol}"},
+        handler,
+        "_query_quote",
+        lambda symbol, timing_recorder=None, require_market_cap=False: {"error": f"no data for {symbol}"},
     )
 
-    result = selector._handle_finance("AAPL 和 MSFT 股价", timing_recorder=None)
+    registry = SkillRegistry.from_config({})
+    registry._skills = {"finance": handler}
+    registry._by_tool_name = {"finance_market_data": handler}
+    result = registry.execute("finance", {"query": "AAPL 和 MSFT 股价"})
 
-    assert result == {
-        "handled": False,
-        "reason": "data_fetch_failed",
-        "skipped": True,
-        "symbols": ["AAPL", "MSFT"],
-    }
-    assert "answer" not in result
+    assert result.preflight.accepted is True
+    assert result.evidence_items == []
 
 
 def test_finance_result_contains_only_successful_symbols(monkeypatch):
-    selector = IntelligentSourceSelector(use_llm=False)
+    handler = build_handler()
     monkeypatch.setattr(
-        selector,
-        "_extract_finance_symbols",
-        lambda query: ["AAPL", "MSFT"],
-    )
-    monkeypatch.setattr(
-        selector,
-        "_query_stock_price",
-        lambda symbol, timing_recorder=None: (
+        handler,
+        "_query_quote",
+        lambda symbol, timing_recorder=None, require_market_cap=False: (
             {"error": "unavailable"}
             if symbol == "AAPL"
-            else {"c": 420.0, "source_name": "stub"}
+            else {"c": 420.0, "source_name": "stub", "endpoint": "stub://quote"}
         ),
     )
 
-    result = selector._handle_finance("AAPL 和 MSFT 股价", timing_recorder=None)
+    items = handler.retrieve("AAPL 和 MSFT 股价", options=RetrievalOptions())
 
-    assert result["handled"] is True
-    assert result["symbols"] == ["AAPL", "MSFT"]
-    assert result["data"] == [
-        {"c": 420.0, "source_name": "stub", "symbol": "MSFT"}
-    ]
+    assert len(items) == 1
+    assert items[0].metadata["data"]["symbol"] == "MSFT"
+    assert "MSFT 当前价: 420" in items[0].content

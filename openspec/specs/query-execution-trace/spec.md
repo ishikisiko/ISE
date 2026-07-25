@@ -1,114 +1,51 @@
 # query-execution-trace Specification
 
-> **Status:** reframing at M5 — 能力存续但立论框架会变，可修补，不要在现框架上做大投入。 分类依据见 `docs/agentic_loop_roadmap.md`。
+> **Status:** active - roadmap M5 actual-execution trace.
 
 ## Purpose
-TBD - created by archiving change improve-query-execution-orchestration. Update Purpose after archive.
+Define the bounded record of analysis, actual tool calls, ledger decisions, and termination.
 
 ## Requirements
-### Requirement: System SHALL record an ordered execution trace for every planned search turn
-系统 SHALL 为每个需要证据的查询维护有序 `QueryExecutionTrace`，记录分析摘要、计划步骤、实际尝试、证据决策和验证结果。
+### Requirement: Trace SHALL record actual execution only
+`QueryExecutionTrace` SHALL record query analysis, each attempted tool call, ledger decisions, and the terminal critic verdict in order.
 
-#### Scenario: Plan step executes successfully
-- **WHEN** 查询计划中的检索、领域 API 或本地证据步骤执行成功
-- **THEN** trace SHALL 记录步骤 ID、用途、实际来源或 provider、耗时和结果数
-- **AND** trace SHALL 可关联该步骤产生的证据账本条目
+#### Scenario: A tool succeeds
+- **WHEN** a loop tool returns one or more evidence items
+- **THEN** trace SHALL record tool name, iteration, position, status, query, source type, source tier, and item count
+- **AND** the tool SHALL appear in `executed`
 
-#### Scenario: Plan step fails or is skipped
-- **WHEN** 计划步骤因错误、预算、策略拒绝或前置澄清而未完成
-- **THEN** trace SHALL 记录状态和简明原因
-- **AND** 后续步骤 SHALL 依据该记录决定是否允许恢复、跳过或结束
+#### Scenario: A tool fails or exhausts budget
+- **WHEN** a tool call returns an error or `budget_exhausted`
+- **THEN** trace SHALL record the actual status and bounded reason
+- **AND** it SHALL NOT invent an execution step for an uncalled tool
 
-### Requirement: Execution trace SHALL distinguish capability inventory from actual work
-系统 SHALL 在 trace 和响应元数据中区分已配置、用户请求、可选和实际执行的 provider 或来源。
+#### Scenario: Clarification happens before tools
+- **WHEN** critical ambiguity blocks execution
+- **THEN** trace SHALL contain analysis and a clarification terminal event
+- **AND** `executed` SHALL remain empty
 
-#### Scenario: Priority provider satisfies a step
-- **WHEN** 优先 provider 成功完成一个计划步骤且未使用 fallback
-- **THEN** trace SHALL 仅将该 provider 标记为该步骤实际执行者
-- **AND** 已配置但未调用的 provider SHALL 保留为库存信息而非执行事实
+### Requirement: Provider inventory SHALL remain distinct from execution
+Trace SHALL expose configured, requested, eligible, and executed provider/tool identities as separate bounded lists.
 
-#### Scenario: Fallback executes
-- **WHEN** 一个计划步骤因错误、限流或无结果使用 fallback
-- **THEN** trace SHALL 记录失败尝试、fallback 原因和实际 fallback 执行者
-- **AND** 后续调用 SHALL NOT 覆盖此前尝试的 timing 或状态
+#### Scenario: A configured provider is not called
+- **WHEN** the model completes without selecting that provider's tool
+- **THEN** the provider MAY appear as configured or eligible
+- **AND** it SHALL NOT appear as executed
 
-### Requirement: Persisted audit SHALL serialize a bounded safe projection of the execution trace
-启用过程审计时，系统 SHALL 持久化 trace 的紧凑投影，包含计划和执行事实所需的 ID、计数、来源引用和结果状态。
+#### Scenario: A provider fallback occurs inside a search tool
+- **WHEN** the search client attempts multiple providers
+- **THEN** provider API-call audit events SHALL preserve their real order and outcomes
+- **AND** the outer trace SHALL still identify the originating loop tool call
 
-#### Scenario: Trace is persisted under audit size limits
-- **WHEN** trace 会使审计记录超过配置字节上限
-- **THEN** 系统 SHALL 按确定性规则裁剪可选条目并标记截断
-- **AND** 系统 SHALL 保留足以说明最终结果和主要执行路径的摘要
+### Requirement: Trace output SHALL be bounded and safe
+The response and durable audit projection SHALL cap event counts and sanitize sensitive values.
 
-#### Scenario: Trace contains sensitive runtime data
-- **WHEN** 执行上下文包含 API key、Authorization header、完整 prompt 或网页全文
-- **THEN** trace 和审计投影 SHALL NOT 序列化这些字段
-- **AND** 审计失败 SHALL NOT 影响用户回答
+#### Scenario: A long loop emits many events
+- **WHEN** event count exceeds the response limit
+- **THEN** trace SHALL return a deterministic prefix and `truncated=true`
+- **AND** the final ledger and terminal summary SHALL remain available in control metadata
 
-### Requirement: ReAct fallback actions SHALL be available to backend trace consumers
-The backend SHALL make LangGraph ReAct action events available through the
-existing `WorkflowTracer` consumers: SSE step frames, the persisted process
-audit, and a bounded additive final-response control projection.
-
-#### Scenario: A streamed request enters the ReAct loop
-- **WHEN** `/api/answer/stream` runs a LangGraph ReAct fallback or conversation
-  continuation
-- **THEN** each emitted ReAct iteration and tool event SHALL be sent as an SSE
-  `step` frame in execution order
-- **AND** the server SHALL not need a new SSE event type or frontend protocol
-
-#### Scenario: A ReAct response finishes
-- **WHEN** the ReAct runner completes
-- **THEN** the response control metadata SHALL include a bounded `react_trace`
-  projection of its safe action events
-- **AND** existing response and execution-trace fields SHALL remain compatible
-
-#### Scenario: Process audit is enabled
-- **WHEN** a traced ReAct turn is persisted through the process audit writer
-- **THEN** its safe action events SHALL be recorded with the other workflow
-  steps subject to the existing size and redaction rules
-- **AND** an audit write failure SHALL NOT prevent the answer response
-
-### Requirement: Individual retrieval API calls SHALL expose bounded audit records
-Every actual search-provider request SHALL produce its own additive workflow
-step containing the provider outcome and the result list returned by that
-specific call. The system SHALL capture those records before cross-provider
-merge, reranking, or final-reference limiting.
-
-#### Scenario: A provider search succeeds
-- **WHEN** a configured provider returns one or more web search results
-- **THEN** the trace SHALL contain one completed API-call step for that provider
-- **AND** the step SHALL include a bounded, browser-safe list of that call's
-  title, URL, and snippet records
-- **AND** the displayed list SHALL NOT be reconstructed from final merged or
-  reranked evidence
-
-#### Scenario: A composite or fallback search makes multiple requests
-- **WHEN** a combined client fans out or a priority client tries a fallback
-  provider
-- **THEN** every underlying provider HTTP attempt SHALL be represented
-  independently, including empty and failed outcomes
-- **AND** a failed primary attempt SHALL NOT hide a later successful fallback
-  result list
-
-#### Scenario: Selected-page extraction runs
-- **WHEN** an existing selected-page extraction adapter is invoked
-- **THEN** each extracted or failed URL SHALL be available as a bounded
-  extraction audit record with provider, status, and content-size facts
-- **AND** complete page content, opaque provider payloads, credentials, and
-  URL query values SHALL NOT enter the trace
-
-### Requirement: The workflow UI SHALL collapse audit result lists by API call
-The frontend SHALL render each API call's audit records in a collapsed,
-expandable group associated with that call's workflow step.
-
-#### Scenario: A search provider returns five results
-- **WHEN** a search API-call step contains five result records
-- **THEN** the workflow SHALL show one collapsed result group for that call
-- **AND** expanding it SHALL show all five returned links individually with
-  their bounded titles and snippets
-
-#### Scenario: A page-extraction call is recorded
-- **WHEN** an extraction API-call step contains page records
-- **THEN** expanding its group SHALL identify the extracted page URL and
-  provider/outcome facts without rendering the page body
+#### Scenario: Tool input contains secrets or URL queries
+- **WHEN** trace data is serialized
+- **THEN** credentials and URL query or fragment values SHALL be redacted
+- **AND** opaque provider payloads SHALL NOT be persisted

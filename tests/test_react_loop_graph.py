@@ -15,8 +15,10 @@ from orchestrators.react_loop_graph import (
     LoopVerdict,
     ReactLoopGraphRunner,
     langgraph_available,
-    normalize_evaluation_config,
+    normalize_termination_config,
 )
+from utils.query_orchestration import analyze_query
+from utils.timing_utils import TimingRecorder
 from utils.workflow_trace import WorkflowTracer
 
 pytestmark = pytest.mark.skipif(not langgraph_available(), reason="langgraph not installed")
@@ -88,25 +90,44 @@ def make_runner(
     tools,
     *,
     max_iterations: int = 5,
-    evaluation_config: Optional[Dict[str, Any]] = None,
+    termination_config: Optional[Dict[str, Any]] = None,
     judge_llm=None,
     query: str = "苹果和微软的区别",
-    fallback_context: Optional[Dict[str, Any]] = None,
     tracer: Optional[Any] = None,
+    timing_recorder: Optional[TimingRecorder] = None,
 ) -> ReactLoopGraphRunner:
     return ReactLoopGraphRunner(
         llm=NativeScriptedChatModel(replies=replies),
         tools=tools,
         max_iterations=max_iterations,
-        evaluation_config=evaluation_config,
+        termination_config=termination_config,
         judge_llm=judge_llm,
         query=query,
-        fallback_context=fallback_context,
         tracer=tracer,
+        timing_recorder=timing_recorder,
     )
 
 
 class TestTerminationSemantics:
+    def test_critical_ambiguity_clarifies_without_spending_judge_call(self):
+        judge = ScriptedChatModel(
+            replies=['{"passes": true, "missing_constraints": [], "reason": "ok"}']
+        )
+        runner = make_runner(
+            ["A polished but unsafe guess."],
+            [],
+            judge_llm=judge,
+            query="Compare it",
+        )
+        runner.analysis = analyze_query("Compare it", allow_search=True)
+
+        result = runner.run("Compare it")
+
+        assert result["loop_status"] == "clarification_required"
+        assert result["verdicts"][-1]["action"] == "clarify"
+        assert result["verdicts"][-1]["hard_stop"] is True
+        assert judge.calls == 0
+
     def test_succeeded_when_checklist_empty(self):
         tools = [FakeTools.make("web_search", ["2025年苹果和微软分别公布了财报，苹果相比微软增长更快，而微软同时在云上领先，" * 5])]
         runner = make_runner(
@@ -134,7 +155,7 @@ class TestTerminationSemantics:
             replies,
             tools,
             max_iterations=6,
-            evaluation_config={"repeat_threshold": 2, "no_progress_threshold": 99},
+            termination_config={"repeat_threshold": 2, "no_progress_threshold": 99},
         )
         result = runner.run("苹果和微软的区别")
         assert result["loop_status"] == "stagnated"
@@ -151,7 +172,7 @@ class TestTerminationSemantics:
             replies,
             tools,
             max_iterations=8,
-            evaluation_config={"repeat_threshold": 99, "no_progress_threshold": 2},
+            termination_config={"repeat_threshold": 99, "no_progress_threshold": 2},
         )
         result = runner.run("苹果和微软的区别")
         assert result["loop_status"] == "stagnated"
@@ -166,7 +187,7 @@ class TestTerminationSemantics:
             replies,
             tools,
             max_iterations=6,
-            evaluation_config={"tool_error_threshold": 2},
+            termination_config={"tool_error_threshold": 2},
         )
         result = runner.run("苹果和微软的区别")
         assert result["loop_status"] == "unrecoverable"
@@ -183,7 +204,6 @@ class TestTerminationSemantics:
             replies,
             tools,
             max_iterations=5,
-            fallback_context={"missing_constraints": ["comparison"], "failure_types": []},
         )
         result = runner.run("苹果和微软的区别")
         assert result["loop_status"] == "succeeded"
@@ -228,7 +248,7 @@ class TestJudgeDegradation:
             replies,
             tools,
             max_iterations=3,
-            evaluation_config={"judge_interval": 1},
+            termination_config={"judge_interval": 1},
             judge_llm=judge,
         )
         result = runner.run("苹果和微软的区别")
@@ -246,35 +266,44 @@ class TestJudgeDegradation:
             replies,
             tools,
             max_iterations=2,
-            evaluation_config={"judge_interval": 1},
+            termination_config={"judge_interval": 1},
             judge_llm=judge,
         )
         result = runner.run("苹果和微软的区别")
         assert result["loop_status"] == "exhausted"
         assert result["judge_error"] == "judge_unparseable_response"
 
-    def test_judge_pass_overrides_rule_missing(self):
+    def test_judge_pass_cannot_override_deterministic_missing_constraint(self):
         tools = [FakeTools.make("web_search", ["全新证据A"])]
         replies = [
             _tool_call("web_search", {"query": "q1"}, "c1"),
             "完整答案但没有对比标记也没有长度" ,
         ]
         judge = ScriptedChatModel(
-            replies=['{"passes_postcheck": true, "missing_constraints": [], "reason": "ok"}']
+            replies=['{"passes": true, "missing_constraints": [], "reason": "ok"}']
         )
         runner = make_runner(
             replies,
             tools,
             max_iterations=4,
-            evaluation_config={"judge_interval": 1},
+            termination_config={"judge_interval": 1},
             judge_llm=judge,
-            fallback_context={"missing_constraints": ["comparison"], "failure_types": []},
         )
         result = runner.run("苹果和微软的区别")
-        assert result["loop_status"] == "succeeded"
+        assert result["loop_status"] == "exhausted"
+        assert "comparison" in result["verdicts"][-1]["constraints_missing"]
+        assert result["verdicts"][-1]["deterministic_pass"] is False
 
 
 class TestShimMode:
+    def test_exhausted_draft_is_explicitly_qualified(self):
+        answer = ReactLoopGraphRunner._best_effort_answer(
+            "当前候选答案。",
+            "exhausted",
+        )
+        assert "证据或执行预算不足" in answer
+        assert answer.endswith("当前候选答案。")
+
     def test_json_shim_tool_call_and_final(self):
         """Models without bind_tools use the JSON shim protocol."""
         tools = [FakeTools.make("web_search", ["2025年苹果和微软分别公布财报，苹果相比微软更强，而微软同时领先，" * 6])]
@@ -368,7 +397,6 @@ class TestShimMode:
             [narration],
             [],
             max_iterations=1,
-            fallback_context={"missing_constraints": ["comparison"], "failure_types": []},
             tracer=tracer,
         )
 
@@ -517,6 +545,9 @@ class TestWorkflowTrace:
         )
         final_verdict_items = {item["label"]: item["value"] for item in final_verdict_event["items"]}
         assert final_verdict_items["新证据"] == "否"
+        assert final_verdict_items["动作"] == "return"
+        assert final_verdict_items["确定性 critic"] == "通过"
+        assert final_verdict_items["规则命中"] == "constraints_satisfied"
         assert result["trace_events"]
         assert result["trace_truncated"] is False
 
@@ -537,7 +568,7 @@ class TestWorkflowTrace:
                 )
             ],
             max_iterations=3,
-            evaluation_config={"tool_error_threshold": 2},
+            termination_config={"tool_error_threshold": 2},
             tracer=tracer,
         )
 
@@ -556,17 +587,37 @@ class TestWorkflowTrace:
 
 
 class TestConfig:
+    def test_loop_llm_and_search_calls_enter_shared_timing_recorder(self):
+        recorder = TimingRecorder(enabled=True)
+        recorder.start()
+        runner = make_runner(
+            [_tool_call("web_search"), "最终答案"],
+            [FakeTools.make("web_search", ["有效证据"])],
+            query="简单问题",
+            timing_recorder=recorder,
+        )
+
+        result = runner.run("简单问题")
+        payload = recorder.to_dict()
+
+        assert result["loop_status"] == "succeeded"
+        assert [call["label"] for call in payload["llm_calls"]] == [
+            "loop_act",
+            "loop_act",
+        ]
+        assert payload["tool_calls"][0]["tool"] == "web_search"
+
     def test_normalize_defaults(self):
-        cfg = normalize_evaluation_config(None)
+        cfg = normalize_termination_config(None)
         assert cfg["judge_interval"] == 2
         assert cfg["repeat_threshold"] == 2
 
     def test_normalize_overrides(self):
-        cfg = normalize_evaluation_config({"judge_interval": 3, "new_evidence_min_ratio": 0.2})
+        cfg = normalize_termination_config({"judge_interval": 3, "new_evidence_min_ratio": 0.2})
         assert cfg["judge_interval"] == 3
         assert cfg["new_evidence_min_ratio"] == 0.2
         assert cfg["repeat_threshold"] == 2
 
     def test_normalize_bad_values_ignored(self):
-        cfg = normalize_evaluation_config({"judge_interval": "abc"})
+        cfg = normalize_termination_config({"judge_interval": "abc"})
         assert cfg["judge_interval"] == 2

@@ -1,12 +1,12 @@
 # react-loop-evaluation Specification
 
-> **Status:** reframing at M4 — 能力存续但立论框架会变，可修补，不要在现框架上做大投入。 分类依据见 `docs/agentic_loop_roadmap.md`。
+> **Status:** active - roadmap M5 sole-loop termination contract.
 
 ## Purpose
 TBD - created by archiving change langgraph-react-loop. Update Purpose after archive.
 ## Requirements
 ### Requirement: LoopVerdict 结构化迭代判定
-系统 SHALL 在 ReAct 循环的每次迭代后产出结构化 `LoopVerdict`，至少包含字段：`new_evidence`（本轮是否带来新证据）、`constraints_met`（已满足的约束清单）、`constraints_missing`（未满足的约束清单）、`should_continue`（是否继续迭代）、`reason`（判定原因）。
+系统 SHALL 在 ReAct 循环的每次迭代后产出结构化 `LoopVerdict`，至少包含字段：`new_evidence`、`constraints_met`、`constraints_missing`、`should_continue`、`reason`、`action`、`deterministic_pass`、`hard_stop`、`failure_types` 与 `rule_hits`。
 
 #### Scenario: 每轮迭代产出判定
 - **WHEN** ReAct 循环完成一次 act → observe 迭代
@@ -19,7 +19,7 @@ TBD - created by archiving change langgraph-react-loop. Update Purpose after arc
 - **AND** 决策结果 SHALL 记录对应 LoopVerdict 的 `reason`
 
 ### Requirement: 规则化迭代内评估
-系统 SHALL 在每轮迭代后执行零 LLM 成本的规则评估，检查约束覆盖与证据增量。规则评估 SHALL 复用 postcheck 的判定原语（约束模式匹配、数字抽取、证据文本化）。
+系统 SHALL 在每轮迭代后调用唯一的零 LLM 成本 termination critic，检查约束覆盖、来源等级、证据增量与预算。loop SHALL NOT 维护第二套继续/终止规则。
 
 #### Scenario: 约束覆盖检查
 - **WHEN** 查询携带时间约束、对比意图或多跳分析意图
@@ -32,7 +32,17 @@ TBD - created by archiving change langgraph-react-loop. Update Purpose after arc
 - **AND** 连续无进展计数 SHALL 加一
 
 ### Requirement: 分级 LLM 评审
-系统 SHALL 支持按配置间隔调用 LLM judge 评审循环进展，judge 间隔 SHALL 可通过配置调整（`judge_interval`），且在循环被强制终止前 SHALL 执行一次终局评审。judge SHALL 复用 postcheck judge 的 LLM 配置与 JSON 输出协议。
+系统 SHALL 支持按 `termination.judge_interval` 调用 `termination.judge` 评审循环进展，并在候选终答或非歧义强制终止前执行一次终局评审。loop SHALL 只使用该 judge 角色与 JSON 输出协议。
+
+#### Scenario: judge 不能推翻确定性缺口或预算
+- **WHEN** judge 输出 `passes=true`，但 critic 仍有来源等级、证据覆盖、约束或预算缺口
+- **THEN** 系统 SHALL 保留确定性缺口与 hard stop
+- **AND** judge SHALL NOT 清空 `constraints_missing`、延长预算或把 verdict 改成成功
+
+#### Scenario: judge 可以否决确定性通过
+- **WHEN** critic 规则通过但 judge 输出 `passes=false`
+- **THEN** verdict SHALL 增加语义充分性缺口
+- **AND** 仅在预算仍有余量时继续
 
 #### Scenario: 按间隔评审
 - **WHEN** 循环迭代次数达到 `judge_interval` 的整数倍且规则评估未判定终止
@@ -62,7 +72,7 @@ TBD - created by archiving change langgraph-react-loop. Update Purpose after arc
 - **AND** 终止原因 SHALL 标记为 `stagnated`
 
 ### Requirement: 循环终止语义
-系统 SHALL 将循环终止原因细分为四类并通过元数据暴露：`succeeded`（约束满足且评估通过）、`exhausted`（迭代预算用尽）、`stagnated`（停滞检测触发）、`unrecoverable`（工具持续失败等不可恢复错误）。
+系统 SHALL 通过元数据暴露 `succeeded`、`exhausted`、`stagnated`、`unrecoverable`、`evidence_insufficient` 与 `clarification_required` 终止原因。
 
 #### Scenario: 成功终止
 - **WHEN** 模型提议输出最终答案且 evaluate 判定约束清单为空、规则抽查通过
@@ -84,16 +94,12 @@ TBD - created by archiving change langgraph-react-loop. Update Purpose after arc
 - **THEN** 循环 SHALL 继续，缺项清单 SHALL 作为反馈注入循环状态供下一轮使用
 
 ### Requirement: 显式成功标准注入
-当循环作为 postcheck 回退执行时，系统 SHALL 将 postcheck verdict 的 `failure_types`、`missing_constraints` 与 `recovery_goal` 作为显式成功标准写入循环初始状态，evaluate 节点 SHALL 据此构建约束 checklist。
+循环 SHALL 从共享 `QueryAnalysis` 构建初始成功标准，evaluate 节点 SHALL 在每轮对照同一标准检查进展。
 
-#### Scenario: 回退上下文转化为 checklist
-- **WHEN** ReAct 循环以 fallback 上下文启动
-- **THEN** 初始约束 checklist SHALL 由 postcheck 的 `failure_types` 与 `missing_constraints` 派生
-- **AND** evaluate 每轮 SHALL 对照该 checklist 判定补救进展
-
-#### Scenario: 无回退上下文
-- **WHEN** ReAct 循环独立启动（无 fallback 上下文）
-- **THEN** 初始 checklist SHALL 由查询自身的约束解析结果（时间约束、对比意图等）派生
+#### Scenario: QueryAnalysis 包含比较或时间约束
+- **WHEN** 循环以结构化分析启动
+- **THEN** 初始 checklist SHALL 由分析中的比较、时间和权威约束派生
+- **AND** 模型 SHALL NOT 通过改写工具查询清除这些成功标准
 
 ### Requirement: Loop verdicts SHALL be streamed as safe iteration details
 Every LangGraph ReAct evaluation SHALL complete the corresponding iteration

@@ -1,6 +1,6 @@
 """ReAct tools for LangChain agents.
 
-This module wraps existing search, domain API, local doc, and high-level search
+This module wraps registered skills, web search, local docs, and high-level search
 recovery tools as LangChain BaseTool implementations suitable for use with
 ReAct agents.
 """
@@ -15,21 +15,23 @@ from typing import Any, Dict, List, Optional, Type
 from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evidence import (
-    DomainEvidenceSource,
     LocalEvidenceSource,
     RetrievalOptions,
+    WebEvidenceSource,
     build_evidence_summary,
     source_identity_label,
 )
+from evidence.official_domain_resolver import build_official_domain_resolver
 from langchain.langchain_rag import SearchRAGChain
 from search.search import SearchClient, SearchHit
-from search.source_selector import IntelligentSourceSelector
+from skills import SkillRegistry
+from utils.query_orchestration import QueryAnalysis
 from utils.timing_utils import TimingRecorder
 
 
@@ -43,9 +45,10 @@ class SearchRecoveryInput(BaseModel):
     query: str = Field(description="The search recovery query to execute")
 
 
-class DomainApiInput(BaseModel):
-    """Input schema for domain API tool."""
-    query: str = Field(description="The domain query to execute")
+class SkillQueryInput(BaseModel):
+    """Common input shape for the first generation of registered skills."""
+
+    query: str = Field(description="The complete user query to validate and execute")
 
 
 class LocalDocInput(BaseModel):
@@ -66,12 +69,45 @@ class ReActSearchTool(BaseTool):
     return_direct: bool = False
 
     search_client: SearchClient = Field(exclude=True)
+    app_config: Dict[str, Any] = Field(default_factory=dict, exclude=True)
+    max_calls_per_query: int = Field(default=3, exclude=True)
+    _calls_in_run: int = PrivateAttr(default=0)
+    _analysis: Optional[QueryAnalysis] = PrivateAttr(default=None)
+    _web_source: Optional[WebEvidenceSource] = PrivateAttr(default=None)
+    _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
 
     class Config:
         arbitrary_types_allowed = True
 
-    def __init__(self, search_client: SearchClient, **kwargs: Any) -> None:
-        super().__init__(search_client=search_client, **kwargs)
+    def __init__(
+        self,
+        search_client: SearchClient,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        max_calls_per_query: int = 3,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            search_client=search_client,
+            app_config=config or {},
+            max_calls_per_query=max(1, int(max_calls_per_query)),
+            **kwargs,
+        )
+        orchestration = self.app_config.get("orchestration") or {}
+        if not isinstance(orchestration, dict):
+            orchestration = {}
+        clients = list(
+            getattr(search_client, "clients", None) or [search_client]
+        )
+        resolver = build_official_domain_resolver(
+            orchestration,
+            search_clients=clients,
+        )
+        self._web_source = WebEvidenceSource(
+            search_client,
+            official_domains=orchestration.get("official_domains"),
+            official_resolver=resolver,
+        )
 
     def _run(
         self,
@@ -79,11 +115,69 @@ class ReActSearchTool(BaseTool):
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
         """Execute the search and return formatted results."""
+        self._last_evidence_records = []
+        if self._calls_in_run >= self.max_calls_per_query:
+            return json.dumps(
+                {
+                    "status": "budget_exhausted",
+                    "reason": "max_calls_per_query",
+                    "limit": self.max_calls_per_query,
+                },
+                ensure_ascii=False,
+            )
+        self._calls_in_run += 1
         try:
-            hits = self.search_client.search(query, num_results=5)
+            entities = list(
+                dict.fromkeys(
+                    list(getattr(self._analysis, "comparison_members", None) or [])
+                    + list(getattr(self._analysis, "entities", None) or [])
+                )
+            )
+            source = self._web_source or WebEvidenceSource(self.search_client)
+            items = source.retrieve(
+                query,
+                RetrievalOptions(
+                    num_results=5,
+                    metadata={"source_tier_entities": entities},
+                ),
+            )
+            self._last_evidence_records = [
+                {
+                    "source_type": "web",
+                    "source_tier": str((item.metadata or {}).get("source_tier") or "unknown"),
+                    "reference": str(item.reference or ""),
+                    "title": str(item.title or ""),
+                    "content": str(item.snippet or item.content or ""),
+                    "metadata": dict(getattr(item, "metadata", None) or {}),
+                }
+                for item in items
+                if not (item.metadata or {}).get("exclude_from_evidence")
+            ]
+            hits = [
+                SearchHit(
+                    title=str(item.title or ""),
+                    url=str(item.reference or ""),
+                    snippet=str(item.snippet or item.content or ""),
+                )
+                for item in items
+                if not (item.metadata or {}).get("exclude_from_evidence")
+            ]
             return self._format_results(hits)
         except Exception as exc:
             return f"Search failed: {exc}"
+
+    def reset_budget(self) -> None:
+        self._calls_in_run = 0
+        self._last_evidence_records = []
+
+    def set_analysis(self, analysis: Optional[QueryAnalysis]) -> None:
+        self._analysis = analysis
+
+    def get_last_evidence_records(self) -> List[Dict[str, Any]]:
+        return [dict(record) for record in self._last_evidence_records]
+
+    def get_budget_status(self) -> Dict[str, int]:
+        return {"limit": self.max_calls_per_query, "used": self._calls_in_run}
 
     def get_last_search_api_calls(self) -> List[Dict[str, Any]]:
         """Expose the concrete provider calls for the workflow audit only."""
@@ -125,7 +219,11 @@ class ReActSearchRecoveryTool(BaseTool):
     reranker: Optional[Any] = Field(default=None, exclude=True)
     min_rerank_score: float = Field(default=0.0, exclude=True)
     max_per_domain: int = Field(default=1, exclude=True)
-    source_selector: Optional[Any] = Field(default=None, exclude=True)
+    app_config: Dict[str, Any] = Field(default_factory=dict, exclude=True)
+    max_calls_per_query: int = Field(default=2, exclude=True)
+    _calls_in_run: int = PrivateAttr(default=0)
+    _analysis: Optional[QueryAnalysis] = PrivateAttr(default=None)
+    _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
 
     class Config:
         arbitrary_types_allowed = True
@@ -139,7 +237,8 @@ class ReActSearchRecoveryTool(BaseTool):
         reranker: Optional[Any] = None,
         min_rerank_score: float = 0.0,
         max_per_domain: int = 1,
-        source_selector: Optional[IntelligentSourceSelector] = None,
+        config: Optional[Dict[str, Any]] = None,
+        max_calls_per_query: int = 2,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -149,7 +248,8 @@ class ReActSearchRecoveryTool(BaseTool):
             reranker=reranker,
             min_rerank_score=min_rerank_score,
             max_per_domain=max_per_domain,
-            source_selector=source_selector,
+            app_config=config or {},
+            max_calls_per_query=max(1, int(max_calls_per_query)),
             **kwargs,
         )
         self._rag_chain: Optional[SearchRAGChain] = None
@@ -165,7 +265,7 @@ class ReActSearchRecoveryTool(BaseTool):
                 reranker=self.reranker,
                 min_rerank_score=self.min_rerank_score,
                 max_per_domain=self.max_per_domain,
-                source_selector=self.source_selector,
+                config=self.app_config,
             )
         return self._rag_chain
 
@@ -174,6 +274,17 @@ class ReActSearchRecoveryTool(BaseTool):
         query: str,
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
+        self._last_evidence_records = []
+        if self._calls_in_run >= self.max_calls_per_query:
+            return json.dumps(
+                {
+                    "status": "budget_exhausted",
+                    "reason": "max_calls_per_query",
+                    "limit": self.max_calls_per_query,
+                },
+                ensure_ascii=False,
+            )
+        self._calls_in_run += 1
         try:
             result = self._get_chain().answer(
                 query,
@@ -185,17 +296,52 @@ class ReActSearchRecoveryTool(BaseTool):
                 temperature=0.2,
                 enable_search=True,
                 enable_local_docs=True,
-                enable_domain=True,
+                enable_skill=False,
+                analysis=self._analysis,
             )
             self._last_payload = result
             raw_calls = result.get("search_api_calls") if isinstance(result, dict) else None
             self._last_search_api_calls = [
                 record for record in list(raw_calls or []) if isinstance(record, dict)
             ]
+            self._last_evidence_records = self._evidence_records_from_payload(result)
             return self._format_payload(result)
         except Exception as exc:
             self._last_search_api_calls = []
             return f"Search recovery failed: {exc}"
+
+    def reset_budget(self) -> None:
+        self._calls_in_run = 0
+        self._last_evidence_records = []
+        self._last_search_api_calls = []
+
+    def set_analysis(self, analysis: Optional[QueryAnalysis]) -> None:
+        self._analysis = analysis
+
+    def get_last_evidence_records(self) -> List[Dict[str, Any]]:
+        return [dict(record) for record in self._last_evidence_records]
+
+    def get_budget_status(self) -> Dict[str, int]:
+        return {"limit": self.max_calls_per_query, "used": self._calls_in_run}
+
+    @staticmethod
+    def _evidence_records_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        for raw in list(payload.get("evidence_items") or []):
+            if not isinstance(raw, dict):
+                continue
+            metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+            records.append(
+                {
+                    "source_type": str(raw.get("source_type") or "web"),
+                    "source_tier": str(metadata.get("source_tier") or "unknown"),
+                    "reference": str(raw.get("reference") or ""),
+                    "title": str(raw.get("title") or ""),
+                    "content": str(raw.get("snippet") or raw.get("content") or ""),
+                    "metadata": dict(metadata),
+                }
+            )
+        return records
 
     def get_last_search_api_calls(self) -> List[Dict[str, Any]]:
         """Return the recovery chain's provider-call audit snapshots."""
@@ -239,113 +385,6 @@ class ReActSearchRecoveryTool(BaseTool):
         return "\n\n".join(parts) if parts else "Search recovery completed but returned no evidence."
 
 
-class ReActDomainTool(BaseTool):
-    """LangChain Tool wrapping IntelligentSourceSelector for ReAct agents."""
-
-    name: str = "domain_api"
-    description: str = (
-        "Get professional domain-specific data including weather, finance, sports, and transportation. "
-        "Input should be a domain query string. "
-        "Returns structured data or natural language answer from specialized APIs."
-    )
-    args_schema: Type[BaseModel] = DomainApiInput
-    return_direct: bool = False
-
-    source_selector: Any = Field(exclude=True)
-    llm: Optional[BaseChatModel] = Field(default=None, exclude=True)
-
-    class Config:
-        arbitrary_types_allowed = True
-
-    def __init__(
-        self,
-        source_selector: IntelligentSourceSelector,
-        llm: Optional[BaseChatModel] = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(source_selector=source_selector, **kwargs)
-        self.llm = llm
-
-    def _run(
-        self,
-        query: str,
-        run_manager: Optional[CallbackManagerForToolRun] = None,
-    ) -> str:
-        """Execute domain API query and return formatted results."""
-        try:
-            evidence_source = DomainEvidenceSource(self.source_selector)
-            evidence_items = evidence_source.retrieve(
-                query,
-                RetrievalOptions(timing_recorder=TimingRecorder(enabled=False)),
-            )
-            if not evidence_items:
-                return "No domain-specific data found for this query."
-
-            item = evidence_items[0]
-            domain = item.metadata.get("domain") or "domain"
-            answer = item.content
-            data = item.metadata.get("data")
-            if data and self.llm and not item.metadata.get("continue_search"):
-                enhanced = self._enhance_answer(query, domain, data)
-                if enhanced:
-                    answer = enhanced
-
-            lines = [answer]
-            lines.append(f"Evidence Source: {source_identity_label(item.source_type, item.source_id)}")
-            lines.append(f"Reference: {item.reference}")
-            return "\n\n".join(line for line in lines if line)
-
-        except Exception as exc:
-            return f"Domain API error: {exc}"
-
-    def _enhance_answer(
-        self,
-        query: str,
-        domain: str,
-        data: Any,
-    ) -> Optional[str]:
-        """Enhance domain answer with LLM."""
-        if not self.llm:
-            return None
-
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        prompts = {}
-
-        if domain == "weather" and isinstance(data, dict):
-            prompts["weather"] = (
-                "你是天气助手。根据实时数据，给出自然、丰富的回复，包括当前状况、穿衣/出行建议。",
-                f"位置：{data.get('location', {}).get('formatted_address', '未知')}\n"
-                f"概况：{data.get('weatherCondition', {}).get('description', {}).get('text', '未知')}\n"
-                f"温度：{data.get('temperature', {}).get('degrees', '未知')}°C"
-            )
-        elif domain == "finance":
-            prompts["finance"] = (
-                "你是金融助手。根据提供的股票数据，分析价格走势和表现。如果包含多只股票，请进行对比。",
-                json.dumps(data, ensure_ascii=False, indent=2)
-            )
-
-        if domain not in prompts:
-            return None
-
-        system_prompt, data_summary = prompts[domain]
-        user_prompt = f"查询：{query}\n数据：\n{data_summary}\n生成回复："
-
-        try:
-            from langchain_core.language_models.chat_models import BaseChatModel
-            if isinstance(self.llm, BaseChatModel):
-                response = self.llm.invoke([
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=user_prompt),
-                ])
-                content = response.content if hasattr(response, 'content') else str(response)
-                return content
-        except Exception:
-            pass
-
-        return None
-
-
 class ReActLocalDocTool(BaseTool):
     """LangChain tool that reuses the unified local evidence source."""
 
@@ -360,6 +399,9 @@ class ReActLocalDocTool(BaseTool):
 
     data_path: str = Field(exclude=True)
     llm: Optional[BaseChatModel] = Field(default=None, exclude=True)
+    max_calls_per_query: int = Field(default=2, exclude=True)
+    _calls_in_run: int = PrivateAttr(default=0)
+    _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
 
     class Config:
         arbitrary_types_allowed = True
@@ -368,9 +410,14 @@ class ReActLocalDocTool(BaseTool):
         self,
         data_path: str,
         llm: Optional[BaseChatModel] = None,
+        max_calls_per_query: int = 2,
         **kwargs: Any,
     ) -> None:
-        super().__init__(data_path=data_path, **kwargs)
+        super().__init__(
+            data_path=data_path,
+            max_calls_per_query=max(1, int(max_calls_per_query)),
+            **kwargs,
+        )
         self.llm = llm
         self._source = LocalEvidenceSource(data_path=data_path)
 
@@ -386,6 +433,17 @@ class ReActLocalDocTool(BaseTool):
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
         """Query local documents and return formatted results."""
+        self._last_evidence_records = []
+        if self._calls_in_run >= self.max_calls_per_query:
+            return json.dumps(
+                {
+                    "status": "budget_exhausted",
+                    "reason": "max_calls_per_query",
+                    "limit": self.max_calls_per_query,
+                },
+                ensure_ascii=False,
+            )
+        self._calls_in_run += 1
         if not self.data_path:
             return "Local knowledge base is not available (no data path configured)."
 
@@ -398,6 +456,18 @@ class ReActLocalDocTool(BaseTool):
             if not evidence_items:
                 return "No relevant documents found."
 
+            self._last_evidence_records = [
+                {
+                    "source_type": "local",
+                    "source_tier": "local",
+                    "reference": str(item.reference or ""),
+                    "title": str(item.title or ""),
+                    "content": str(item.snippet or item.content or ""),
+                    "metadata": dict(getattr(item, "metadata", None) or {}),
+                }
+                for item in evidence_items
+            ]
+
             lines = ["Relevant Local Evidence:"]
             for idx, item in enumerate(evidence_items, 1):
                 lines.append(f"{idx}. {item.title}\n   {item.snippet}")
@@ -408,6 +478,124 @@ class ReActLocalDocTool(BaseTool):
 
         except Exception as exc:
             return f"Local documents query failed: {exc}"
+
+    def reset_budget(self) -> None:
+        self._calls_in_run = 0
+        self._last_evidence_records = []
+
+    def get_last_evidence_records(self) -> List[Dict[str, Any]]:
+        return [dict(record) for record in self._last_evidence_records]
+
+    def get_budget_status(self) -> Dict[str, int]:
+        return {"limit": self.max_calls_per_query, "used": self._calls_in_run}
+
+
+class ReActSkillTool(BaseTool):
+    """LangChain adapter for one registry-managed skill handler."""
+
+    name: str
+    description: str
+    args_schema: Type[BaseModel] = SkillQueryInput
+    return_direct: bool = False
+
+    skill_handler: Any = Field(exclude=True)
+    _calls_in_run: int = PrivateAttr(default=0)
+    _timing_recorder: Optional[TimingRecorder] = PrivateAttr(default=None)
+    _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def __init__(self, skill_handler: Any, **kwargs: Any) -> None:
+        super().__init__(
+            name=skill_handler.manifest.tool_name,
+            description=skill_handler.manifest.description,
+            skill_handler=skill_handler,
+            **kwargs,
+        )
+
+    def _run(
+        self,
+        query: str,
+        run_manager: Optional[CallbackManagerForToolRun] = None,
+    ) -> str:
+        self._last_evidence_records = []
+        call_limit = self.skill_handler.manifest.budget["max_calls_per_query"]
+        if self._calls_in_run >= call_limit:
+            return json.dumps(
+                {
+                    "status": "budget_exhausted",
+                    "reason": "max_calls_per_query",
+                    "limit": call_limit,
+                },
+                ensure_ascii=False,
+            )
+        self._calls_in_run += 1
+        preflight = self.skill_handler.preflight({"query": query})
+        if not preflight.accepted:
+            return json.dumps(
+                {
+                    "status": "rejected",
+                    "reason": preflight.reason,
+                    "instruction": "Correct the arguments only from explicit user input, otherwise use general search.",
+                },
+                ensure_ascii=False,
+            )
+        items = self.skill_handler.run(
+            preflight.normalized_args,
+            RetrievalOptions(
+                timing_recorder=self._timing_recorder or TimingRecorder(enabled=False)
+            ),
+        )
+        if not items:
+            return json.dumps(
+                {
+                    "status": "no_data",
+                    "reason": "all_configured_providers_failed",
+                    "instruction": "Use general web search instead.",
+                },
+                ensure_ascii=False,
+            )
+        self._last_evidence_records = [
+            {
+                "source_type": str(item.source_type or "domain"),
+                "source_tier": str((item.metadata or {}).get("source_tier") or "authoritative"),
+                "reference": str(item.reference or ""),
+                "title": str(item.title or self.name),
+                "content": str(item.snippet or item.content or ""),
+                "metadata": dict(getattr(item, "metadata", None) or {}),
+            }
+            for item in items
+        ]
+        blocks = []
+        for item in items:
+            blocks.append(
+                "\n".join(
+                    [
+                        item.content,
+                        f"Evidence Source: {source_identity_label(item.source_type, item.source_id)}",
+                        f"Reference: {item.reference}",
+                    ]
+                )
+            )
+        return "\n\n".join(blocks)
+
+    def reset_budget(self) -> None:
+        self._calls_in_run = 0
+        self._last_evidence_records = []
+
+    def get_last_evidence_records(self) -> List[Dict[str, Any]]:
+        return [dict(record) for record in self._last_evidence_records]
+
+    def get_budget_status(self) -> Dict[str, int]:
+        return {
+            "limit": int(self.skill_handler.manifest.budget["max_calls_per_query"]),
+            "used": self._calls_in_run,
+        }
+
+    def set_timing_recorder(self, recorder: Optional[TimingRecorder]) -> None:
+        """Bind the request recorder so provider calls remain observable in loop mode."""
+        self._timing_recorder = recorder
 
 
 def create_react_tools_from_config(
@@ -428,6 +616,19 @@ def create_react_tools_from_config(
         List of LangChain BaseTool instances
     """
     tools: List[BaseTool] = []
+    skill_registry = SkillRegistry.from_config(config)
+    tool_budgets = (config.get("termination") or {}).get("tool_budgets") or {}
+    if not isinstance(tool_budgets, dict):
+        tool_budgets = {}
+
+    def tool_budget(name: str, default: int) -> int:
+        raw = tool_budgets.get(name, default)
+        if isinstance(raw, dict):
+            raw = raw.get("max_calls_per_query", default)
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return default
 
     reranker = None
     rerank_cfg = config.get("rerank") or {}
@@ -442,23 +643,15 @@ def create_react_tools_from_config(
         except Exception:
             reranker = None
 
-    source_selector = None
-    try:
-        source_selector = IntelligentSourceSelector(
-            llm_client=None,  # We'll use the provided llm for enhancement
-            use_llm=False,
-            google_api_key=config.get("googleSearch", {}).get("api_key") or config.get("GOOGLE_API_KEY"),
-            finnhub_api_key=config.get("FINNHUB_API_KEY"),
-            sportsdb_api_key=config.get("SPORTSDB_API_KEY"),
-            apisports_api_key=config.get("APISPORTS_KEY"),
-            config=config,
-        )
-    except Exception:
-        source_selector = None
-
     # Create search tools if search client is available
     if search_client:
-        tools.append(ReActSearchTool(search_client=search_client))
+        tools.append(
+            ReActSearchTool(
+                search_client=search_client,
+                config=config,
+                max_calls_per_query=tool_budget("web_search", 3),
+            )
+        )
         if llm:
             tools.append(
                 ReActSearchRecoveryTool(
@@ -468,26 +661,23 @@ def create_react_tools_from_config(
                     reranker=reranker,
                     min_rerank_score=min_rerank_score,
                     max_per_domain=max_per_domain,
-                    source_selector=source_selector,
+                    config=config,
+                    max_calls_per_query=tool_budget("search_recovery", 2),
                 )
             )
 
-    # Create domain API tool
-    try:
-        if source_selector is None:
-            raise ValueError("source selector unavailable")
-        tools.append(ReActDomainTool(
-            source_selector=source_selector,
-            llm=llm,
-        ))
-    except Exception:
-        pass  # Domain API tool is optional
+    # The registry is the only source of skill tools. Availability is already
+    # resolved before this point, so unavailable providers never enter the
+    # model's tool surface.
+    for skill_handler in skill_registry.active_skills():
+        tools.append(ReActSkillTool(skill_handler=skill_handler))
 
     # Create local docs tool if data path is available
     if data_path and os.path.isdir(data_path):
         tools.append(ReActLocalDocTool(
             data_path=data_path,
             llm=llm,
+            max_calls_per_query=tool_budget("local_docs", 2),
         ))
 
     return tools

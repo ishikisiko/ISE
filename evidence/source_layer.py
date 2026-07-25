@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
@@ -159,7 +158,7 @@ def _plan_provenance(options: RetrievalOptions) -> Dict[str, Any]:
     return {
         key: metadata[key]
         for key in (
-            "originating_plan_step",
+            "originating_tool_call",
             "source_tier",
             "retrieval_kind",
             "content_date",
@@ -268,7 +267,6 @@ class WebEvidenceSource(EvidenceSource):
             if not item.metadata.get("exclude_from_evidence"):
                 items.append(item)
         return items
-
     def retrieve(self, query: str, options: RetrievalOptions) -> List[EvidenceItem]:
         hits = self.search_client.search(
             query,
@@ -360,72 +358,3 @@ class LocalEvidenceSource(EvidenceSource):
                 )
             )
         return items
-
-
-class DomainEvidenceSource(EvidenceSource):
-    source_type = EvidenceSourceType.DOMAIN
-
-    def __init__(self, source_selector: Optional[Any] = None) -> None:
-        self.source_selector = source_selector
-        self.source_id = "domain_api"
-        self.display_name = "Domain API"
-
-    def describe_with_domain(self, domain: Optional[str]) -> Dict[str, Any]:
-        payload = self.describe()
-        if domain:
-            payload["domain"] = domain
-            payload["source_id"] = f"domain:{domain}"
-        return payload
-
-    def _coerce_domain_result(self, query: str, options: RetrievalOptions) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
-        metadata = options.metadata or {}
-        domain = metadata.get("domain")
-        domain_result = metadata.get("domain_result")
-        if domain_result or not self.source_selector:
-            return domain, domain_result
-
-        timing_recorder = options.timing_recorder
-        domain, _ = self.source_selector.select_sources(query, timing_recorder=timing_recorder)
-        domain_result = self.source_selector.fetch_domain_data(query, domain, timing_recorder=timing_recorder)
-        return domain, domain_result
-
-    def retrieve(self, query: str, options: RetrievalOptions) -> List[EvidenceItem]:
-        domain, domain_result = self._coerce_domain_result(query, options)
-        metadata = options.metadata or {}
-        extra_context = str(metadata.get("extra_context") or "").strip()
-
-        if not domain_result and not extra_context:
-            return []
-
-        answer = str((domain_result or {}).get("answer") or extra_context or "").strip()
-        raw_data = (domain_result or {}).get("data")
-        if not answer and raw_data is None:
-            return []
-
-        if not answer and raw_data is not None:
-            answer = json.dumps(raw_data, ensure_ascii=False, indent=2)
-
-        source_id = f"domain:{domain or 'context'}"
-        reference = str((domain_result or {}).get("endpoint") or (domain_result or {}).get("provider") or source_id)
-        title = f"{domain or 'domain'} evidence"
-        payload = {
-            "domain": domain,
-            "provider": (domain_result or {}).get("provider"),
-            "handled": (domain_result or {}).get("handled"),
-            "continue_search": (domain_result or {}).get("continue_search"),
-            "data": raw_data,
-            "canonical_reference": canonical_reference(reference),
-        }
-        payload.update(_plan_provenance(options))
-        return [
-            EvidenceItem(
-                source_type=self.source_type.value,
-                source_id=source_id,
-                title=title,
-                content=answer,
-                reference=reference,
-                snippet=_preview_text(answer),
-                metadata=payload,
-                rank=1,
-            )
-        ]

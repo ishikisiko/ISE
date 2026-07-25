@@ -1,7 +1,11 @@
 {
     "displayResponseTimes": true,
     "LLM_PROVIDER": "opencode-go",
-    "orchestrator_mode": "langchain",
+    "skills": {
+        "_comment": "Runtime skill registry (roadmap M3). Finance, weather, location, transportation, and sports mount independently when available; list names in disabled for an explicit rollback.",
+        "enabled": true,
+        "disabled": []
+    },
     "conversation": {
         "enabled": true,
         "checkpoint_path": "./checkpoints/conversations.sqlite",
@@ -26,19 +30,8 @@
         "include_response_payload": true
     },
     "orchestration": {
-        "_comment": "Shared analysis, bounded evidence plan, ledger, and verification. LLM analysis remains opt-in; insufficient planned evidence returns an explicit result rather than an unsupported factual draft.",
+        "_comment": "Deterministic query analysis plus official-domain resolution used by the sole agentic loop and evidence ledger.",
         "enabled": true,
-        "enforce_verification": true,
-        "llm_analysis": false,
-        "query_budget": 3,
-        "result_budget": 8,
-        "time_budget_ms": 20000,
-        "recovery_budget": 1,
-        "reformulation_recovery": {
-            "_comment": "Deterministic re-search for authority, comparison, and no-evidence gaps. Set enabled false to keep the legacy single-retrieval behavior.",
-            "enabled": true,
-            "max_attempts": 1
-        },
         "official_domain_resolution": {
             "_comment": "Discover -> verify -> cache resolver for entity official domains. The ruling currency is structurally verifiable relations (registry homepage + homepage->repo backlink closure, Wikidata P856 + support, trusted-domain redirects into the candidate, certificate SAN coverage, facade consistency, CT-log domain age); cross-provider search voting is only a weak signal and can never rule official alone. What is cached is the relation graph, not the verdict, so ruling rules can be re-applied offline. Pinned stems (pins) win with top priority; pin_shadow_audit re-verifies pins in the background and surfaces disagreements without ever overriding the pin. Set enabled false to fall back to pins-only (legacy static-map behavior).",
             "enabled": true,
@@ -103,38 +96,24 @@
             "max_chars_per_page": 20000
         }
     },
-    "postcheck": {
-        "enabled": false,
-        "log_verdicts": false,
+    "termination": {
+        "_comment": "Single stop contract for the agentic loop. Deterministic critic and budgets cannot be overridden by the optional semantic judge.",
+        "max_iterations": 5,
+        "judge_interval": 2,
+        "repeat_threshold": 2,
+        "no_progress_threshold": 2,
+        "tool_error_threshold": 2,
+        "new_evidence_min_ratio": 0.1,
+        "tool_budgets": {
+            "web_search": 3,
+            "search_recovery": 2,
+            "local_docs": 2
+        },
         "judge": {
             "enabled": true,
             "provider": "opencode-go",
             "model": "deepseek-v4-flash"
-        },
-        "react_fallback": {
-            "enabled": false,
-            "max_iterations": 4,
-            "engine": "langgraph"
         }
-    },
-    "reactAgent": {
-        "max_iterations": 5,
-        "engine": "langgraph",
-        "evaluation": {
-            "judge_interval": 2,
-            "repeat_threshold": 2,
-            "no_progress_threshold": 2,
-            "tool_error_threshold": 2,
-            "new_evidence_min_ratio": 0.1
-        }
-    },
-    "domainClassifier": {
-        "provider": "opencode-go",
-        "model": "deepseek-v4-flash"
-    },
-    "routingAndKeywords": {
-        "provider": "opencode-go",
-        "model": "deepseek-v4-flash"
     },
     "embeddings": {
         "provider": "openai_compatible",

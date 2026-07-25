@@ -1,12 +1,12 @@
 # react-agent Specification
 
-> **Status:** reframing at M1 — 能力存续但立论框架会变，可修补，不要在现框架上做大投入。 分类依据见 `docs/agentic_loop_roadmap.md`。
+> **Status:** active - roadmap M5 sole-loop runtime contract.
 
 ## Purpose
-TBD - created by archiving change langchain-react-agent. Update Purpose after archive.
+Define the explicit LangGraph act/observe/evaluate loop used by the production runtime.
 ## Requirements
 ### Requirement: ReAct Agent 引擎
-系统 SHALL 提供基于显式状态机（LangGraph graph）的迭代推理引擎，图结构为 `act → observe → evaluate → (continue | finish)`。该引擎接收用户查询，输出最终回答。系统 SHALL 保留 legacy LangChain `AgentExecutor` 引擎作为可配置回退路径。
+系统 SHALL 提供基于显式状态机（LangGraph graph）的迭代推理引擎，图结构为 `act → observe → evaluate → (continue | finish)`。该引擎接收用户查询，输出最终回答，并且是唯一的 ReAct 响应循环实现。
 
 #### Scenario: 基础 ReAct 推理流程
 - **WHEN** 用户提交查询且系统使用 ReAct Agent 模式
@@ -21,30 +21,26 @@ TBD - created by archiving change langchain-react-agent. Update Purpose after ar
 
 #### Scenario: 达到最大迭代次数
 - **WHEN** Agent 达到 max_iterations 上限仍未通过 evaluate 判定
-- **THEN** Agent SHALL 返回当前已有的最佳答案（即使不完整）
-- **AND** 在返回结果中标记 `truncated: true`
+- **THEN** Agent SHALL 返回带证据/预算不足说明的当前候选答案，或中性的不足回答
 - **AND** 循环终止原因 SHALL 标记为 `exhausted`
 
-#### Scenario: 引擎可配置切换
-- **WHEN** 配置 `reactAgent.engine` 为 `legacy`
-- **THEN** 系统 SHALL 使用 legacy `AgentExecutor` 路径执行
-- **AND** 未配置或配置为 `langgraph` 时 SHALL 使用显式状态机引擎
+#### Scenario: 缺失 LangGraph 依赖
+- **WHEN** 运行时缺少 LangGraph 依赖
+- **THEN** 系统 SHALL 明确失败
+- **AND** 系统 SHALL NOT 静默切换到另一个具有独立停止逻辑的执行器
 
 #### Scenario: 模型提议结束需经评估确认
 - **WHEN** 模型在 act 阶段产出最终答案提议
 - **THEN** 循环 SHALL NOT 直接终止
 - **AND** evaluate 节点 SHALL 验证约束 checklist 后方决定是否接受该答案
 
-### Requirement: 自定义 ReAct Prompt
-系统 SHALL 支持注入自定义 ReAct System Prompt，以支持中文推理场景。
+### Requirement: Tool-aware ReAct Prompt
+系统 SHALL 为显式状态机注入与实际启用工具一致的系统提示，并且不暴露未启用工具。
 
-#### Scenario: 使用默认英文 Prompt
-- **WHEN** 系统未提供自定义 prompt
-- **THEN** 使用 LangChain 默认 ReAct prompt
-
-#### Scenario: 使用自定义中文 Prompt
-- **WHEN** 调用 `create_react_agent` 时传入 `react_prompt` 参数
-- **THEN** 使用传入的 prompt 替代默认 prompt
+#### Scenario: 构建循环提示
+- **WHEN** LangGraph ReAct 循环开始执行
+- **THEN** 模型工具绑定或兼容提示 SHALL 只包含当前启用工具及其描述
+- **AND** 非原生工具调用模型 SHALL 使用相同工具清单的结构化兼容提示
 
 ### Requirement: LangGraph ReAct SHALL emit auditable action events
 When the LangGraph ReAct engine runs with a workflow tracer, it SHALL emit
@@ -91,4 +87,3 @@ process narration in `answer`.
 - **THEN** the response SHALL be excluded from the final answer
 - **AND** the trace SHALL identify the format outcome without including the
   raw model prose
-

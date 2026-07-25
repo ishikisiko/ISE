@@ -11,7 +11,7 @@ import sys
 import time
 import logging
 import re
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
 
 from langchain_core.documents import Document as LCDocument
@@ -30,7 +30,6 @@ from langchain_core.runnables import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evidence import (
-    DomainEvidenceSource,
     EvidenceItem,
     LocalEvidenceSource,
     RetrievalOptions,
@@ -54,19 +53,14 @@ from evidence.source_tiering import (
     official_entity_for_url,
 )
 from evidence.official_domain_resolver import build_official_domain_resolver
-from evidence.official_domain_resolver import host_matches
 from utils.retrieval_trace import emit_search_call_step, search_call_snapshots
-from utils.timing_utils import TimingRecorder
+from utils.timing_utils import TimingRecorder, extract_token_usage
 from utils.workflow_trace import ensure_tracer
 from utils.query_orchestration import (
     EvidenceLedger,
-    PlanController,
-    PlanStepKind,
-    PlanStepResult,
+    QueryAnalysis,
     QueryExecutionTrace,
-    QueryPlan,
-    VerificationStatus,
-    verify_evidence_plan,
+    analyze_query,
 )
 from utils.query_config import (
     TIME_RANGE_CONFIG,
@@ -75,6 +69,15 @@ from utils.query_config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _RetrievalResult:
+    items: List[Any] = field(default_factory=list)
+    providers: List[str] = field(default_factory=list)
+    attempts: List[Dict[str, Any]] = field(default_factory=list)
+    status: str = "done"
+    reason: Optional[str] = None
 
 
 # Default prompts
@@ -219,12 +222,14 @@ class LocalRAGChain:
         
         # Generate response
         response_start = time.perf_counter()
+        usage_response = None
         try:
             response = self.llm.invoke(
                 messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
+            usage_response = response
             content = response.content if hasattr(response, 'content') else str(response)
         finally:
             if timing_recorder:
@@ -234,6 +239,7 @@ class LocalRAGChain:
                     duration_ms=duration_ms,
                     provider=getattr(self.llm, "provider", None),
                     model=getattr(self.llm, "model_name", None),
+                    extra=extract_token_usage(usage_response),
                 )
         
         # Build answer with source references
@@ -274,7 +280,6 @@ class SearchRAGChain:
         reranker: Optional[Any] = None,
         min_rerank_score: float = 0.0,
         max_per_domain: int = 1,
-        source_selector: Optional[Any] = None,
         tracer: Optional[Any] = None,
     ) -> None:
         self.llm = llm
@@ -284,7 +289,6 @@ class SearchRAGChain:
         self.reranker = reranker
         self.min_rerank_score = min_rerank_score
         self.max_per_domain = max(1, max_per_domain)
-        self.source_selector = source_selector
 
         # Initialize local vector store if data_path provided
         tracer = ensure_tracer(tracer)
@@ -340,7 +344,6 @@ class SearchRAGChain:
             chunk_overlap=chunk_overlap,
             config=self.config,
         )
-        self.domain_source = DomainEvidenceSource(source_selector)
 
         # Official-page extraction: pull full page content from official /
         # first-party domains so answers ground in primary documentation rather
@@ -456,44 +459,56 @@ class SearchRAGChain:
 
         return deduped, metadata
 
-    def _collect_domain_evidence(
+    def _collect_skill_evidence(
         self,
         query: str,
         *,
         domain: Optional[str],
-        domain_result: Optional[Dict[str, Any]],
+        skill_result: Optional[Dict[str, Any]],
         extra_context: Optional[str],
-        enable_domain: bool,
+        enable_skill: bool,
         timing_recorder: Optional[TimingRecorder],
-        plan_metadata: Optional[Dict[str, Any]] = None,
+        provenance_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[EvidenceItem], Optional[Dict[str, Any]]]:
-        """Normalize domain API evidence into unified evidence items."""
-        if not (domain_result or extra_context or (enable_domain and self.source_selector)):
-            return [], domain_result
+        """Normalize already-executed skill evidence for RAG continuation."""
+        if not (skill_result or extra_context):
+            return [], skill_result
+        raw_items = (skill_result or {}).get("_skill_evidence_items") or []
+        items = [item for item in raw_items if isinstance(item, EvidenceItem)]
+        if items:
+            return items, skill_result
 
-        options = RetrievalOptions(
-            num_results=1,
-            timing_recorder=timing_recorder,
-            metadata={
-                "domain": domain,
-                "domain_result": domain_result,
-                "extra_context": extra_context,
-                **(plan_metadata or {}),
-            },
+        answer = str((skill_result or {}).get("answer") or extra_context or "").strip()
+        data = (skill_result or {}).get("data")
+        if not answer and data is None:
+            return [], skill_result
+        reference = str(
+            (skill_result or {}).get("endpoint")
+            or (skill_result or {}).get("provider")
+            or f"skill:{domain or 'context'}"
         )
-        items = self.domain_source.retrieve(query, options)
-
-        if domain_result is None and items:
-            domain_result = {
-                "answer": items[0].content,
-                "handled": True,
-                "continue_search": True,
-            }
-            domain_meta = items[0].metadata or {}
-            if domain_meta.get("data") is not None:
-                domain_result["data"] = domain_meta.get("data")
-
-        return items, domain_result
+        metadata = {
+            "domain": domain,
+            "skill": (skill_result or {}).get("skill") or domain,
+            "provider": (skill_result or {}).get("provider"),
+            "data": data,
+            "continue_search": True,
+            "source_tier": "authoritative",
+            "retrieval_kind": "skill",
+            "canonical_reference": reference,
+            **(provenance_metadata or {}),
+        }
+        item = EvidenceItem(
+            source_type="domain",
+            source_id=f"skill:{domain or 'context'}",
+            title=f"{domain or 'skill'} evidence",
+            content=answer or json.dumps(data, ensure_ascii=False),
+            reference=reference,
+            snippet=" ".join((answer or str(data)).split())[:320],
+            metadata=metadata,
+            rank=1,
+        )
+        return [item], skill_result
 
     def _retrieve_evidence(
         self,
@@ -509,15 +524,13 @@ class SearchRAGChain:
         date_restrict: Optional[str],
         timing_recorder: Optional[TimingRecorder],
         domain: Optional[str] = None,
-        domain_result: Optional[Dict[str, Any]] = None,
+        skill_result: Optional[Dict[str, Any]] = None,
         extra_context: Optional[str] = None,
-        enable_domain: bool = False,
+        enable_skill: bool = False,
         tracer: Optional[Any] = None,
-        query_plan: Optional[QueryPlan] = None,
+        analysis: Optional[QueryAnalysis] = None,
         evidence_ledger: Optional[EvidenceLedger] = None,
         execution_trace: Optional[QueryExecutionTrace] = None,
-        plan_controller: Optional[PlanController] = None,
-        web_step_kind: PlanStepKind = PlanStepKind.WEB_SEARCH,
         enable_temporal_recovery: bool = True,
     ) -> Dict[str, Any]:
         """Retrieve and normalize evidence from enabled first-class sources."""
@@ -535,57 +548,35 @@ class SearchRAGChain:
         search_api_calls: List[Dict[str, Any]] = []
         search_api_index = 0
 
-        domain_step = query_plan.step_for_kind(PlanStepKind.DOMAIN_API) if query_plan else None
-        web_step = (
-            query_plan.step_for_kind(web_step_kind, include_recovery=True)
-            if query_plan
-            else None
+        analysis = analysis or analyze_query(
+            query,
+            allow_search=enable_search,
+            requires_evidence=enable_search,
         )
-        local_step = query_plan.step_for_kind(PlanStepKind.LOCAL_RETRIEVAL) if query_plan else None
-        temporal_step = (
-            query_plan.step_for_kind(PlanStepKind.TEMPORAL_RECOVERY, include_recovery=True)
-            if query_plan and enable_temporal_recovery
-            else None
-        )
-        tier_entities: List[str] = []
-        if query_plan is not None:
-            tier_entities = list(
-                dict.fromkeys(
-                    list(query_plan.analysis.comparison_members)
-                    + list(query_plan.analysis.entities)
-                )
+        tier_entities = list(
+            dict.fromkeys(
+                list(analysis.comparison_members) + list(analysis.entities)
             )
-        if query_plan is not None:
-            enable_domain = bool(enable_domain and domain_step)
-            enable_search = bool(enable_search and web_step)
-            enable_local_docs = bool(enable_local_docs and local_step)
-            if not domain_step:
-                domain_result = None
-                extra_context = None
+        )
 
-        def execute_step(
-            step: Optional[Any],
-            executor: Callable[[Any], PlanStepResult],
-        ) -> PlanStepResult:
-            """Run a plan step or preserve the legacy behavior without a plan."""
-            if step is None:
-                return executor(None)
-            if plan_controller is not None:
-                return plan_controller.run_step(step, executor)
-            if execution_trace is not None:
-                execution_trace.begin(step)
+        def execute_tool(
+            tool_name: str,
+            executor: Callable[[], _RetrievalResult],
+        ) -> _RetrievalResult:
             try:
-                result = executor(step)
-                if not isinstance(result, PlanStepResult):
-                    raise TypeError("Plan executors must return PlanStepResult.")
+                result = executor()
+                if not isinstance(result, _RetrievalResult):
+                    raise TypeError("Retrieval executors must return _RetrievalResult.")
             except Exception as exc:  # noqa: BLE001 - retrieval failures are response data
-                result = PlanStepResult(status="error", reason=str(exc))
+                result = _RetrievalResult(status="error", reason=str(exc))
             if execution_trace is not None:
-                execution_trace.finish(
-                    step,
+                execution_trace.record_tool_call(
+                    tool=tool_name,
                     status=result.status,
-                    providers=result.providers,
-                    attempts=result.attempts,
+                    iteration=0,
+                    position=len(execution_trace.executed) + 1,
+                    query=effective_query,
+                    source_type="local" if tool_name == "local_docs" else "web",
                     item_count=len(result.items),
                     reason=result.reason,
                 )
@@ -613,7 +604,7 @@ class SearchRAGChain:
                 emit_search_call_step(
                     tracer,
                     snapshot,
-                    step_id=f"search_api_{web_step_kind.value}_{search_api_index}",
+                    step_id=f"search_api_web_{search_api_index}",
                 )
 
         def record_provider_state(
@@ -649,26 +640,29 @@ class SearchRAGChain:
                     attempts.append({"provider": provider, "status": "error", "reason": detail[:160]})
             return providers, attempts
 
-        domain_items, domain_result = self._collect_domain_evidence(
+        skill_items, skill_result = self._collect_skill_evidence(
             query,
             domain=domain,
-            domain_result=domain_result,
+            skill_result=skill_result,
             extra_context=extra_context,
-            enable_domain=enable_domain,
+            enable_skill=enable_skill,
             timing_recorder=timing_recorder,
-            plan_metadata=(
-                {
-                    "originating_plan_step": domain_step.step_id,
-                    "source_tier": "authoritative",
-                    "retrieval_kind": "domain_api",
-                }
-                if domain_step
-                else None
-            ),
+            provenance_metadata={
+                "originating_tool_call": "search_recovery:skill",
+                "source_tier": "authoritative",
+                "retrieval_kind": "skill",
+            },
         )
-        if domain_items:
-            active_sources.append(self.domain_source.describe_with_domain(domain or domain_items[0].metadata.get("domain")))
-            evidence_items.extend(domain_items)
+        if skill_items:
+            active_sources.append(
+                {
+                    "source_type": "domain",
+                    "source_id": skill_items[0].source_id,
+                    "display_name": str(domain or skill_items[0].metadata.get("skill") or "Skill"),
+                    "domain": domain or skill_items[0].metadata.get("domain"),
+                }
+            )
+            evidence_items.extend(skill_items)
 
         if enable_search:
             active_sources.append(self.web_source.describe())
@@ -676,163 +670,10 @@ class SearchRAGChain:
             hits_count = 0
             per_source_cap = per_source_limit or num_search_results
 
-            def retrieve_official_domains(step: Any) -> PlanStepResult:
-                """Run one bounded target-domain search per required entity."""
-                nonlocal search_timings, search_attempts, executed_providers
-                targets = [
-                    target
-                    for target in (step.metadata.get("targets") or [])
-                    if isinstance(target, dict)
-                    and str(target.get("entity") or "").strip()
-                    and isinstance(target.get("domains"), list)
-                ]
-                recovered_items: List[EvidenceItem] = []
-                providers: List[str] = []
-                attempts: List[Dict[str, Any]] = []
-                warnings: List[str] = []
-                for target in targets:
-                    entity = str(target["entity"]).strip()
-                    domains = {
-                        str(domain).strip().casefold()
-                        for domain in target["domains"]
-                        if str(domain).strip()
-                    }
-                    target_query = str(target.get("query") or effective_query).strip()
-                    target_hits: List[SearchHit] = []
-                    try:
-                        search_for_domains = getattr(
-                            self.search_client,
-                            "search_for_domains",
-                            None,
-                        )
-                        if callable(search_for_domains):
-                            target_hits = list(
-                                search_for_domains(
-                                    target_query,
-                                    domains,
-                                    num_results=1,
-                                    per_source_limit=1,
-                                    freshness=freshness,
-                                    date_restrict=date_restrict,
-                                )
-                                or []
-                            )
-                        else:
-                            target_hits = list(
-                                self.search_client.search(
-                                    target_query,
-                                    num_results=1,
-                                    per_source_limit=1,
-                                    freshness=freshness,
-                                    date_restrict=date_restrict,
-                                )
-                                or []
-                            )
-                            target_hits = [
-                                hit
-                                for hit in target_hits
-                                if any(host_matches(domain, hit.url) for domain in domains)
-                            ]
-                    except Exception as exc:  # noqa: BLE001 - target misses stay auditable
-                        search_warnings.append(f"{entity} 官方域名检索异常：{exc}")
 
-                    timings, errors = snapshot_provider_state(self.search_client)
-                    call_records = snapshot_search_call_records(self.search_client)
-                    if not call_records and len(timings) == 1:
-                        timing = timings[0]
-                        if isinstance(timing, dict):
-                            call_records = [
-                                {
-                                    "source": timing.get("source"),
-                                    "label": timing.get("label"),
-                                    "query": target_query,
-                                    "duration_ms": timing.get("duration_ms"),
-                                    "status": "error" if timing.get("error") else "done",
-                                    "result_count": len(target_hits),
-                                    "results": [
-                                        {
-                                            "title": hit.title,
-                                            "url": hit.url,
-                                            "snippet": hit.snippet,
-                                        }
-                                        for hit in target_hits
-                                    ],
-                                    "error": timing.get("error"),
-                                    "target": entity,
-                                }
-                            ]
-                    for record in call_records:
-                        record.setdefault("target", entity)
-                    emit_search_call_records(call_records)
-                    search_timings.extend(timings)
-                    target_providers, target_attempts = record_provider_state(timings, errors)
-                    for attempt in target_attempts:
-                        attempt["target"] = entity
-                    providers.extend(
-                        provider
-                        for provider in target_providers
-                        if provider not in providers
-                    )
-                    attempts.extend(target_attempts)
-                    executed_providers.extend(
-                        provider
-                        for provider in target_providers
-                        if provider not in executed_providers
-                    )
-
-                    target_hit = next(
-                        (
-                            hit
-                            for hit in target_hits
-                            if any(host_matches(domain, hit.url) for domain in domains)
-                        ),
-                        None,
-                    )
-                    if target_hit is None:
-                        warnings.append(f"未找到 {entity} 的配置官方域名结果")
-                        attempts.append(
-                            {
-                                "provider": "official_domain_recovery",
-                                "target": entity,
-                                "status": "missing",
-                            }
-                        )
-                        continue
-                    recovered_items.extend(
-                        self.web_source.hits_to_items(
-                            [target_hit],
-                            provenance={
-                                "originating_plan_step": step.step_id,
-                                "retrieval_kind": "official_domain_recovery",
-                                "official_target": entity,
-                            },
-                            tier_entities=[entity],
-                        )
-                    )
-                    attempts.append(
-                        {
-                            "provider": "official_domain_recovery",
-                            "target": entity,
-                            "status": "done",
-                        }
-                    )
-                search_attempts.extend(attempts)
-                return PlanStepResult(
-                    items=recovered_items,
-                    providers=providers,
-                    attempts=attempts,
-                    warnings=warnings,
-                )
-
-            def retrieve_web(step: Any) -> PlanStepResult:
+            def retrieve_web() -> _RetrievalResult:
                 nonlocal rerank_meta, search_error, search_timings, search_attempts, executed_providers
-                if step is not None and step.kind == PlanStepKind.OFFICIAL_DOMAIN_RECOVERY:
-                    return retrieve_official_domains(step)
-                step_limit = (
-                    max(1, int(step.max_results or num_search_results))
-                    if step is not None
-                    else num_search_results
-                )
+                step_limit = num_search_results
                 per_source_cap = min(per_source_limit or num_search_results, step_limit)
                 fetch_limit = step_limit
                 if self.reranker and hasattr(self.search_client, "clients"):
@@ -846,7 +687,7 @@ class SearchRAGChain:
                             freshness=freshness,
                             date_restrict=date_restrict,
                             metadata={
-                                "originating_plan_step": step.step_id if step else None,
+                                "originating_tool_call": "web_search:0",
                                 "retrieval_kind": "general_search",
                                 "source_tier_entities": tier_entities,
                             },
@@ -888,11 +729,11 @@ class SearchRAGChain:
                     search_attempts.extend(attempts)
                     hits = evidence_items_to_search_hits(search_items)
                     hits, rerank_meta = self._apply_rerank(query, hits, limit=step_limit)
-                    return PlanStepResult(
+                    return _RetrievalResult(
                         items=self.web_source.hits_to_items(
                             hits,
                             provenance={
-                                "originating_plan_step": step.step_id if step else None,
+                                "originating_tool_call": "web_search:0",
                                 "retrieval_kind": "general_search",
                             },
                             tier_entities=tier_entities,
@@ -925,14 +766,14 @@ class SearchRAGChain:
                     providers, attempts = record_provider_state(timings, errors)
                     executed_providers.extend(provider for provider in providers if provider not in executed_providers)
                     search_attempts.extend(attempts)
-                    return PlanStepResult(
+                    return _RetrievalResult(
                         status="error",
                         reason=search_error,
                         providers=providers,
                         attempts=attempts,
                     )
 
-            web_result = execute_step(web_step, retrieve_web)
+            web_result = execute_tool("web_search", retrieve_web)
             web_items = list(web_result.items or [])
             evidence_items.extend(web_items)
             hits = evidence_items_to_search_hits(web_items)
@@ -966,7 +807,13 @@ class SearchRAGChain:
                         step_id=f"search_api_extract_{search_api_index}",
                     )
 
-            if temporal_step is not None and not search_error:
+            if (
+                enable_temporal_recovery
+                and bool(
+                    analysis.constraints.get("historical_coverage_required")
+                )
+                and not search_error
+            ):
                 missing_years = self._detect_missing_years(
                     query,
                     hits,
@@ -996,7 +843,7 @@ class SearchRAGChain:
                             provider for provider in providers if provider not in executed_providers
                         )
 
-                    def retrieve_temporal(step: Any) -> PlanStepResult:
+                    def retrieve_temporal() -> _RetrievalResult:
                         granular_hits = self._perform_granular_search_fallback(
                             query,
                             effective_query,
@@ -1009,11 +856,11 @@ class SearchRAGChain:
                             attempt_collector=collect_temporal_attempts,
                             call_observer=emit_search_call_records,
                         )
-                        return PlanStepResult(
+                        return _RetrievalResult(
                             items=self.web_source.hits_to_items(
                                 granular_hits,
                                 provenance={
-                                    "originating_plan_step": step.step_id if step else None,
+                                    "originating_tool_call": "temporal_search:0",
                                     "retrieval_kind": "temporal_recovery",
                                 },
                                 tier_entities=tier_entities,
@@ -1022,7 +869,7 @@ class SearchRAGChain:
                             attempts=temporal_attempts,
                         )
 
-                    temporal_result = execute_step(temporal_step, retrieve_temporal)
+                    temporal_result = execute_tool("temporal_search", retrieve_temporal)
                     evidence_items.extend(temporal_result.items or [])
                     hits_count = len(evidence_items_to_search_hits(evidence_items))
 
@@ -1053,21 +900,21 @@ class SearchRAGChain:
             tracer.begin("local", "本地文档检索")
             active_sources.append(self.local_source.describe())
 
-            def retrieve_local(step: Any) -> PlanStepResult:
+            def retrieve_local() -> _RetrievalResult:
                 items = self.local_source.retrieve(
                     query,
                     RetrievalOptions(
                         num_results=num_retrieved_docs,
                         metadata={
-                            "originating_plan_step": step.step_id if step else None,
+                            "originating_tool_call": "local_docs:0",
                             "source_tier": "local",
                             "retrieval_kind": "local_retrieval",
                         },
                     ),
                 )
-                return PlanStepResult(items=items, providers=[self.local_source.source_id])
+                return _RetrievalResult(items=items, providers=[self.local_source.source_id])
 
-            local_result = execute_step(local_step, retrieve_local)
+            local_result = execute_tool("local_docs", retrieve_local)
             evidence_items.extend(local_result.items or [])
             if local_result.status in {"error", "blocked", "skipped"}:
                 tracer.error("local", detail=local_result.reason or local_result.status)
@@ -1080,7 +927,7 @@ class SearchRAGChain:
         if evidence_ledger is not None:
             evidence_ledger.ingest(evidence_items)
             evidence_ledger.apply_limits(
-                max_items=query_plan.result_budget if query_plan else num_search_results,
+                max_items=num_search_results,
             )
             retained_items = evidence_ledger.retained_items()
             limited_items = evidence_ledger.limited_items()
@@ -1109,7 +956,7 @@ class SearchRAGChain:
             "search_warnings": search_warnings,
             "rerank_meta": rerank_meta,
             "fusion_meta": fusion_meta,
-            "domain_result": domain_result,
+            "skill_result": skill_result,
             "search_provider_trace": {
                 "executed": executed_providers,
                 "attempts": search_attempts,
@@ -1507,8 +1354,8 @@ class SearchRAGChain:
                 coverage_threshold = config["coverage_threshold"]
                 break
         
-        # The caller can only set this after the plan selected temporal
-        # coverage.  Do not revive the old broad keyword-triggered behavior.
+        # The caller can only set this for an explicit multi-year/history
+        # requirement. Current/freshness queries must never fan out by year.
         if temporal_requested:
             is_time_query = True
         
@@ -1738,14 +1585,12 @@ class SearchRAGChain:
         images: Optional[List[Dict[str, str]]] = None,
         extra_context: Optional[str] = None,
         domain: Optional[str] = None,
-        domain_result: Optional[Dict[str, Any]] = None,
-        enable_domain: bool = False,
+        skill_result: Optional[Dict[str, Any]] = None,
+        enable_skill: bool = False,
         tracer: Optional[Any] = None,
-        query_plan: Optional[QueryPlan] = None,
+        analysis: Optional[QueryAnalysis] = None,
         evidence_ledger: Optional[EvidenceLedger] = None,
         execution_trace: Optional[QueryExecutionTrace] = None,
-        plan_controller: Optional[PlanController] = None,
-        web_step_kind: PlanStepKind = PlanStepKind.WEB_SEARCH,
         enable_temporal_recovery: bool = True,
     ) -> Dict[str, Any]:
         """Answer a query using search + local docs RAG pipeline."""
@@ -1762,60 +1607,19 @@ class SearchRAGChain:
             date_restrict=date_restrict,
             timing_recorder=timing_recorder,
             domain=domain,
-            domain_result=domain_result,
+            skill_result=skill_result,
             extra_context=extra_context,
-            enable_domain=enable_domain,
+            enable_skill=enable_skill,
             tracer=tracer,
-            query_plan=query_plan,
+            analysis=analysis,
             evidence_ledger=evidence_ledger,
             execution_trace=execution_trace,
-            plan_controller=plan_controller,
-            web_step_kind=web_step_kind,
             enable_temporal_recovery=enable_temporal_recovery,
         )
         evidence_items: List[EvidenceItem] = retrieval["evidence_items"]
         search_hits = evidence_items_to_search_hits(evidence_items)
         retrieved_docs = evidence_items_to_documents(evidence_items)
         domain_items = [item for item in evidence_items if item.source_type == "domain"]
-
-        # Only a completely empty ledger is a hard pre-generation stop. A
-        # limited-only ledger can support an explicitly qualified answer after
-        # the recovery loop has exhausted its bounded attempts.
-        preflight = None
-        if query_plan is not None and evidence_ledger is not None:
-            preflight = verify_evidence_plan(query_plan, evidence_ledger)
-            if query_plan.analysis.requires_evidence and not evidence_ledger.entries:
-                payload: Dict[str, Any] = {
-                    "query": query,
-                    "answer": "",
-                    "search_hits": [asdict(hit) for hit in search_hits],
-                    "retrieved_docs": [asdict(doc) for doc in retrieved_docs],
-                    "llm_raw": None,
-                    "rerank": retrieval["rerank_meta"] or None,
-                    "fusion": retrieval["fusion_meta"] or None,
-                    "evidence_items": [item.to_dict() for item in evidence_items],
-                    "evidence_summary": build_evidence_summary(evidence_items),
-                    "evidence_sources_active": retrieval["active_sources"],
-                    "evidence_sources_used": retrieval["used_sources"],
-                    "evidence_source_types_active": sorted(
-                        {item["source_type"] for item in retrieval["active_sources"]}
-                    ),
-                    "evidence_source_types_used": sorted(
-                        {item["source_type"] for item in retrieval["used_sources"]}
-                    ),
-                    "search_provider_trace": retrieval.get(
-                        "search_provider_trace",
-                        {"executed": [], "attempts": []},
-                    ),
-                    "search_api_calls": retrieval.get("search_api_calls", []),
-                    "verification_precheck": preflight.to_dict(),
-                    "answer_basis": "no_evidence",
-                }
-                if retrieval["search_error"]:
-                    payload["search_error"] = retrieval["search_error"]
-                if retrieval["search_warnings"]:
-                    payload["search_warnings"] = retrieval["search_warnings"]
-                return payload
 
         has_retrieval_context = bool(evidence_items)
         if has_retrieval_context:
@@ -1878,12 +1682,14 @@ class SearchRAGChain:
         # Generate response
         tracer.begin("generate", "生成回答")
         response_start = time.perf_counter()
+        usage_response = None
         try:
             response = self.llm.invoke(
                 messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
+            usage_response = response
             content = response.content if hasattr(response, 'content') else str(response)
         except Exception as exc:
             tracer.error("generate", detail=str(exc)[:80])
@@ -1896,6 +1702,7 @@ class SearchRAGChain:
                     duration_ms=duration_ms,
                     provider=getattr(self.llm, "provider", None),
                     model=getattr(self.llm, "model_name", None),
+                    extra=extract_token_usage(usage_response),
                 )
         _provider = getattr(self.llm, "provider", None)
         _model_name = getattr(self.llm, "model_name", None)
@@ -1978,8 +1785,8 @@ class SearchRAGChain:
         date_restrict: Optional[str] = None,
         timing_recorder: Optional[TimingRecorder] = None,
         domain: Optional[str] = None,
-        domain_result: Optional[Dict[str, Any]] = None,
-        enable_domain: bool = False,
+        skill_result: Optional[Dict[str, Any]] = None,
+        enable_skill: bool = False,
     ) -> Iterator[str]:
         """Stream answer using search + local docs RAG pipeline."""
         import json
@@ -1996,8 +1803,8 @@ class SearchRAGChain:
             date_restrict=date_restrict,
             timing_recorder=timing_recorder,
             domain=domain,
-            domain_result=domain_result,
-            enable_domain=enable_domain,
+            skill_result=skill_result,
+            enable_skill=enable_skill,
         )
         evidence_items: List[EvidenceItem] = retrieval["evidence_items"]
         search_hits = evidence_items_to_search_hits(evidence_items)

@@ -22,52 +22,33 @@ from utils.audit_log import (
 from utils.workflow_trace import WorkflowTracer
 
 
-class _NoDomainSelector:
-    def select_sources(self, query: str, timing_recorder: Any = None):
-        return "general", []
-
-    def generate_domain_specific_query(self, query: str, domain: str):
-        return query
-
-    def fetch_domain_data(
-        self,
-        query: str,
-        domain: str,
-        timing_recorder: Any = None,
-    ):
-        return None
-
-
 def _configure_direct_orchestrator(
     monkeypatch,
     config: Dict[str, Any],
 ) -> LangChainOrchestrator:
-    monkeypatch.setattr(
-        LangChainOrchestrator,
-        "_build_decision_chain",
-        lambda self: None,
-    )
-    monkeypatch.setattr(
-        LangChainOrchestrator,
-        "_build_keyword_chain",
-        lambda self: None,
-    )
+    class LoopStub:
+        def answer(self, query: str, **kwargs: Any) -> Dict[str, Any]:
+            return {
+                "query": query,
+                "answer": "audited answer",
+                "search_hits": [],
+                "evidence_records": [],
+                "control": {
+                    "loop_status": "succeeded",
+                    "loop_iterations": 1,
+                    "loop_verdicts": [
+                        {"action": "return", "reason": "constraints_satisfied"}
+                    ],
+                },
+            }
+
     orchestrator = LangChainOrchestrator(
         llm=object(),
-        source_selector=_NoDomainSelector(),
         config=config,
         show_timings=False,
     )
+    orchestrator._loop_orchestrator = LoopStub()
     monkeypatch.setattr(orchestrator, "_snapshot_local_docs", lambda: None)
-    monkeypatch.setattr(
-        orchestrator,
-        "_make_routing_decision",
-        lambda query, timing_recorder=None: {
-            "needs_search": False,
-            "direct_answer": "audited answer",
-            "reason": "test route",
-        },
-    )
     monkeypatch.setattr(
         orchestrator,
         "_record_conversation_turn",

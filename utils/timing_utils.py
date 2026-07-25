@@ -4,6 +4,60 @@ import time
 from typing import Any, Dict, List, Optional
 
 
+def extract_token_usage(response: Any) -> Optional[Dict[str, int]]:
+    """Best-effort extraction of token usage from a chat-model response.
+
+    LangChain populates ``usage_metadata`` (``input_tokens`` /
+    ``output_tokens`` / ``total_tokens``) on ``AIMessage``; some providers
+    expose the same fields under ``response_metadata['token_usage']`` or
+    ``['usage']``. Returns ``None`` when no usage is present so callers can
+    pass the result straight through as the ``extra`` of ``record_llm_call``
+    without polluting timing entries with empty placeholders.
+    """
+    if response is None:
+        return None
+
+    usage = getattr(response, "usage_metadata", None)
+    if isinstance(usage, dict) and usage:
+        return _normalize_usage_dict(usage)
+
+    metadata = getattr(response, "response_metadata", None)
+    if isinstance(metadata, dict):
+        for key in ("token_usage", "usage"):
+            candidate = metadata.get(key)
+            if isinstance(candidate, dict) and candidate:
+                normalized = _normalize_usage_dict(candidate)
+                if normalized:
+                    return normalized
+    return None
+
+
+def _normalize_usage_dict(raw: Dict[str, Any]) -> Optional[Dict[str, int]]:
+    """Map provider-specific usage keys onto input/output/total tokens."""
+
+    field_aliases = {
+        "input_tokens": ("input_tokens", "prompt_tokens", "inputTokens"),
+        "output_tokens": ("output_tokens", "completion_tokens", "outputTokens"),
+        "total_tokens": ("total_tokens", "total_tokens_billable", "totalTokens"),
+    }
+    normalized: Dict[str, int] = {}
+    for canonical, aliases in field_aliases.items():
+        for alias in aliases:
+            value = raw.get(alias)
+            if value is None:
+                continue
+            try:
+                normalized[canonical] = int(value)
+            except (TypeError, ValueError):
+                continue
+            break
+    if not normalized:
+        return None
+    if "total_tokens" not in normalized and "input_tokens" in normalized and "output_tokens" in normalized:
+        normalized["total_tokens"] = normalized["input_tokens"] + normalized["output_tokens"]
+    return normalized
+
+
 class TimingRecorder:
     """Collects timing details for LLM calls and search sources."""
 
@@ -116,6 +170,41 @@ class TimingRecorder:
                     continue
                 entry[key] = value
             self.search_sources.append(entry)
+
+    def merge_payload(self, payload: Optional[Dict[str, Any]]) -> None:
+        """Merge nested executor facts without adding a second total timer."""
+        if not self.enabled or not isinstance(payload, dict):
+            return
+        self.extend_search_timings(payload.get("search_sources"))
+        for item in payload.get("llm_calls") or []:
+            if not isinstance(item, dict):
+                continue
+            extra = {
+                key: value
+                for key, value in item.items()
+                if key not in {"label", "duration_ms", "provider", "model"}
+            }
+            self.record_llm_call(
+                label=str(item.get("label") or "nested_llm"),
+                duration_ms=float(item.get("duration_ms") or 0.0),
+                provider=item.get("provider"),
+                model=item.get("model"),
+                extra=extra or None,
+            )
+        for item in payload.get("tool_calls") or []:
+            if not isinstance(item, dict):
+                continue
+            extra = {
+                key: value
+                for key, value in item.items()
+                if key not in {"tool", "duration_ms", "success"}
+            }
+            self.record_tool_call(
+                tool=str(item.get("tool") or "nested_tool"),
+                duration_ms=float(item.get("duration_ms") or 0.0),
+                success=bool(item.get("success", True)),
+                extra=extra or None,
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         if not self.enabled:

@@ -1,0 +1,26 @@
+version: 1
+name: finance
+handler: skills.finance.handler:FinanceSkillHandler
+tool:
+  name: finance_market_data
+  description: >-
+    Get current quotes or historical market performance for an explicit stock,
+    index, fund, or cryptocurrency. Use only for market instruments, not product
+    pricing, promotional credits, subscriptions, or general company news.
+  args_schema:
+    type: object
+    additionalProperties: false
+    required: [query]
+    properties:
+      query:
+        type: string
+        description: User request containing a resolvable market symbol or known asset name.
+budget:
+  max_calls_per_query: 2
+  timeout_seconds: 15
+  max_evidence_items: 5
+availability:
+  any_of:
+    - python:yfinance
+    - python:yahoo_fin
+    - config:FINNHUB_API_KEY

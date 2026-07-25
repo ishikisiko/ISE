@@ -30,3 +30,30 @@ route027,Is it raining in New York?,weather,weather_api
 route028,What is the square root of 256?,math_calculation,calculator
 route029,Who founded Microsoft?,general_knowledge,general_web
 route030,Tell me the latest score of the Lakers game.,sports,sports_api
+route031,What is the temperature in London right now?,weather,weather_api
+route032,Will it snow in Beijing tomorrow?,weather,weather_api
+route033,How humid is it in Singapore today?,weather,weather_api
+route034,What is the stock price of Microsoft?,finance,finance_api
+route035,How is NVIDIA stock performing today?,finance,finance_api
+route036,What is the market cap of Tesla?,finance,finance_api
+route037,When is the next Manchester United match?,sports,sports_api
+route038,What was the score of the Lakers vs Celtics game?,sports,sports_api
+route039,Who won the Wimbledon men's final?,sports,sports_api
+route040,How do I get from the airport to downtown Tokyo?,transportation,general_web
+route041,What time does the next train to Osaka leave?,transportation,general_web
+route042,Find a gas station near my current location.,location,general_web
+route043,Where is the nearest hospital?,location,general_web
+route044,What time is it in London right now?,time,time_api
+route045,Convert 100 Celsius to Fahrenheit.,unit_conversion,calculator
+route046,What is 25 percent of 800?,math_calculation,calculator
+route047,How many kilometers are in a marathon?,unit_conversion,calculator
+route048,Translate "thank you" into French.,translation,translation_api
+route049,How do you say "good evening" in Japanese?,translation,translation_api
+route050,Write a function in Python to check if a number is prime.,code_request,code_execution
+route051,How are you?,small_talk,chat
+route052,What is the tallest mountain in the world?,general_knowledge,general_web
+route053,Who painted the Mona Lisa?,general_knowledge,general_web
+route054,What causes the northern lights?,general_knowledge,general_web
+route055,What is the current inflation rate in the United States?,finance,general_web
+route056,drive from SFO to San Jose,transportation,transportation_api
+route057,nearest KFC to HKUST,location,location_api

@@ -1,0 +1,6 @@
+{"query":"When is the next NBA game for the Golden State Warriors?","expect":"sports","preflight":"accepted"}
+{"query":"Tell me the latest score of the Lakers game.","expect":"sports","preflight":"accepted"}
+{"query":"What was the score of the Lakers vs Celtics game?","expect":"sports","preflight":"accepted"}
+{"query":"曼联最近比赛","expect":"sports","preflight":"accepted"}
+{"query":"Who won the Wimbledon men's final?","expect":"sports","preflight":"accepted"}
+{"query":"Explain offside rules","expect":"not_sports","preflight":"not_sports_query"}

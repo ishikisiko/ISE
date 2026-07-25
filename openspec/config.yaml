@@ -6,21 +6,17 @@ context: |
 
   ## 架构方向由路线图决定，不由 specs 决定
 
-  `docs/agentic_loop_roadmap.md` 是架构方向的唯一权威。目标是把当前的
-  plan-first 架构（分类器 → 静态计划 → 执行）迁移成 agentic loop（工具面由
-  skill 派生，模型选工具，确定性 preflight 与 critic 兜底）。
+  `docs/agentic_loop_roadmap.md` 是架构方向的唯一权威。M0-M5 已把默认运行时
+  收敛成单一 agentic loop（工具面由 skill 派生，模型选工具，确定性 preflight
+  与 critic 兜底）；分类器、静态 plan、postcheck fallback 和 engine flag 已退出。
 
   `openspec/specs/` 只描述**各能力当前的契约**，不承担"系统应该长成什么样"。
   与路线图冲突时以路线图为准。
 
-  ## specs 分三类，看 spec 顶部的 Status 行
+  ## specs 状态
 
-  - `Status: active` —— 当前契约，且在目标架构中存续。正常引用与修改。
-  - `Status: reframing at M<n>` —— 描述的能力存续，但框架会变（多为 ReAct
-    系列：现以 "fallback" 立论，M1 后成为主路径）。可修补，不要在旧框架上做大投入。
-  - `Status: superseded by roadmap M<n>` —— 该能力将在对应里程碑删除
-    （路由与静态计划机制）。**不要为其新增 requirement，不要加固，不要写新 change。**
-    仅接受阻断性缺陷的最小修复。
+  M5 退出后现行 19 份 spec 全部是 `Status: active`。迁移期的 reframing / superseded
+  分类只作为 roadmap 和 archive 中的历史记录；退役能力的现行 spec 已删除。
 
   ## 全程不变量（任何 change 都不得破坏）
 
@@ -28,7 +24,7 @@ context: |
   I2 任何执行路径下 audit 记录完整
   I3 外部调用的参数合法性由确定性代码裁决，LLM 判断不具备最终裁决权
   I4 工具调用次数、token、时延均有上界，且可配置、可观测
-  I5 新旧路径由 feature flag 并存，不开长命分支；每个改动自身可发布可回退
+  I5 每个改动自身可发布可回退；迁移期 feature flag 在 M5 收敛后必须删除
 
   ## 惯例
 
@@ -39,7 +35,8 @@ context: |
 rules:
   proposal:
     - 必须写明服务于路线图的哪个里程碑；若与任何里程碑无关，先说明理由
-    - 不得为 `Status: superseded by roadmap` 的能力新增 requirement
+    - 不得重新引入已退役的分类器、静态 plan、postcheck fallback、engine flag
+      或第二套编排器/执行路径（legacy SmartSearchOrchestrator 已删除）
     - 必须说明如何满足不变量 I1–I5，或说明为何不适用
   design:
     - 净代码量预期为负的改动优先；预期净增代码时须说明理由

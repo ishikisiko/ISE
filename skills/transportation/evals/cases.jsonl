@@ -1,0 +1,5 @@
+{"query":"从上海到苏州怎么走","expect":"transportation","preflight":"accepted"}
+{"query":"drive from SFO to San Jose","expect":"transportation","preflight":"accepted"}
+{"query":"How do I get from the airport to downtown Tokyo?","expect":"transportation","preflight":"explicit_route_endpoints_required"}
+{"query":"What time does the next train to Osaka leave?","expect":"transportation","preflight":"route_endpoints_required"}
+{"query":"Latest news on climate change","expect":"not_transportation","preflight":"not_transportation_query"}

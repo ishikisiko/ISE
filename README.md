@@ -4,17 +4,22 @@ This project demonstrates a simple Retrieval-Augmented Generation (RAG) pipeline
 
 ## Current Runtime Path
 
-- The default production path is `LangChainOrchestrator -> SearchRAGChain`.
+- The default production path is `LangChainOrchestrator -> ReactAgentOrchestrator -> ReactLoopGraphRunner`.
 - The internal retrieval layer now uses a unified evidence model across `web`, `local`, and `domain` sources.
 - `search_hits` and `retrieved_docs` are still returned for compatibility, but they are now projected from the internal unified evidence set instead of being maintained as separate internal truth sources.
-- ReAct is still available, but the default product path uses it as a post-check fallback executor rather than as a parallel top-level runtime.
+- Every non-visual, non-small-talk query uses the same ReAct loop; there is no static-plan or fallback executor.
 
-### ReAct Loop Engines
+### ReAct Loop
 
-The ReAct executor supports two engines selected via `config.json`:
-
-- `reactAgent.engine: "langgraph"` (default): an explicit `act -> observe -> evaluate` state machine. Each iteration produces a `LoopVerdict` (rule-based constraint coverage plus an optional LLM judge), and the loop termination reason is exposed as `control["loop_status"]` (`succeeded` / `exhausted` / `stagnated` / `unrecoverable`). Loop evaluation thresholds live under `reactAgent.evaluation` (`judge_interval`, `repeat_threshold`, `no_progress_threshold`, `tool_error_threshold`, `new_evidence_min_ratio`). The fallback path can override the engine via `postcheck.react_fallback.engine`.
-- `reactAgent.engine: "legacy"`: the LangChain `AgentExecutor` loop (kept as a rollback path; also used automatically when langgraph is not installed).
+The ReAct executor has one implementation: the explicit LangGraph
+`act -> observe -> evaluate` state machine. Every candidate answer calls the
+same deterministic termination critic. `termination` is the
+single budget/judge/threshold block (`max_iterations`, `judge_interval`,
+`repeat_threshold`, `no_progress_threshold`, `tool_error_threshold`,
+`new_evidence_min_ratio`, per-tool budgets, and `judge`). A positive judge cannot clear
+deterministic evidence gaps or extend a budget; a negative judge may veto an
+otherwise complete candidate. A missing LangGraph dependency fails closed
+instead of selecting a second stopping implementation.
 
 ## Unified Evidence Layer
 
@@ -24,21 +29,21 @@ The default LangChain pipeline now normalizes first-class evidence into a shared
 - `EvidenceItem`: normalized record containing content, reference, source identity, and metadata
 - Unified fusion: retrieval, normalization, deduplication, ranking, and answer-context construction happen before answer generation
 
-This affects both the default answer path and the ReAct fallback toolchain:
+This is the loop's only evidence path:
 
 - `local_docs` now reuses the unified local evidence source instead of calling legacy `LocalRAG` directly
 - `search_recovery` reuses the same fusion pipeline as the default path
-- domain evidence can remain direct-answer capable, but can also enter the unified fusion path when additional evidence is needed
+- registry skill evidence enters the same ledger as web and local evidence
 
 ## Response Metadata
 
-In addition to legacy compatibility fields, default and fallback responses may now include:
+In addition to legacy compatibility fields, responses may now include:
 
 - `evidence_items`: normalized evidence records used internally by the pipeline
 - `evidence_summary`: short text summary of the fused evidence set
 - `evidence_sources_active`: first-class sources enabled for the run
 - `evidence_sources_used`: first-class sources that actually contributed evidence
-- `evidence_source_types_active` / `evidence_source_types_used`: source-type summaries for observability and fallback reuse
+- `evidence_source_types_active` / `evidence_source_types_used`: source-type summaries for observability and tool-recovery reuse
 
 ## LangChain integration
 
@@ -82,10 +87,6 @@ See [ENVIRONMENT.md](/root/code/NLP_Project/ENVIRONMENT.md) for the complete run
     ```json
     {
         "LLM_PROVIDER": "glm",
-        "domainClassifier": {
-            "provider": "glm",
-            "model": "glm-4.6"
-        },
         "RERANK_PROVIDER": "qwen3-rerank",
         "brightDataSearch": {
             "api_token": "YOUR_BRIGHTDATA_API_TOKEN_HERE",
@@ -145,10 +146,6 @@ See [ENVIRONMENT.md](/root/code/NLP_Project/ENVIRONMENT.md) for the complete run
         }
     }
     ```
-
-    Use the optional `domainClassifier` block to point domain routing at a lighter or cheaper model without impacting the primary answer generation client.
-
-
 
 ### Supported LLM Providers
 

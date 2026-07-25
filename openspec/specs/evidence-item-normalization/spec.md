@@ -18,8 +18,8 @@ TBD - created by archiving change unify-evidence-sources. Update Purpose after a
 - **THEN** 系统 SHALL 将每个片段归一化为 `EvidenceItem`
 - **AND** 归一化结果 SHALL 保留文档来源、片段内容和必要的检索元数据
 
-#### Scenario: Domain API evidence becomes EvidenceItems
-- **WHEN** 领域 API 返回结构化数据或领域回答摘要
+#### Scenario: Skill evidence becomes EvidenceItems
+- **WHEN** registered skill 返回结构化数据或回答摘要
 - **THEN** 系统 SHALL 将可用于回答和引用的部分归一化为 `EvidenceItem`
 - **AND** 归一化结果 SHALL 允许通过 metadata 保留结构化字段
 
@@ -32,7 +32,7 @@ TBD - created by archiving change unify-evidence-sources. Update Purpose after a
 - **AND** 该记录 SHALL 允许附带排序分数、rank 或原始来源 metadata
 
 #### Scenario: Source-specific detail remains available without breaking the shared schema
-- **WHEN** 某类来源需要暴露特有字段，例如 domain API 的结构化数据或本地文档 chunk 信息
+- **WHEN** 某类来源需要暴露特有字段，例如 skill 的结构化数据或本地文档 chunk 信息
 - **THEN** 系统 SHALL 将这些信息保存在 `EvidenceItem` 的扩展 metadata 中
 - **AND** 系统 SHALL 不要求所有来源共享完全相同的细节字段
 
@@ -48,4 +48,3 @@ TBD - created by archiving change unify-evidence-sources. Update Purpose after a
 - **WHEN** 返回结果需要继续暴露 `retrieved_docs`
 - **THEN** 系统 SHALL 从 `source_type=local` 的 `EvidenceItem` 生成兼容输出
 - **AND** 系统 SHALL 保持本地文档来源信息可引用
-

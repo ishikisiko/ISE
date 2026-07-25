@@ -1,0 +1,8 @@
+{"query":"What is the weather in Bend, Oregon today?","expect":"weather","preflight":"accepted"}
+{"query":"Is it raining in New York?","expect":"weather","preflight":"accepted"}
+{"query":"Will it snow in Beijing tomorrow?","expect":"weather","preflight":"accepted"}
+{"query":"北京明天天气怎么样","expect":"weather","preflight":"accepted"}
+{"query":"新加坡空气质量如何","expect":"weather","preflight":"accepted"}
+{"query":"Will it rain tomorrow?","expect":"weather","preflight":"location_required"}
+{"query":"Explain the water cycle","expect":"not_weather","preflight":"not_weather_query"}
+{"query":"Brainstorm product ideas","expect":"not_weather","preflight":"not_weather_query"}

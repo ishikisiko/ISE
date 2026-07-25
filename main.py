@@ -21,7 +21,6 @@ from search.search import (
     TavilySearchClient,
 )
 from search.rerank import BaseReranker, Qwen3Reranker
-from orchestrators.smart_orchestrator import SmartSearchOrchestrator
 from utils.chunking import resolve_chunk_settings
 from utils.config_validation import configured_value
 from utils.temperature_config import get_temperature_for_task
@@ -386,11 +385,6 @@ def parse_args() -> argparse.Namespace:
         help="Enable ('on') or disable ('off') live web search. Uploads remain available in both modes.",
     )
     parser.add_argument(
-        "--use-legacy",
-        action="store_true",
-        help="Use legacy SmartSearchOrchestrator instead of LangChain-based orchestrator.",
-    )
-    parser.add_argument(
         "--chunk-size",
         type=int,
         default=None,
@@ -548,112 +542,6 @@ def build_llm_client(
     )
 
 
-def build_domain_classifier_client(config: dict) -> Optional[LLMClient]:
-    """Build a dedicated LLM client for domain classification if configured."""
-
-    classifier_cfg = config.get("domainClassifier") or {}
-
-    if classifier_cfg.get("enabled") is False or config.get("DOMAIN_CLASSIFIER_ENABLED") is False:
-        return None
-
-    def _normalize(value: Any) -> Optional[str]:
-        if not isinstance(value, str):
-            return None
-        stripped = value.strip()
-        return stripped or None
-
-    provider_override = _normalize(classifier_cfg.get("provider"))
-    model_override = _normalize(classifier_cfg.get("model"))
-
-    if provider_override is None:
-        provider_override = _normalize(config.get("DOMAIN_CLASSIFIER_PROVIDER"))
-    if model_override is None:
-        model_override = _normalize(config.get("DOMAIN_CLASSIFIER_MODEL"))
-
-    provider_or_model = provider_override or model_override
-    if not provider_or_model:
-        return None
-
-    llm_settings_override = classifier_cfg.get("llm_settings")
-    if not isinstance(llm_settings_override, dict):
-        llm_settings_override = None
-        fallback_settings = config.get("domain_classifier_llm_settings")
-        if isinstance(fallback_settings, dict):
-            llm_settings_override = fallback_settings
-
-    provider_config_override: Optional[Dict[str, Any]] = None
-    override_candidates = {
-        key: classifier_cfg.get(key)
-        for key in ("api_key", "base_url", "request_timeout", "max_retries", "backoff_factor")
-        if classifier_cfg.get(key) is not None
-    }
-    if override_candidates:
-        provider_config_override = override_candidates
-
-    model_param = model_override if provider_override else None
-
-    return build_llm_client(
-        config,
-        provider_or_model=provider_or_model,
-        model_override=model_param,
-        llm_settings_override=llm_settings_override,
-        provider_config_override=provider_config_override,
-    )
-
-
-def build_routing_keywords_client(config: dict) -> Optional[LLMClient]:
-    """Build a dedicated LLM client for routing and keyword generation if configured."""
-
-    routing_cfg = config.get("routingAndKeywords") or {}
-
-    if routing_cfg.get("enabled") is False or config.get("ROUTING_KEYWORDS_ENABLED") is False:
-        return None
-
-    def _normalize(value: Any) -> Optional[str]:
-        if not isinstance(value, str):
-            return None
-        stripped = value.strip()
-        return stripped or None
-
-    provider_override = _normalize(routing_cfg.get("provider"))
-    model_override = _normalize(routing_cfg.get("model"))
-
-    if provider_override is None:
-        provider_override = _normalize(config.get("ROUTING_KEYWORDS_PROVIDER"))
-    if model_override is None:
-        model_override = _normalize(config.get("ROUTING_KEYWORDS_MODEL"))
-
-    provider_or_model = provider_override or model_override
-    if not provider_or_model:
-        return None
-
-    llm_settings_override = routing_cfg.get("llm_settings")
-    if not isinstance(llm_settings_override, dict):
-        llm_settings_override = None
-        fallback_settings = config.get("routing_keywords_llm_settings")
-        if isinstance(fallback_settings, dict):
-            llm_settings_override = fallback_settings
-
-    provider_config_override: Optional[Dict[str, Any]] = None
-    override_candidates = {
-        key: routing_cfg.get(key)
-        for key in ("api_key", "base_url", "request_timeout", "max_retries", "backoff_factor")
-        if routing_cfg.get(key) is not None
-    }
-    if override_candidates:
-        provider_config_override = override_candidates
-
-    model_param = model_override if provider_override else None
-
-    return build_llm_client(
-        config,
-        provider_or_model=provider_or_model,
-        model_override=model_param,
-        llm_settings_override=llm_settings_override,
-        provider_config_override=provider_config_override,
-    )
-
-
 def build_reranker(config: dict) -> Tuple[Optional[BaseReranker], Dict[str, Any]]:
     """Instantiate a reranker based on configuration."""
 
@@ -767,123 +655,62 @@ def main() -> None:
     audit_settings = resolve_audit_settings(config, args.audit)
     audit_active = bool(audit_settings.get("enabled"))
 
-    # Check if legacy orchestrator should be used (LangChain is now the default)
-    use_legacy = getattr(args, 'use_legacy', False)
-    audit_supported = not use_legacy and LANGCHAIN_AVAILABLE
-    if audit_active and not audit_supported:
+    if audit_active and not LANGCHAIN_AVAILABLE:
         print(
-            "[audit] legacy orchestrator has no tracing instrumentation; "
-            "audit disabled for this run",
+            "[audit] LangChain is unavailable; audit disabled for this run",
             file=sys.stderr,
         )
         audit_active = False
     if audit_active:
         # Collect timings for the persisted record without changing --pretty output.
         show_timings = True
-    
-    if use_legacy:
-        # Use legacy SmartSearchOrchestrator
-        print("[main] Using legacy orchestrator")
-        llm_client = build_llm_client(config)
-        classifier_client = build_domain_classifier_client(config)
-        routing_client = build_routing_keywords_client(config)
-        
-        orchestrator = SmartSearchOrchestrator(
-            llm_client=llm_client,
-            apisports_api_key=apisports_key_cli,
-            classifier_llm_client=classifier_client,
-            routing_llm_client=routing_client,
-            search_client=search_client,
-            data_path=args.data_path,
-            reranker=reranker,
-            min_rerank_score=min_rerank_score,
-            max_per_domain=max_per_domain,
-            requested_search_sources=requested_sources,
-            active_search_sources=active_sources,
-            active_search_source_labels=active_labels,
-            missing_search_sources=missing_sources,
-            configured_search_sources=configured_sources,
-            show_timings=show_timings,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            google_api_key=google_key_cli,
-            sportsdb_api_key=sportsdb_key_cli,
-            config=config,
+
+    if not LANGCHAIN_AVAILABLE:
+        raise SystemExit(
+            "[main] LangChain/LangGraph is required. There is no second execution "
+            "path to fall back to; install the dependencies in requirements.txt."
         )
-    else:
-        # Use LangChain-based orchestrator (default)
-        if config.get("orchestrator_mode") == "react":
-            print("[main] orchestrator_mode=react is deprecated as a top-level mode; using LangChain orchestrator with ReAct fallback")
 
-        if not LANGCHAIN_AVAILABLE:
-            print("[main] LangChain not available, falling back to legacy orchestrator")
-            llm_client = build_llm_client(config)
-            classifier_client = build_domain_classifier_client(config)
-            routing_client = build_routing_keywords_client(config)
+    print("[main] Using LangChain orchestrator")
+    from langchain.langchain_llm import create_chat_model
+    from langchain.langchain_orchestrator import create_langchain_orchestrator
 
-            orchestrator = SmartSearchOrchestrator(
-                llm_client=llm_client,
-                apisports_api_key=apisports_key_cli,
-                classifier_llm_client=classifier_client,
-                routing_llm_client=routing_client,
-                search_client=search_client,
-                data_path=args.data_path,
-                reranker=reranker,
-                min_rerank_score=min_rerank_score,
-                max_per_domain=max_per_domain,
-                requested_search_sources=requested_sources,
-                active_search_sources=active_sources,
-                active_search_source_labels=active_labels,
-                missing_search_sources=missing_sources,
-                configured_search_sources=configured_sources,
-                show_timings=show_timings,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                google_api_key=google_key_cli,
-                sportsdb_api_key=sportsdb_key_cli,
-                config=config,
+    # Create LangChain LLM
+    llm = create_chat_model(config=config)
+
+    # Create LangChain reranker if configured
+    langchain_reranker = None
+    if reranker is not None:
+        try:
+            from langchain.langchain_rerank import create_qwen3_compressor
+            qwen_cfg = (rerank_config.get("providers") or {}).get("qwen") or rerank_config.get("qwen") or {}
+            langchain_reranker = create_qwen3_compressor(
+                api_key=qwen_cfg.get("api_key"),
+                model=qwen_cfg.get("model", "qwen3-rerank"),
+                base_url=qwen_cfg.get("base_url"),
+                timeout=qwen_cfg.get("timeout", 15),
             )
-        else:
-            print("[main] Using LangChain orchestrator")
-            from langchain.langchain_llm import create_chat_model
-            from langchain.langchain_orchestrator import create_langchain_orchestrator
+        except Exception as exc:
+            print(f"[main] Failed to create LangChain reranker: {exc}")
 
-            # Create LangChain LLM
-            llm = create_chat_model(config=config)
+    orchestrator = create_langchain_orchestrator(
+        config=config,
+        llm=llm,
+        search_client=search_client,
+        data_path=args.data_path,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        reranker=langchain_reranker,
+        min_rerank_score=min_rerank_score,
+        max_per_domain=max_per_domain,
+        requested_search_sources=requested_sources,
+        active_search_sources=active_sources,
+        active_search_source_labels=active_labels,
+        missing_search_sources=missing_sources,
+        configured_search_sources=configured_sources,
+        show_timings=show_timings,
+    )
 
-            # Create LangChain reranker if configured
-            langchain_reranker = None
-            if reranker is not None:
-                try:
-                    from langchain.langchain_rerank import create_qwen3_compressor
-                    qwen_cfg = (rerank_config.get("providers") or {}).get("qwen") or rerank_config.get("qwen") or {}
-                    langchain_reranker = create_qwen3_compressor(
-                        api_key=qwen_cfg.get("api_key"),
-                        model=qwen_cfg.get("model", "qwen3-rerank"),
-                        base_url=qwen_cfg.get("base_url"),
-                        timeout=qwen_cfg.get("timeout", 15),
-                    )
-                except Exception as exc:
-                    print(f"[main] Failed to create LangChain reranker: {exc}")
-
-            orchestrator = create_langchain_orchestrator(
-                config=config,
-                llm=llm,
-                search_client=search_client,
-                data_path=args.data_path,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                reranker=langchain_reranker,
-                min_rerank_score=min_rerank_score,
-                max_per_domain=max_per_domain,
-                requested_search_sources=requested_sources,
-                active_search_sources=active_sources,
-                active_search_source_labels=active_labels,
-                missing_search_sources=missing_sources,
-                configured_search_sources=configured_sources,
-                show_timings=show_timings,
-            )
-    
     # Use configured temperature for direct answer as default, but allow CLI override
     provider = config.get("LLM_PROVIDER", "minimax")
     if "/" in provider:
@@ -906,19 +733,18 @@ def main() -> None:
         "allow_search": allow_search,
     }
     audit_tracer: Optional[WorkflowTracer] = None
-    if not use_legacy and LANGCHAIN_AVAILABLE:
-        answer_kwargs["conversation_id"] = conversation_id
-        if args.search_depth:
-            answer_kwargs["search_depth"] = args.search_depth
-        if audit_active:
-            audit_tracer = WorkflowTracer()
-            answer_kwargs["tracer"] = audit_tracer
-            # The CLI owns the write for this run; the orchestrator still
-            # collects timings but must not write a duplicate record.
-            answer_kwargs["audit_mode"] = "external"
-        elif args.audit == "off":
-            # A CLI opt-out must suppress a config-enabled orchestrator hook.
-            answer_kwargs["audit_mode"] = "off"
+    answer_kwargs["conversation_id"] = conversation_id
+    if args.search_depth:
+        answer_kwargs["search_depth"] = args.search_depth
+    if audit_active:
+        audit_tracer = WorkflowTracer()
+        answer_kwargs["tracer"] = audit_tracer
+        # The CLI owns the write for this run; the orchestrator still
+        # collects timings but must not write a duplicate record.
+        answer_kwargs["audit_mode"] = "external"
+    elif args.audit == "off":
+        # A CLI opt-out must suppress a config-enabled orchestrator hook.
+        answer_kwargs["audit_mode"] = "off"
 
     result = orchestrator.answer(args.query, **answer_kwargs)
     result.setdefault("conversation_id", conversation_id)
