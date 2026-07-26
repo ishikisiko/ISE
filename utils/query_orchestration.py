@@ -316,6 +316,14 @@ def canonical_reference(reference: Any) -> str:
     return urlunsplit((parsed.scheme.casefold(), host, path, "", ""))
 
 
+def _is_authoritative_tier(tier: Any) -> bool:
+    """Whether a tier label counts as authoritative under the canonical
+    vocabulary. Imported lazily because ``evidence`` depends on this module."""
+    from evidence.source_verdict import is_authoritative_tier
+
+    return is_authoritative_tier(tier)
+
+
 def _clean_entity_fragment(value: str) -> str:
     text = value.strip(" \t\n,，、;；:：()[]{}<>《》\"'`?？!！")
     text = re.sub(
@@ -696,6 +704,7 @@ class TerminationContext:
     constraints_met: List[str] = field(default_factory=list)
     constraints_missing: List[str] = field(default_factory=list)
     unsupported_details: List[str] = field(default_factory=list)
+    citation_failures: List[Dict[str, str]] = field(default_factory=list)
     empty_answer: bool = False
     search_error: bool = False
     acknowledged_insufficient: bool = False
@@ -859,15 +868,6 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
             "temporal_coverage",
             "No retained evidence contains a temporal coverage signal.",
         )
-    if "temporal_coverage" in policies and context.answer and not re.search(
-        r"(?<!\d)20\d{2}(?!\d)", context.answer
-    ):
-        add_gap(
-            "answer_temporal_coverage",
-            "answer_temporal_coverage_missing",
-            "answer_temporal_coverage",
-            "Draft does not state a temporal coverage signal.",
-        )
 
     for constraint in context.constraints_missing:
         constraint_failure = {
@@ -887,6 +887,21 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
             "unsupported_specific_detail",
             "unsupported_specific_detail",
             f"Draft detail is not present in evidence: {detail}.",
+        )
+    for failure in context.citation_failures:
+        if not isinstance(failure, dict):
+            continue
+        failure_type = str(failure.get("type") or "citation_failure")
+        detail = str(failure.get("detail") or "")
+        sentence = str(failure.get("sentence") or "").strip()
+        constraint_label = (
+            f"{failure_type}:{sentence}" if sentence else failure_type
+        )
+        add_gap(
+            constraint_label,
+            failure_type,
+            "citation_verification",
+            detail or failure_type,
         )
 
     deterministic_missing = _dedupe_strings(missing, limit=16)
@@ -1084,7 +1099,17 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
             evidence_sufficiency=evidence_sufficiency,
         )
 
-    authority_only = set(failures) == {"authority_policy_not_met"}
+    # The provisional-authority fallback is the designed escape hatch when a
+    # candidate page exists but official ownership cannot be verified after
+    # repeated attempts. It applies only when every outstanding failure is an
+    # authority-coverage problem; citation failures (which the model can fix by
+    # citing properly) or coverage/constraint gaps must not be masked by it.
+    authority_failures = {
+        "authority_policy_not_met",
+        "target_official_coverage_missing",
+        "target_official_pricing_coverage_missing",
+    }
+    authority_only = bool(failures) and set(failures) <= authority_failures
     if (
         authority_only
         and evidence.provisional_authoritative_count > 0
@@ -1333,7 +1358,7 @@ class EvidenceLedger:
                 existing.covered_entities = _dedupe_strings(existing.covered_entities + covered_entities, limit=8)
                 existing.covered_constraints = _dedupe_strings(existing.covered_constraints + covered_constraints, limit=8)
                 existing.merged_count += 1
-                if existing.decision != "retained" and tier in {"official", "first_party", "authoritative"}:
+                if existing.decision != "retained" and _is_authoritative_tier(tier):
                     existing.decision, existing.reason, existing.source_tier = "retained", "policy_satisfied", tier
                 continue
             decision, reason = self._decision(tier, covered_entities)
@@ -1390,7 +1415,7 @@ class EvidenceLedger:
         authoritative = sum(
             1
             for entry in retained_entries
-            if entry.source_tier in {"official", "first_party", "authoritative"}
+            if _is_authoritative_tier(entry.source_tier)
         )
         return {
             "entries": len(entries),

@@ -165,6 +165,22 @@ class ReactAgentOrchestrator:
                 if allow_search
                 or tool.name not in {"web_search", "search_recovery", "fetch_url"}
             ]
+            orchestration_cfg = self.config.get("orchestration") or {}
+            ledger_cfg = (
+                orchestration_cfg.get("evidence_ledger")
+                if isinstance(orchestration_cfg, dict)
+                else None
+            )
+            ledger_max_entry = (
+                ledger_cfg.get("max_entry_chars")
+                if isinstance(ledger_cfg, dict)
+                else None
+            )
+            from evidence.ledger import EvidenceLedger
+
+            ledger = EvidenceLedger(
+                max_entry_chars=int(ledger_max_entry or 8000)
+            )
             for tool in active_tools:
                 bind_recorder = getattr(tool, "set_timing_recorder", None)
                 if callable(bind_recorder):
@@ -172,6 +188,9 @@ class ReactAgentOrchestrator:
                 bind_analysis = getattr(tool, "set_analysis", None)
                 if callable(bind_analysis):
                     bind_analysis(analysis)
+                bind_ledger = getattr(tool, "set_ledger", None)
+                if callable(bind_ledger):
+                    bind_ledger(ledger)
             runner = ReactLoopGraphRunner(
                 llm=self.llm,
                 tools=active_tools,

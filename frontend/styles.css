@@ -759,9 +759,16 @@ a.wf-record-title:hover {
     margin: 20px 0;
 }
 
+.answer .table-wrap {
+    overflow-x: auto;
+    margin: 0 0 14px;
+    -webkit-overflow-scrolling: touch;
+}
+
 .answer table {
     border-collapse: collapse;
-    margin: 0 0 14px;
+    width: 100%;
+    margin: 0;
     font-size: 13.5px;
 }
 
@@ -770,6 +777,17 @@ a.wf-record-title:hover {
     border: 1px solid var(--line-strong);
     padding: 6px 10px;
     text-align: left;
+    vertical-align: top;
+}
+
+.answer th {
+    font-weight: 600;
+    background: var(--line);
+    color: var(--ink-2);
+}
+
+.answer tbody tr:nth-child(even) {
+    background: rgba(232, 229, 223, 0.35);
 }
 
 /* ==========================================================================

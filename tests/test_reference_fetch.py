@@ -609,3 +609,149 @@ def test_reference_extractors_reject_unsafe_or_non_absolute_urls(url):
 
     with pytest.raises(ValueError):
         client.extract(url)
+
+
+def test_reference_router_skips_exhausted_extractor_on_retry():
+    """A URL whose direct fetch returned insufficient content must skip the
+    direct extractor on the next call and go straight to the extract API."""
+
+    calls = []
+
+    class DirectFetchShell:
+        source_id = "direct_fetch"
+
+        def extract(self, urls, *, objective=None):
+            calls.append(self.source_id)
+            return ReferenceExtraction(
+                provider=self.source_id,
+                contents=[
+                    ReferenceContent(
+                        provider=self.source_id,
+                        requested_url=urls[0],
+                        url=urls[0],
+                        content="x" * 383,
+                    )
+                ],
+            )
+
+    class ExtractApiContent:
+        source_id = "tavily_extract"
+
+        def extract(self, urls, *, objective=None):
+            calls.append(self.source_id)
+            return ReferenceExtraction(
+                provider=self.source_id,
+                contents=[
+                    ReferenceContent(
+                        provider=self.source_id,
+                        requested_url=urls[0],
+                        url=urls[0],
+                        content="Full pricing table " * 80,
+                    )
+                ],
+            )
+
+    router = ReferenceExtractorRouter(
+        [DirectFetchShell(), ExtractApiContent()],
+        min_content_chars=600,
+    )
+
+    # First call: direct fetch fails (383 < 600), falls back to extract API.
+    first = router.extract("https://example.com/pricing")
+    assert calls == ["direct_fetch", "tavily_extract"]
+    assert first.contents[0].provider == "tavily_extract"
+
+    # Second call: direct fetch is exhausted, must NOT be retried.
+    calls.clear()
+    second = router.extract("https://example.com/pricing")
+    assert calls == ["tavily_extract"]
+    assert second.contents[0].provider == "tavily_extract"
+
+
+def test_reference_router_reports_url_exhausted_when_all_extractors_failed():
+    """When every extractor has failed for a URL, subsequent calls must
+    short-circuit without invoking any extractor."""
+
+    class AlwaysFail:
+        source_id = "direct_fetch"
+
+        def __init__(self):
+            self.invocations = 0
+
+        def extract(self, urls, *, objective=None):
+            self.invocations += 1
+            return ReferenceExtraction(
+                provider=self.source_id,
+                failures=[
+                    ReferenceFailure(
+                        provider=self.source_id,
+                        requested_url=urls[0],
+                        error_type="empty_content",
+                    )
+                ],
+            )
+
+    direct = AlwaysFail()
+    router = ReferenceExtractorRouter([direct], min_content_chars=600)
+
+    first = router.extract("https://example.com/pricing")
+    assert direct.invocations == 1
+    assert first.contents == []
+
+    # URL is now exhausted; second call must not invoke the extractor at all.
+    assert router.is_url_exhausted("https://example.com/pricing") is True
+    second = router.extract("https://example.com/pricing")
+    assert direct.invocations == 1
+    assert any(
+        getattr(f, "error_type", "") == "url_exhausted"
+        for f in second.failures
+    )
+    assert second.attempts[-1]["reason"] == "url_exhausted"
+
+
+def test_reference_router_reset_clears_exhaustion():
+    """After reset(), previously-exhausted extractors are retried."""
+
+    class DirectFetchRecovering:
+        source_id = "direct_fetch"
+
+        def __init__(self):
+            self.invocations = 0
+
+        def extract(self, urls, *, objective=None):
+            self.invocations += 1
+            if self.invocations == 1:
+                return ReferenceExtraction(
+                    provider=self.source_id,
+                    failures=[
+                        ReferenceFailure(
+                            provider=self.source_id,
+                            requested_url=urls[0],
+                            error_type="empty_content",
+                        )
+                    ],
+                )
+            return ReferenceExtraction(
+                provider=self.source_id,
+                contents=[
+                    ReferenceContent(
+                        provider=self.source_id,
+                        requested_url=urls[0],
+                        url=urls[0],
+                        content="Recovered full page " * 80,
+                    )
+                ],
+            )
+
+    direct = DirectFetchRecovering()
+    router = ReferenceExtractorRouter([direct], min_content_chars=600)
+
+    router.extract("https://example.com/pricing")
+    assert router.is_url_exhausted("https://example.com/pricing") is True
+
+    router.reset()
+    assert router.is_url_exhausted("https://example.com/pricing") is False
+
+    result = router.extract("https://example.com/pricing")
+    assert len(result.contents) == 1
+    assert direct.invocations == 2

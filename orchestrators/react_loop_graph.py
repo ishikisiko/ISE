@@ -26,7 +26,6 @@ from utils.query_orchestration import (
     check_constraint_coverage,
     evidence_increment_ratio,
     evaluate_termination,
-    extract_numbers,
     normalize_termination_config,
 )
 from utils.retrieval_trace import emit_search_call_step, search_call_snapshots
@@ -34,6 +33,7 @@ from utils.search_routing import extract_json_object
 from utils.timing_utils import extract_token_usage
 from utils.time_parser import TimeConstraint
 from utils.workflow_trace import WorkflowTracer, ensure_tracer
+from evidence.source_verdict import is_authoritative_tier
 
 LOOP_STATUSES = (
     "succeeded",
@@ -60,6 +60,7 @@ _TRACE_URL_QUERY = re.compile(r"https?://[^\s?#]+(?:\?[^\s#]*)?(?:#[^\s]*)?")
 _TEXTUAL_TOOL_ERRORS = (
     "error:",
     "search failed:",
+    "fetch failed:",
     "tool error:",
     "tool failed:",
 )
@@ -163,6 +164,7 @@ TOOL_CALLING_SYSTEM_PROMPT = """你是一个智能搜索助手。你可以使用
 - 当你已经收集到足够信息时，直接给出完整的最终答案（不要再调用任何工具）。
 - 最终答案应当具体、完整，覆盖问题中的所有要求。
 - 不要输出检索计划、下一步说明或自我对话；非工具调用文本必须是面向用户的最终答案。
+- 工具返回的每条证据都带有编号 [En]、来源层级（official / first_party / unknown 等）和状态（仅摘要 / 已抓全文）。回答中每一个具体数值或事实，都必须在其后标注来源编号，例如 "输入价 $1.90 [E2]"。优先采用 official 且"已抓全文"的来源；仅摘要或 unknown 来源的数值未经核实，需明确标注其不确定性。
 {success_criteria}"""
 
 
@@ -752,6 +754,7 @@ class ReactLoopGraphRunner:
         tool_messages: List[ToolMessage] = []
         new_observations: List[str] = []
         new_records: List[Dict[str, Any]] = []
+        new_fetch_outcomes: List[Dict[str, Any]] = []
         error_streak = state["tool_error_streak"]
         had_success = state["had_successful_observation"]
         fingerprints: List[str] = []
@@ -785,6 +788,7 @@ class ReactLoopGraphRunner:
                 try:
                     result = tool.invoke(call.get("args") or {})
                     content = result if isinstance(result, str) else str(result)
+                    new_fetch_outcomes.extend(self._tool_fetch_outcomes(tool))
                     failed = self._is_textual_tool_error(content)
                     if failed:
                         error_streak += 1
@@ -862,7 +866,7 @@ class ReactLoopGraphRunner:
                 preferred_tier = next(
                     (
                         tier
-                        for tier in ("official", "first_party", "authoritative", "local")
+                        for tier in ("official", "first_party", "local", "aggregator")
                         if tier in source_tiers
                     ),
                     next((tier for tier in source_tiers if tier), None),
@@ -918,6 +922,7 @@ class ReactLoopGraphRunner:
             "messages": tool_messages,
             "evidence_pool": list(state["evidence_pool"]) + new_observations,
             "evidence_records": list(state.get("evidence_records") or []) + new_records,
+            "fetch_outcomes": list(state.get("fetch_outcomes") or []) + new_fetch_outcomes,
             "tool_error_streak": error_streak,
             "had_successful_observation": had_success,
             "last_fingerprint": combined_fingerprint or state["last_fingerprint"],
@@ -985,6 +990,20 @@ class ReactLoopGraphRunner:
         except Exception:  # noqa: BLE001 - provenance cannot fail the tool call
             return []
 
+    @staticmethod
+    def _tool_fetch_outcomes(tool: Any) -> List[Dict[str, Any]]:
+        getter = getattr(tool, "get_last_fetch_outcomes", None)
+        if not callable(getter):
+            return []
+        try:
+            return [
+                dict(outcome)
+                for outcome in list(getter() or [])
+                if isinstance(outcome, dict)
+            ]
+        except Exception:  # noqa: BLE001 - fetch accounting cannot fail the tool call
+            return []
+
     def _evaluate(self, state: Dict[str, Any]) -> Dict[str, Any]:
         iteration = int(state["iteration"])
         self.tracer.begin(
@@ -1013,16 +1032,9 @@ class ReactLoopGraphRunner:
             else int(state["no_progress_streak"]) + 1
         )
 
-        unsupported: List[str] = []
+        citation_failures: List[Dict[str, str]] = []
         if final_proposed and draft:
-            numbers = [
-                token
-                for token in extract_numbers(draft)
-                if token not in {"1", "2", "3", "4", "5"}
-            ]
-            unsupported = [
-                token for token in numbers if token.casefold() not in pool_text.casefold()
-            ]
+            citation_failures = self._check_draft_citations(state, draft)
 
         context = self._termination_context(
             state,
@@ -1030,7 +1042,7 @@ class ReactLoopGraphRunner:
             final_proposed=final_proposed,
             constraints_met=met,
             constraints_missing=missing,
-            unsupported=unsupported,
+            citation_failures=citation_failures,
             no_progress_streak=no_progress_streak,
         )
         preliminary = evaluate_termination(context)
@@ -1119,11 +1131,15 @@ class ReactLoopGraphRunner:
             )
             final_answer = self._best_effort_answer(draft, answer_reason)
         elif invalid_tool_request:
+            detail = str(state.get("invalid_tool_request") or "").strip()
+            tool_names = "、".join(sorted(self.tools_by_name))
             update["messages"] = [
                 HumanMessage(
                     content=(
-                        "上一轮工具调用格式无效，工具未执行。请使用可用工具的结构化调用"
-                        "或直接给出最终答案。"
+                        "上一轮的工具调用未被执行"
+                        + (f"：{detail}" if detail else "")
+                        + f"。可用工具只有：{tool_names}。请调用其中之一，"
+                        "或直接给出面向用户的最终答案。"
                     )
                 )
             ]
@@ -1131,8 +1147,9 @@ class ReactLoopGraphRunner:
             update["messages"] = [
                 HumanMessage(
                     content=(
-                        "上一轮只描述了检索计划，并非可展示的最终答案。请使用可用工具的"
-                        "结构化调用，或直接给出面向用户的最终答案；不要说明你准备做什么。"
+                        "上一轮只陈述了接下来的计划，既没有调用工具，也没有给出答案。"
+                        "请立即调用工具，或直接给出面向用户的最终答案；"
+                        "不要描述你准备做什么。"
                     )
                 )
             ]
@@ -1157,7 +1174,19 @@ class ReactLoopGraphRunner:
         return update
 
     def _official_fetch_instruction(self, state: Dict[str, Any]) -> str:
-        """Give a concrete fetch retry when an official search hit is still shallow."""
+        """Suggest fetching an unfetched authoritative hit, or steer away from
+        URLs that already failed extraction.
+
+        Previously this method pointed the model at the first authoritative URL
+        it found in the evidence records, even when that exact URL had already
+        been fetched and returned insufficient content. The model would then
+        re-invoke ``fetch_url`` on the same doomed URL. We now consult
+        ``state["fetch_outcomes"]`` (canonical URLs of every fetch attempt,
+        success or failure) and skip candidates whose canonical form has been
+        tried. When every authoritative candidate is exhausted we return a
+        generic message that nudges the model toward a different source or
+        acknowledging the gap, never toward the same URL again.
+        """
         analysis_constraints = getattr(self.analysis, "constraints", None)
         if (
             "fetch_url" not in self.tools_by_name
@@ -1171,25 +1200,61 @@ class ReactLoopGraphRunner:
             for record in list(state.get("evidence_records") or [])
             if isinstance(record, dict)
         ]
-        fetched = {
-            str(record.get("reference") or "")
-            for record in records
-            if str(record.get("tool_name") or "") == "fetch_url"
+        attempted = {
+            canonical_reference(outcome.get("url"))
+            for outcome in list(state.get("fetch_outcomes") or [])
+            if isinstance(outcome, dict)
         }
         for record in records:
             reference = str(record.get("reference") or "").strip()
-            tier = str(record.get("source_tier") or "").casefold()
             if (
                 reference.startswith(("http://", "https://"))
-                and reference not in fetched
-                and tier in {"official", "first_party", "authoritative"}
+                and canonical_reference(reference) not in attempted
+                and is_authoritative_tier(record.get("source_tier"))
             ):
                 return (
                     "请现在直接调用 fetch_url 阅读已找到的权威页面 "
                     + reference
                     + "，不要描述检索计划；获取页面内容后再重新作答。"
                 )
-        return "请继续使用工具收集信息，然后重新作答；不要只描述检索计划。"
+        return (
+            "已有的权威来源均已尝试抓取但未能获得可用正文，或暂无未尝试的权威"
+            "页面。请改用其他检索词寻找新的来源，或在证据确实不足时如实说明。"
+            "不要对已失败的同一 URL 重复调用 fetch_url。"
+        )
+
+    def _check_draft_citations(
+        self, state: Dict[str, Any], draft: str
+    ) -> List[Dict[str, str]]:
+        """Mechanically verify the draft's [En] citations against the ledger."""
+        from evidence.citation_check import check_citations
+
+        records = [
+            record
+            for record in list(state.get("evidence_records") or [])
+            if isinstance(record, dict)
+        ]
+        claim_classes = set(getattr(self.analysis, "claim_classes", None) or [])
+        analysis_constraints = getattr(self.analysis, "constraints", None)
+        analysis_constraints = (
+            analysis_constraints if isinstance(analysis_constraints, dict) else {}
+        )
+        requires_official_pricing = "pricing" in claim_classes
+        temporal_required = bool(
+            analysis_constraints.get("historical_coverage_required")
+            or analysis_constraints.get("freshness_required")
+            or "temporal" in claim_classes
+            or "current" in claim_classes
+        )
+        try:
+            return check_citations(
+                draft,
+                records,
+                requires_official_pricing=requires_official_pricing,
+                temporal_required=temporal_required,
+            )
+        except Exception:  # noqa: BLE001 - citation check must not break the loop
+            return []
 
     def _termination_context(
         self,
@@ -1199,7 +1264,7 @@ class ReactLoopGraphRunner:
         final_proposed: bool,
         constraints_met: List[str],
         constraints_missing: List[str],
-        unsupported: List[str],
+        citation_failures: List[Dict[str, str]],
         no_progress_streak: int,
     ) -> TerminationContext:
         records = [
@@ -1230,11 +1295,10 @@ class ReactLoopGraphRunner:
             for member in comparison_members
             if member.casefold() in evidence_text.casefold()
         ]
-        authoritative_tiers = {"official", "first_party", "authoritative"}
         authoritative_count = sum(
             1
             for record in records
-            if str(record.get("source_tier") or "").casefold() in authoritative_tiers
+            if is_authoritative_tier(record.get("source_tier"))
         )
         provisional_authoritative_count = sum(
             1
@@ -1249,6 +1313,24 @@ class ReactLoopGraphRunner:
         requires_evidence = bool(
             getattr(self.analysis, "requires_evidence", False)
         )
+        claim_classes = set(getattr(self.analysis, "claim_classes", None) or [])
+        authority_required = bool(analysis_constraints.get("authority_required"))
+        official_targets: List[str] = []
+        if authority_required:
+            official_targets = list(
+                dict.fromkeys(
+                    list(comparison_members)
+                    + list(getattr(self.analysis, "entities", None) or [])
+                )
+            )
+        covered_official_entities = sorted(
+            {
+                str((record.get("metadata") or {}).get("source_target") or "").strip()
+                for record in records
+                if str(record.get("source_tier") or "").casefold() == "official"
+                and str((record.get("metadata") or {}).get("source_target") or "").strip()
+            }
+        )
         return TerminationContext(
             phase="loop",
             requires_evidence=requires_evidence,
@@ -1261,17 +1343,20 @@ class ReactLoopGraphRunner:
             ),
             policies=policies,
             comparison_members=comparison_members,
+            official_targets=official_targets,
+            requires_official_pricing="pricing" in claim_classes,
             evidence=CriticEvidenceState(
                 retained_count=len(records),
                 available_count=len(records),
                 authoritative_count=authoritative_count,
                 provisional_authoritative_count=provisional_authoritative_count,
                 covered_entities=tuple(covered_entities),
+                covered_official_entities=tuple(covered_official_entities),
                 covered_constraints=covered_constraints,
             ),
             constraints_met=constraints_met,
             constraints_missing=constraints_missing,
-            unsupported_details=unsupported,
+            citation_failures=citation_failures,
             empty_answer=final_proposed and not bool(draft.strip()),
             invalid_tool_request=bool(state.get("invalid_tool_request")),
             invalid_final_response=bool(state.get("invalid_final_response")),
@@ -1318,7 +1403,13 @@ class ReactLoopGraphRunner:
         evidence_pool = list(state.get("evidence_pool") or [])
         observations_preview = "\n".join(evidence_pool)[-3000:]
         system_prompt = (
-            "You are a strict judge for an iterative search agent loop. "
+            "You are a semantic-consistency judge for an iterative search agent loop. "
+            "Citation formatting, source tiers, coverage checklists, and budgets are "
+            "already enforced mechanically by a separate deterministic critic; do NOT "
+            "re-check those. Your only job is to catch what mechanical checks cannot: "
+            "a claim that cites a source but contradicts or misreads it, a number that "
+            "does not match what its cited source states, or an answer that fails to "
+            "address part of the user's request. "
             "Return JSON only with keys: "
             "passes, missing_constraints, evidence_sufficiency, reason."
         )
@@ -1327,9 +1418,14 @@ class ReactLoopGraphRunner:
             f"Current Draft Answer:\n{draft}\n\n"
             f"Constraints Met: {json.dumps(met, ensure_ascii=False)}\n"
             f"Constraints Missing: {json.dumps(missing, ensure_ascii=False)}\n\n"
-            f"Latest Observations:\n{observations_preview}\n\n"
-            "Judge whether the current evidence and draft already satisfy the user's request. "
-            "Set passes=true only when the loop can stop with a satisfactory answer."
+            f"Latest Observations (with [En] citation ids, source tiers, and fetch status):\n"
+            f"{observations_preview}\n\n"
+            "For each specific claim in the draft (numbers, prices, dates, attributions), "
+            "verify it is consistent with the evidence it cites. Flag any claim that "
+            "contradicts its cited source, states a figure its source does not support, or "
+            "misattributes ownership. Also flag if the draft leaves part of the request "
+            "unanswered. Set passes=true only when every specific claim is consistent with "
+            "its cited evidence and the request is fully addressed."
         )
         started = time.perf_counter()
         response: Any = None
@@ -1434,6 +1530,7 @@ class ReactLoopGraphRunner:
             "messages": [HumanMessage(content=user_input)],
             "evidence_pool": [],
             "evidence_records": [],
+            "fetch_outcomes": [],
             "iteration": 0,
             "verdicts": [],
             "constraints_met": [],
@@ -1471,6 +1568,7 @@ class ReactLoopGraphRunner:
         return {
             "messages": removals + [HumanMessage(content=user_input)],
             "iteration": 0,
+            "fetch_outcomes": [],
             "constraints_met": [],
             "constraints_missing": list(self.initial_checklist),
             "last_fingerprint": None,

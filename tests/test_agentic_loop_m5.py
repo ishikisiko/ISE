@@ -213,8 +213,14 @@ def test_fetch_url_does_not_retain_short_shell_as_authority() -> None:
 
     result = tool._run("https://platform.kimi.com/docs/pricing")
 
-    assert result.startswith("Fetch failed:")
+    payload = json.loads(result)
+    assert payload["status"] == "no_data"
+    assert payload["exhausted"] is False
     assert tool.get_last_evidence_records() == []
+    outcomes = tool.get_last_fetch_outcomes()
+    assert len(outcomes) == 1
+    assert outcomes[0]["status"] == "no_data"
+    assert outcomes[0]["chars"] == 0
 
 
 def test_fetch_url_is_registered_with_independent_budget() -> None:
@@ -323,3 +329,58 @@ def test_plan_specs_are_removed() -> None:
     assert not (ROOT / "openspec/specs/query-postcheck-fallback/spec.md").exists()
     assert not (ROOT / "openspec/specs/search-routing-core/spec.md").exists()
     assert not (ROOT / "langchain/postcheck.py").exists()
+
+
+def test_search_and_fetch_share_ledger_ids_across_tools() -> None:
+    """A URL found via search then fetched keeps the same citation ID, and the
+    fetch upgrades it to fetched full text."""
+    from evidence.ledger import EvidenceLedger
+
+    class FetchRouter:
+        @staticmethod
+        def extract(urls, objective=None):
+            return ReferenceExtraction(
+                provider="direct_fetch",
+                contents=[
+                    ReferenceContent(
+                        provider="direct_fetch",
+                        requested_url=urls[0],
+                        url="https://openai.com/api/pricing/",
+                        title="OpenAI pricing",
+                        content="Full official pricing page body " * 40,
+                    )
+                ],
+            )
+
+    ledger = EvidenceLedger()
+
+    search_tool = ReActSearchTool(search_client=_SearchClient(), config={})
+    search_tool.set_ledger(ledger)
+    search_output = search_tool._run("openai pricing")
+    assert "[E1]" in search_output
+    assert "仅摘要" in search_output
+
+    fetch_tool = ReActFetchUrlTool(config={}, min_content_chars=20)
+    fetch_tool._router = FetchRouter()
+    fetch_tool.set_ledger(ledger)
+    fetch_tool.set_analysis(
+        analyze_query("openai pricing", allow_search=True)
+    )
+    fetch_output = fetch_tool._run("https://openai.com/api/pricing/")
+
+    # The same URL fetched reuses [E1] and is marked as fetched full text.
+    assert "[E1]" in fetch_output
+    assert "[E2]" not in fetch_output
+    assert "已抓全文" in fetch_output
+
+    # Citation ID is stamped into the records so the loop state can resolve it.
+    assert fetch_tool.get_last_evidence_records()[0]["metadata"]["eid"] == 1
+    assert search_tool.get_last_evidence_records()[0]["metadata"]["eid"] == 1
+
+
+def test_search_tool_renders_ledger_entries_with_tier_and_url() -> None:
+    search_tool = ReActSearchTool(search_client=_SearchClient(), config={})
+    output = search_tool._run("openai pricing")
+    assert output.startswith("[E1]")
+    assert "unknown" in output
+    assert "https://openai.com/api/pricing/" in output

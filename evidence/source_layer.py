@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from search.search import SearchClient, SearchHit
 from utils.query_orchestration import canonical_reference
 from .source_tiering import classify_web_source_tier, official_entity_for_url
+from .source_verdict import classify_source
 
 if TYPE_CHECKING:
     from langchain.langchain_support import Document, LangChainVectorStore
@@ -221,12 +222,13 @@ class WebEvidenceSource(EvidenceSource):
             "first_party",
             "authoritative",
         }:
-            metadata["source_tier"] = classify_web_source_tier(
+            verdict = classify_source(
                 hit.url,
                 entities=tier_entities,
                 official_domains=self.official_domains,
                 resolver=self.official_resolver,
             )
+            metadata.update(verdict.to_metadata())
         if metadata.get("source_tier") == "excluded":
             metadata["exclude_from_evidence"] = True
         official_target = official_entity_for_url(

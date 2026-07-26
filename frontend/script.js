@@ -202,6 +202,40 @@ document.addEventListener("DOMContentLoaded", () => {
         src = src.replace(/^---+$/gm, "<hr>");
         src = src.replace(/^&gt;\s?(.*)$/gm, "<blockquote>$1</blockquote>");
 
+        // GFM 表格：表头行 + 分隔行（:---:）+ 0..n 数据行；单元格内允许
+        // 已应用过的行内格式（strong/em/code/link）。在段落 wrap 之前替换，
+        // 避免被段落的 <br> 折行破坏。
+        src = src.replace(
+            /(^|\n)((?:[ \t]*\|[^\n]*\|[ \t]*(?:\n|$))+)/g,
+            (full, leading, block) => {
+                const lines = block.split(/\n/).map((l) => l.trim()).filter(Boolean);
+                if (lines.length < 2) return full;
+                const isSep = (l) => /^\|[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)+\|$/.test(l);
+                if (!isSep(lines[1])) return full;
+                const splitRow = (line) =>
+                    line.replace(/^[ \t]*\|[ \t]*/, "").replace(/[ \t]*\|[ \t]*$/, "").split(/[ \t]*\|[ \t]*/);
+                const header = splitRow(lines[0]);
+                const aligns = splitRow(lines[1]).map((spec) => {
+                    const t = spec.trim();
+                    const left = t.startsWith(":");
+                    const right = t.endsWith(":");
+                    if (left && right) return "center";
+                    if (right) return "right";
+                    if (left) return "left";
+                    return "";
+                });
+                const styleAttr = (i) => (aligns[i] ? ` style="text-align:${aligns[i]};"` : "");
+                const thead = `<thead><tr>${header.map((c, i) => `<th${styleAttr(i)}>${c}</th>`).join("")}</tr></thead>`;
+                const tbody = lines.slice(2).map((line) => {
+                    const cells = splitRow(line);
+                    return `<tr>${cells.map((c, i) => `<td${styleAttr(i)}>${c}</td>`).join("")}</tr>`;
+                }).join("");
+                // 前后强制空行，确保段落 wrap 阶段把表格视为独立块。
+                const prefix = leading === "\n" ? "\n\n" : "";
+                return `${prefix}<div class="table-wrap"><table>${thead}<tbody>${tbody}</tbody></table></div>\n\n`;
+            }
+        );
+
         src = src.replace(/((?:^\d+[.、]\s.+(?:\n|$))+)/gm, (block) => {
             const items = block.trim().split(/\n/)
                 .map((line) => line.replace(/^\d+[.、]\s+/, "").trim())
@@ -216,7 +250,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         const parts = src.split(/\n{2,}/).map((p) => {
-            if (/^\s*<(h3|ul|ol|pre|hr|blockquote)/.test(p)) return p;
+            if (/^\s*<(h3|ul|ol|pre|hr|blockquote|div class="table-wrap")/.test(p)) return p;
             return `<p>${p.replace(/\n/g, "<br>")}</p>`;
         });
         return parts.join("");

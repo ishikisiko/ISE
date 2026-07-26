@@ -57,6 +57,16 @@ class NativeScriptedChatModel(ScriptedChatModel):
         return self
 
 
+class RecordingScriptedChatModel(NativeScriptedChatModel):
+    """Scripted model that also records the message contents of every call."""
+
+    seen: List[Any] = []
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append([getattr(message, "content", "") for message in messages])
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
 def _tool_call(name: str, args: Optional[Dict[str, Any]] = None, call_id: str = "c1") -> AIMessage:
     return AIMessage(
         content="",
@@ -137,6 +147,44 @@ class TestTerminationSemantics:
         assert "https://docs.acme.example/pricing" in instruction
         assert "必须调用 fetch_url" in runner.system_prompt
 
+    def test_authority_rejection_skips_url_that_already_failed_fetch(self):
+        """When the authoritative URL has already been attempted (in
+        fetch_outcomes), the instruction must NOT point the model at it again.
+        Instead it should steer toward a different source."""
+        analysis = QueryAnalysis(
+            query="Acme price 2",
+            constraints={"authority_required": True},
+            requires_evidence=True,
+        )
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(replies=["unused"]),
+            tools=[FakeTools.make("fetch_url", ["page"])],
+            query=analysis.query,
+            analysis=analysis,
+        )
+        instruction = runner._official_fetch_instruction(
+            {
+                "evidence_records": [
+                    {
+                        "tool_name": "web_search",
+                        "source_tier": "official",
+                        "reference": "https://docs.acme.example/pricing",
+                    }
+                ],
+                "fetch_outcomes": [
+                    {
+                        "url": "https://docs.acme.example/pricing",
+                        "status": "no_data",
+                        "exhausted": True,
+                    }
+                ],
+            }
+        )
+
+        assert "直接调用 fetch_url" not in instruction
+        assert "https://docs.acme.example/pricing" not in instruction
+        assert "不要对已失败的同一 URL 重复调用 fetch_url" in instruction
+
     def test_provisional_authority_stops_with_qualified_answer(self):
         class ProvisionalFetchTool:
             name = "fetch_url"
@@ -191,6 +239,214 @@ class TestTerminationSemantics:
         assert result["verdicts"][-1]["reason"] == "authority_unverified"
         assert "官方归属未通过权威策略验证" in result["answer"]
         assert result["answer"].endswith(draft)
+
+    def test_aggregator_cited_number_is_rejected_by_citation_check(self):
+        """A numeric claim cited to an aggregator record must be rejected even
+        when the same figure appears verbatim in the evidence pool (the old
+        string-inclusion rule would have passed it)."""
+
+        class AggregatorFetchTool:
+            name = "fetch_url"
+            description = "test fetch"
+
+            @staticmethod
+            def invoke(args):
+                return "第三方聚合页显示 Acme 价格为 $0.50 per 1M tokens。"
+
+            @staticmethod
+            def get_last_evidence_records():
+                return [
+                    {
+                        "source_type": "web",
+                        "source_tier": "aggregator",
+                        "reference": "https://aggregator.example/acme-pricing",
+                        "content": "第三方聚合页显示 Acme 价格为 $0.50 per 1M tokens。",
+                        "metadata": {
+                            "eid": 1,
+                            "retrieval_kind": "fetch_url",
+                            "content_chars": 500,
+                        },
+                    }
+                ]
+
+        analysis = QueryAnalysis(
+            query="Acme price",
+            entities=["Acme"],
+            claim_classes=["numeric", "pricing"],
+            constraints={"authority_required": True},
+            requires_evidence=True,
+        )
+        draft = "Acme 的价格为 $0.50 per 1M tokens [E1]。"
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(
+                replies=[
+                    _tool_call(
+                        "fetch_url",
+                        {"url": "https://aggregator.example/acme-pricing"},
+                    ),
+                    draft,
+                    draft,
+                    draft,
+                    draft,
+                ]
+            ),
+            tools=[AggregatorFetchTool()],
+            max_iterations=6,
+            termination_config={"no_progress_threshold": 2},
+            query=analysis.query,
+            analysis=analysis,
+        )
+
+        result = runner.run(analysis.query)
+
+        assert result["loop_status"] != "succeeded"
+        rejected = [
+            verdict
+            for verdict in result["verdicts"]
+            if verdict["reason"] == "final_answer_rejected"
+        ]
+        assert rejected
+        assert any(
+            "citation_not_authoritative" in verdict["failure_types"]
+            for verdict in rejected
+        )
+        assert any(
+            any(
+                str(constraint).startswith("citation_not_authoritative")
+                for constraint in verdict["constraints_missing"]
+            )
+            for verdict in rejected
+        )
+
+    def test_official_fetched_citation_passes_citation_check(self):
+        """A numeric claim cited to an official, full-fetched record with a
+        matching source_target must clear both the citation check and the
+        official-target coverage gate."""
+
+        class OfficialFetchTool:
+            name = "fetch_url"
+            description = "test fetch"
+
+            @staticmethod
+            def invoke(args):
+                return "Acme 官方价格页：API 调用 $0.50 per 1M tokens。"
+
+            @staticmethod
+            def get_last_evidence_records():
+                return [
+                    {
+                        "source_type": "web",
+                        "source_tier": "official",
+                        "reference": "https://docs.acme.example/pricing",
+                        "content": "Acme 官方价格页：API 调用 $0.50 per 1M tokens。",
+                        "metadata": {
+                            "eid": 1,
+                            "retrieval_kind": "fetch_url",
+                            "content_chars": 800,
+                            "source_target": "Acme",
+                        },
+                    }
+                ]
+
+        analysis = QueryAnalysis(
+            query="Acme price",
+            entities=["Acme"],
+            claim_classes=["numeric", "pricing"],
+            constraints={"authority_required": True},
+            requires_evidence=True,
+        )
+        draft = "Acme 官方价格为 $0.50 per 1M tokens [E1]。"
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(
+                replies=[
+                    _tool_call(
+                        "fetch_url",
+                        {"url": "https://docs.acme.example/pricing"},
+                    ),
+                    draft,
+                ]
+            ),
+            tools=[OfficialFetchTool()],
+            max_iterations=6,
+            query=analysis.query,
+            analysis=analysis,
+        )
+
+        result = runner.run(analysis.query)
+
+        assert result["loop_status"] == "succeeded"
+        assert result["verdicts"][-1]["reason"] == "constraints_satisfied"
+        assert all(
+            not any(
+                str(failure).startswith("citation_")
+                for failure in verdict["failure_types"]
+            )
+            for verdict in result["verdicts"]
+        )
+
+    def test_numeric_claim_without_citation_is_rejected(self):
+        """A numeric claim with no [En] marker at all must surface a
+        citation_missing gap rather than passing via pool string inclusion."""
+
+        class OfficialFetchTool:
+            name = "fetch_url"
+            description = "test fetch"
+
+            @staticmethod
+            def invoke(args):
+                return "Acme 官方价格页：API 调用 $0.50 per 1M tokens。"
+
+            @staticmethod
+            def get_last_evidence_records():
+                return [
+                    {
+                        "source_type": "web",
+                        "source_tier": "official",
+                        "reference": "https://docs.acme.example/pricing",
+                        "content": "Acme 官方价格页：API 调用 $0.50 per 1M tokens。",
+                        "metadata": {
+                            "eid": 1,
+                            "retrieval_kind": "fetch_url",
+                            "content_chars": 800,
+                            "source_target": "Acme",
+                        },
+                    }
+                ]
+
+        analysis = QueryAnalysis(
+            query="Acme price",
+            entities=["Acme"],
+            claim_classes=["numeric", "pricing"],
+            constraints={"authority_required": True},
+            requires_evidence=True,
+        )
+        draft = "Acme 官方价格为 $0.50 per 1M tokens。"
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(
+                replies=[
+                    _tool_call(
+                        "fetch_url",
+                        {"url": "https://docs.acme.example/pricing"},
+                    ),
+                    draft,
+                    draft,
+                    draft,
+                ]
+            ),
+            tools=[OfficialFetchTool()],
+            max_iterations=6,
+            termination_config={"no_progress_threshold": 2},
+            query=analysis.query,
+            analysis=analysis,
+        )
+
+        result = runner.run(analysis.query)
+
+        assert result["loop_status"] != "succeeded"
+        assert any(
+            "citation_missing" in verdict["failure_types"]
+            for verdict in result["verdicts"]
+        )
 
     def test_critical_ambiguity_clarifies_without_spending_judge_call(self):
         judge = ScriptedChatModel(
@@ -631,6 +887,49 @@ class TestShimMode:
             "process_narration",
             "constraints_satisfied",
         ]
+
+    def test_invalid_tool_nudge_names_reason_and_available_tools(self):
+        model = RecordingScriptedChatModel(
+            replies=[
+                '{"action": "tool", "tool": "brave_search", "args": {"query": "q"}}',
+                "这是面向用户的最终答案，包含已验证的信息。",
+            ]
+        )
+        runner = ReactLoopGraphRunner(
+            llm=model,
+            tools=[FakeTools.make("web_search", ["unused"])],
+            max_iterations=2,
+            query="简单问题",
+        )
+
+        result = runner.run("简单问题")
+
+        assert result["loop_status"] == "succeeded"
+        second_call_text = "\n".join(str(content) for content in model.seen[1])
+        assert "unsupported_tool: brave_search" in second_call_text
+        assert "web_search" in second_call_text
+        assert "结构化调用" not in second_call_text
+
+    def test_process_narration_nudge_demands_tool_call_or_answer(self):
+        model = RecordingScriptedChatModel(
+            replies=[
+                "让我直接查看智谱官方定价文档，然后获取具体价格数据。",
+                "这是面向用户的最终答案，包含已验证的信息。",
+            ]
+        )
+        runner = ReactLoopGraphRunner(
+            llm=model,
+            tools=[FakeTools.make("web_search", ["unused"])],
+            max_iterations=2,
+            query="简单问题",
+        )
+
+        result = runner.run("简单问题")
+
+        assert result["loop_status"] == "succeeded"
+        second_call_text = "\n".join(str(content) for content in model.seen[1])
+        assert "不要描述你准备做什么" in second_call_text
+        assert "结构化调用" not in second_call_text
 
 
 class TestWorkflowTrace:

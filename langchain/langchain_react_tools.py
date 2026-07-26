@@ -26,7 +26,7 @@ from evidence import (
     RetrievalOptions,
     WebEvidenceSource,
     build_evidence_summary,
-    classify_web_source_tier,
+    classify_source,
     provisional_entity_for_url,
     source_identity_label,
 )
@@ -87,6 +87,7 @@ class ReActSearchTool(BaseTool):
     _calls_in_run: int = PrivateAttr(default=0)
     _analysis: Optional[QueryAnalysis] = PrivateAttr(default=None)
     _web_source: Optional[WebEvidenceSource] = PrivateAttr(default=None)
+    _ledger: Any = PrivateAttr(default=None)
     _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
 
     class Config:
@@ -166,16 +167,13 @@ class ReActSearchTool(BaseTool):
                 for item in items
                 if not (item.metadata or {}).get("exclude_from_evidence")
             ]
-            hits = [
-                SearchHit(
-                    title=str(item.title or ""),
-                    url=str(item.reference or ""),
-                    snippet=str(item.snippet or item.content or ""),
-                )
-                for item in items
-                if not (item.metadata or {}).get("exclude_from_evidence")
-            ]
-            return self._format_results(hits)
+            ledger = self._get_ledger()
+            entries = []
+            for record in self._last_evidence_records:
+                eid = ledger.register(record)
+                record.setdefault("metadata", {})["eid"] = eid
+                entries.append((eid, record))
+            return ledger.render_entries(entries) if entries else "No search results found."
         except Exception as exc:
             return f"Search failed: {exc}"
 
@@ -185,6 +183,16 @@ class ReActSearchTool(BaseTool):
 
     def set_analysis(self, analysis: Optional[QueryAnalysis]) -> None:
         self._analysis = analysis
+
+    def set_ledger(self, ledger: Any) -> None:
+        self._ledger = ledger
+
+    def _get_ledger(self) -> Any:
+        if self._ledger is None:
+            from evidence.ledger import EvidenceLedger
+
+            self._ledger = EvidenceLedger()
+        return self._ledger
 
     def get_last_evidence_records(self) -> List[Dict[str, Any]]:
         return [dict(record) for record in self._last_evidence_records]
@@ -198,20 +206,6 @@ class ReActSearchTool(BaseTool):
         if not callable(getter):
             return []
         return [record for record in list(getter() or []) if isinstance(record, dict)]
-
-    def _format_results(self, hits: List[SearchHit]) -> str:
-        """Format search results as a readable string."""
-        if not hits:
-            return "No search results found."
-
-        results = []
-        for i, hit in enumerate(hits, 1):
-            result = f"{i}. {hit.title or 'Untitled'}\n"
-            result += f"   URL: {hit.url or 'N/A'}\n"
-            result += f"   {hit.snippet or 'No description available.'}"
-            results.append(result)
-
-        return "\n\n".join(results)
 
 
 class ReActSearchRecoveryTool(BaseTool):
@@ -644,7 +638,9 @@ class ReActFetchUrlTool(BaseTool):
     _official_domains: Dict[str, Any] = PrivateAttr(default_factory=dict)
     _official_resolver: Any = PrivateAttr(default=None)
     _router: Any = PrivateAttr(default=None)
+    _ledger: Any = PrivateAttr(default=None)
     _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
+    _last_fetch_outcomes: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
 
     class Config:
         arbitrary_types_allowed = True
@@ -717,6 +713,7 @@ class ReActFetchUrlTool(BaseTool):
     ) -> str:
         """Fetch ``url`` and return its main text, truncated to ``max_chars``."""
         self._last_evidence_records = []
+        self._last_fetch_outcomes = []
         if self._calls_in_run >= self.max_calls_per_query:
             return json.dumps(
                 {
@@ -762,6 +759,15 @@ class ReActFetchUrlTool(BaseTool):
         try:
             extraction = router.extract([raw_url], objective=objective or None)
         except Exception as exc:  # noqa: BLE001 - surface fetch errors to the agent
+            self._last_fetch_outcomes.append(
+                {
+                    "url": url_key,
+                    "status": "no_data",
+                    "chars": 0,
+                    "error_type": "extractor_exception",
+                    "reason": str(exc)[:200],
+                }
+            )
             return f"Fetch failed: {exc}"
 
         content_obj = next(
@@ -779,10 +785,33 @@ class ReActFetchUrlTool(BaseTool):
             error_type = str(
                 getattr(failure, "error_type", "") or "no_content"
             ) if failure else "no_content"
-            return (
-                f"Fetch failed: could not extract content from {raw_url} "
-                f"({error_type}). The page may be blocked, JS-only, or require "
-                f"an extraction API key."
+            exhausted_getter = getattr(router, "is_url_exhausted", None)
+            exhausted = bool(exhausted_getter(raw_url)) if callable(exhausted_getter) else False
+            self._last_fetch_outcomes.append(
+                {
+                    "url": url_key,
+                    "status": "no_data",
+                    "chars": 0,
+                    "error_type": error_type,
+                    "exhausted": exhausted,
+                }
+            )
+            note = (
+                " All configured extractors have failed for this URL; retrying "
+                "the same URL will not help. Try a different source instead."
+                if exhausted
+                else " The page may be blocked, JS-only, or require an "
+                "extraction API key."
+            )
+            return json.dumps(
+                {
+                    "status": "no_data",
+                    "url": url_key,
+                    "error_type": error_type,
+                    "exhausted": exhausted,
+                    "note": note.strip(),
+                },
+                ensure_ascii=False,
             )
 
         full_text = (content_obj.content or "").strip()
@@ -800,12 +829,13 @@ class ReActFetchUrlTool(BaseTool):
                 + list(getattr(self._analysis, "entities", None) or [])
             )
         )
-        source_tier = classify_web_source_tier(
+        verdict = classify_source(
             resolved_url,
             entities=entities,
             official_domains=self._official_domains,
             resolver=self._official_resolver,
         )
+        source_tier = verdict.tier
         provisional_entity = provisional_entity_for_url(
             resolved_url,
             entities=entities,
@@ -817,12 +847,13 @@ class ReActFetchUrlTool(BaseTool):
             "content_chars": len(full_text),
             "truncated": truncated,
             "duration_ms": duration_ms,
+            "retrieved_at": time.strftime("%Y-%m-%d"),
             "source_tier_entities": entities,
         }
+        metadata.update(verdict.to_metadata())
         if provisional_entity and source_tier not in {
             "official",
             "first_party",
-            "authoritative",
         }:
             metadata.update(
                 {
@@ -834,30 +865,56 @@ class ReActFetchUrlTool(BaseTool):
         self._last_evidence_records = [
             {
                 "source_type": "web",
-                "source_tier": source_tier if source_tier != "unknown" else "fetched",
+                "source_tier": source_tier,
                 "reference": resolved_url,
                 "title": title or resolved_url,
                 "content": page_text,
                 "metadata": metadata,
             }
         ]
+        self._last_fetch_outcomes.append(
+            {
+                "url": url_key,
+                "resolved_url": resolved_url,
+                "status": "success",
+                "chars": len(full_text),
+                "provider": provider,
+            }
+        )
 
-        header_parts = [f"Title: {title or 'Untitled'}", f"URL: {resolved_url}"]
-        if provider:
-            header_parts.append(f"Extractor: {provider}")
-        header_parts.append(f"Chars: {len(full_text)}")
-        return "\n".join(header_parts) + "\n\n" + page_text
+        ledger = self._get_ledger()
+        eid = ledger.register(self._last_evidence_records[0])
+        metadata["eid"] = eid
+        return ledger.render_entry(eid)
 
     def reset_budget(self) -> None:
         self._calls_in_run = 0
         self._seen_urls.clear()
         self._last_evidence_records = []
+        self._last_fetch_outcomes = []
+        if self._router is not None:
+            reset = getattr(self._router, "reset", None)
+            if callable(reset):
+                reset()
 
     def set_analysis(self, analysis: Optional[QueryAnalysis]) -> None:
         self._analysis = analysis
 
+    def set_ledger(self, ledger: Any) -> None:
+        self._ledger = ledger
+
+    def _get_ledger(self) -> Any:
+        if self._ledger is None:
+            from evidence.ledger import EvidenceLedger
+
+            self._ledger = EvidenceLedger()
+        return self._ledger
+
     def get_last_evidence_records(self) -> List[Dict[str, Any]]:
         return [dict(record) for record in self._last_evidence_records]
+
+    def get_last_fetch_outcomes(self) -> List[Dict[str, Any]]:
+        return [dict(outcome) for outcome in self._last_fetch_outcomes]
 
     def get_budget_status(self) -> Dict[str, int]:
         return {"limit": self.max_calls_per_query, "used": self._calls_in_run}

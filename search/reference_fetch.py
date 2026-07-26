@@ -847,7 +847,15 @@ class DirectFetchClient(ReferenceExtractor):
 
 
 class ReferenceExtractorRouter:
-    """Try configured extractors in order for each selected URL."""
+    """Try configured extractors in order for each selected URL.
+
+    Per-URL extractor exhaustion is tracked across calls within the router's
+    lifetime: once an extractor returned insufficient content or failed for a
+    URL, it is skipped on subsequent calls for the same URL. This avoids
+    re-running a doomed direct fetch when a heavier extraction API is
+    configured behind it. Call :meth:`reset` to clear the accounting (the
+    fetch tool does this at the start of every query).
+    """
 
     def __init__(
         self,
@@ -857,6 +865,21 @@ class ReferenceExtractorRouter:
     ) -> None:
         self.extractors = list(extractors)
         self.min_content_chars = max(1, int(min_content_chars))
+        self._exhausted: Dict[str, set] = {}
+
+    def reset(self) -> None:
+        """Clear per-URL extractor exhaustion accounting."""
+        self._exhausted.clear()
+
+    def is_url_exhausted(self, url: Any) -> bool:
+        """Return True when every configured extractor has failed for ``url``."""
+        key = _safe_reference_url(url)
+        exhausted = self._exhausted.get(key)
+        if not exhausted:
+            return False
+        return all(
+            extractor.source_id in exhausted for extractor in self.extractors
+        )
 
     def extract(
         self,
@@ -870,7 +893,13 @@ class ReferenceExtractorRouter:
         result = ReferenceExtraction(provider="reference_router")
         trace_position = 0
         for url in normalized_urls:
+            url_key = _safe_reference_url(url)
+            skip_ids = set(self._exhausted.get(url_key, ()))
+            attempted_count = 0
             for extractor in self.extractors:
+                if extractor.source_id in skip_ids:
+                    continue
+                attempted_count += 1
                 try:
                     provider_result = extractor.extract([url], objective=objective)
                 except Exception:  # noqa: BLE001 - a failed provider must not block fallback
@@ -946,6 +975,7 @@ class ReferenceExtractorRouter:
                 if content:
                     result.contents.append(content)
                     break
+                self._exhausted.setdefault(url_key, set()).add(extractor.source_id)
                 result.failures.extend(provider_result.failures)
             else:
                 if not self.extractors:
@@ -955,6 +985,23 @@ class ReferenceExtractorRouter:
                             requested_url=url,
                             error_type="no_configured_extractor",
                         )
+                    )
+                elif attempted_count == 0:
+                    result.failures.append(
+                        ReferenceFailure(
+                            provider="reference_router",
+                            requested_url=url,
+                            error_type="url_exhausted",
+                        )
+                    )
+                    result.attempts.append(
+                        {
+                            "provider": "reference_router",
+                            "requested_url": _safe_reference_url(url),
+                            "status": "skipped",
+                            "content_chars": 0,
+                            "reason": "url_exhausted",
+                        }
                     )
         return result
 
