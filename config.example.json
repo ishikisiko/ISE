@@ -32,6 +32,13 @@
     "orchestration": {
         "_comment": "Deterministic query analysis plus official-domain resolution used by the sole agentic loop and evidence ledger.",
         "enabled": true,
+        "pricing_sources": {
+            "_comment": "Known official billing pages for deterministic workload-price retrieval. Entries stay channel-specific and are never mixed in one calculation.",
+            "glm": [
+                {"url": "https://bigmodel.cn/pricing", "channel": "domestic", "currency": "CNY"},
+                {"url": "https://docs.z.ai/guides/overview/pricing", "channel": "global", "currency": "USD"}
+            ]
+        },
         "official_domain_resolution": {
             "_comment": "Discover -> verify -> cache resolver for entity official domains. The ruling currency is structurally verifiable relations (registry homepage + homepage->repo backlink closure, Wikidata P856 + support, trusted-domain redirects into the candidate, certificate SAN coverage, facade consistency, CT-log domain age); cross-provider search voting is only a weak signal and can never rule official alone. What is cached is the relation graph, not the verdict, so ruling rules can be re-applied offline. Pinned stems (pins) win with top priority; pin_shadow_audit re-verifies pins in the background and surfaces disagreements without ever overriding the pin. Set enabled false to fall back to pins-only (legacy static-map behavior).",
             "enabled": true,
@@ -66,7 +73,7 @@
                 "domains": []
             },
             "pins": {
-                "glm": ["zhipu.cn", "bigmodel.cn", "open.bigmodel.cn"],
+                "glm": ["zhipu.cn", "bigmodel.cn", "open.bigmodel.cn", "z.ai"],
                 "kimi": ["moonshot.cn", "kimi.com", "platform.moonshot.cn"],
                 "openai": ["openai.com", "platform.openai.com"],
                 "anthropic": ["anthropic.com", "docs.anthropic.com"],
@@ -104,6 +111,7 @@
     "termination": {
         "_comment": "Single stop contract for the agentic loop. Deterministic critic and budgets cannot be overridden by the optional semantic judge.",
         "max_iterations": 5,
+        "max_synthesis_attempts": 2,
         "judge_interval": 2,
         "repeat_threshold": 2,
         "no_progress_threshold": 2,

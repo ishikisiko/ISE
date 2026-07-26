@@ -52,6 +52,23 @@ def test_analyze_query_derives_comparison_and_authority_constraints() -> None:
     assert analysis.comparison_members[1].startswith("Anthropic")
 
 
+def test_analyze_query_exposes_structured_pricing_requirements() -> None:
+    analysis = analyze_query(
+        "对于GLM5.2, 3M输入，300K输出，30M输入缓存命中的价格",
+        allow_search=True,
+    )
+
+    assert analysis.numeric_requirements["operation"] == "pricing_total"
+    assert analysis.numeric_requirements["subject"] == "GLM5.2"
+    assert analysis.numeric_requirements["quantities"]["output"]["count"] == "300000"
+    assert analysis.numeric_requirements["required_rates"] == [
+        "input",
+        "output",
+        "cached_input",
+    ]
+    assert analysis.to_dict()["numeric_requirements"]["quantities"]["input"]["count"] == "3000000"
+
+
 def test_analyze_query_blocks_unresolved_comparison() -> None:
     analysis = analyze_query("Compare it with the other one", allow_search=True)
     assert analysis.critical_ambiguity is True

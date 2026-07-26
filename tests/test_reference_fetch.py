@@ -505,6 +505,66 @@ def test_reference_router_falls_back_when_direct_fetch_body_is_too_small():
     }
 
 
+def test_reference_router_falls_back_when_long_body_misses_objective():
+    calls = []
+
+    class IncompleteExtract:
+        source_id = "parallel_extract"
+
+        def extract(self, urls, *, objective=None):
+            calls.append(self.source_id)
+            return ReferenceExtraction(
+                provider=self.source_id,
+                contents=[
+                    ReferenceContent(
+                        provider=self.source_id,
+                        requested_url=urls[0],
+                        url=urls[0],
+                        content="GLM-5.2 price row starts here " + ("x" * 900),
+                    )
+                ],
+            )
+
+    class CompleteExtract:
+        source_id = "tavily_extract"
+
+        def extract(self, urls, *, objective=None):
+            calls.append(self.source_id)
+            return ReferenceExtraction(
+                provider=self.source_id,
+                contents=[
+                    ReferenceContent(
+                        provider=self.source_id,
+                        requested_url=urls[0],
+                        url=urls[0],
+                        content="GLM-5.2 input 8, output 28, cached input 2 " + ("y" * 900),
+                    )
+                ],
+            )
+
+    def accepts_complete_tuple(content):
+        complete = all(value in content for value in ("input 8", "output 28", "cached input 2"))
+        return complete, "missing complete rate tuple" if not complete else "complete"
+
+    result = ReferenceExtractorRouter(
+        [IncompleteExtract(), CompleteExtract()],
+        min_content_chars=600,
+    ).extract(
+        "https://example.com/pricing",
+        objective="Find all GLM-5.2 rates.",
+        accept_content=accepts_complete_tuple,
+    )
+
+    assert calls == ["parallel_extract", "tavily_extract"]
+    assert result.contents[0].provider == "tavily_extract"
+    assert result.attempts[0]["reason"] == "objective_incomplete"
+    assert result.attempts[0]["detail"] == "missing complete rate tuple"
+    assert any(
+        failure.error_type == "objective_incomplete"
+        for failure in result.failures
+    )
+
+
 def test_reference_router_uses_extract_api_when_direct_fetch_raises():
     calls = []
 

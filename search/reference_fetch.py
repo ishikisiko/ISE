@@ -6,7 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from ipaddress import ip_address
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
@@ -886,6 +886,7 @@ class ReferenceExtractorRouter:
         urls: Sequence[str] | str,
         *,
         objective: Optional[str] = None,
+        accept_content: Optional[Callable[[str], Any]] = None,
         tracer: Optional[Any] = None,
         trace_step_prefix: str = "extract_api",
     ) -> ReferenceExtraction:
@@ -937,6 +938,32 @@ class ReferenceExtractorRouter:
                             error_type="insufficient_content",
                         )
                     )
+                objective_incomplete = False
+                objective_reason = ""
+                if content is not None and accept_content is not None:
+                    try:
+                        acceptance = accept_content(content.content)
+                        if isinstance(acceptance, tuple):
+                            accepted = bool(acceptance[0])
+                            objective_reason = str(
+                                acceptance[1] if len(acceptance) > 1 else ""
+                            )
+                        else:
+                            accepted = bool(acceptance)
+                    except Exception:  # noqa: BLE001 - semantic rejection should fall back
+                        accepted = False
+                        objective_reason = "validator_error"
+                    if not accepted:
+                        objective_incomplete = True
+                        content = None
+                        provider_result.contents = []
+                        provider_result.failures.append(
+                            ReferenceFailure(
+                                provider=extractor.source_id,
+                                requested_url=_safe_reference_url(url),
+                                error_type="objective_incomplete",
+                            )
+                        )
                 if tracer is not None:
                     from utils.retrieval_trace import emit_extraction_call_step
 
@@ -971,6 +998,10 @@ class ReferenceExtractorRouter:
                 }
                 if insufficient_content:
                     attempt["reason"] = "insufficient_content"
+                elif objective_incomplete:
+                    attempt["reason"] = "objective_incomplete"
+                    if objective_reason:
+                        attempt["detail"] = objective_reason[:160]
                 result.attempts.append(attempt)
                 if content:
                     result.contents.append(content)

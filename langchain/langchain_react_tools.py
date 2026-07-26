@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Mapping, Optional, Type
 
 from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -27,6 +27,7 @@ from evidence import (
     WebEvidenceSource,
     build_evidence_summary,
     classify_source,
+    normalize_entity_stem,
     provisional_entity_for_url,
     source_identity_label,
 )
@@ -744,20 +745,51 @@ class ReActFetchUrlTool(BaseTool):
 
         url_key = canonical_reference(raw_url) or raw_url
         if url_key in self._seen_urls:
-            return json.dumps(
-                {
-                    "status": "rejected",
-                    "reason": "duplicate_url",
-                    "url": url_key,
-                },
-                ensure_ascii=False,
-            )
+            exhausted_getter = getattr(router, "is_url_exhausted", None)
+            exhausted = bool(exhausted_getter(raw_url)) if callable(exhausted_getter) else False
+            outcome = {
+                "url": url_key,
+                "status": "no_data" if exhausted else "rejected",
+                "chars": 0,
+                "error_type": "url_exhausted" if exhausted else "duplicate_url",
+                "exhausted": exhausted,
+            }
+            self._last_fetch_outcomes.append(outcome)
+            payload = {
+                "status": outcome["status"],
+                "reason": outcome["error_type"],
+                "url": url_key,
+            }
+            if exhausted:
+                payload["exhausted"] = True
+            return json.dumps(payload, ensure_ascii=False)
         self._seen_urls.add(url_key)
 
         self._calls_in_run += 1
         started_at = time.perf_counter()
+        numeric_requirements = getattr(self._analysis, "numeric_requirements", None)
+        numeric_requirements = (
+            numeric_requirements
+            if isinstance(numeric_requirements, Mapping)
+            and numeric_requirements.get("operation") == "pricing_total"
+            else None
+        )
+        accept_content = None
+        if numeric_requirements:
+            from evidence.pricing_claims import (
+                pricing_content_acceptance,
+                pricing_reference_matches,
+            )
+
+            def accept_content(content: str) -> Any:
+                if not pricing_reference_matches(numeric_requirements, raw_url):
+                    return False, "missing:requested_channel"
+                return pricing_content_acceptance(content, numeric_requirements)
         try:
-            extraction = router.extract([raw_url], objective=objective or None)
+            extract_kwargs: Dict[str, Any] = {"objective": objective or None}
+            if accept_content is not None:
+                extract_kwargs["accept_content"] = accept_content
+            extraction = router.extract([raw_url], **extract_kwargs)
         except Exception as exc:  # noqa: BLE001 - surface fetch errors to the agent
             self._last_fetch_outcomes.append(
                 {
@@ -781,19 +813,35 @@ class ReActFetchUrlTool(BaseTool):
         duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
 
         if content_obj is None:
-            failure = extraction.failures[0] if extraction.failures else None
+            failure = next(
+                (
+                    item
+                    for item in extraction.failures
+                    if getattr(item, "error_type", "") == "objective_incomplete"
+                ),
+                extraction.failures[0] if extraction.failures else None,
+            )
             error_type = str(
                 getattr(failure, "error_type", "") or "no_content"
             ) if failure else "no_content"
             exhausted_getter = getattr(router, "is_url_exhausted", None)
             exhausted = bool(exhausted_getter(raw_url)) if callable(exhausted_getter) else False
+            observed_chars = max(
+                (
+                    int(attempt.get("content_chars") or 0)
+                    for attempt in extraction.attempts or []
+                    if isinstance(attempt, dict)
+                ),
+                default=0,
+            )
             self._last_fetch_outcomes.append(
                 {
                     "url": url_key,
                     "status": "no_data",
-                    "chars": 0,
+                    "chars": observed_chars,
                     "error_type": error_type,
                     "exhausted": exhausted,
+                    "attempts": list(extraction.attempts or []),
                 }
             )
             note = (
@@ -879,6 +927,7 @@ class ReActFetchUrlTool(BaseTool):
                 "status": "success",
                 "chars": len(full_text),
                 "provider": provider,
+                "attempts": list(extraction.attempts or []),
             }
         )
 
@@ -915,6 +964,61 @@ class ReActFetchUrlTool(BaseTool):
 
     def get_last_fetch_outcomes(self) -> List[Dict[str, Any]]:
         return [dict(outcome) for outcome in self._last_fetch_outcomes]
+
+    def get_pricing_source_candidates(
+        self,
+        requirements: Optional[Mapping[str, Any]] = None,
+    ) -> List[Dict[str, str]]:
+        """Return configured official price pages matching the request channel."""
+        requirements = requirements or getattr(
+            self._analysis, "numeric_requirements", None
+        )
+        if not isinstance(requirements, Mapping):
+            return []
+        subject = normalize_entity_stem(requirements.get("subject"))
+        if not subject:
+            return []
+        orchestration = self.app_config.get("orchestration") or {}
+        source_map = (
+            orchestration.get("pricing_sources")
+            if isinstance(orchestration, Mapping)
+            else None
+        )
+        if not isinstance(source_map, Mapping):
+            return []
+        raw_candidates = source_map.get(subject) or []
+        if isinstance(raw_candidates, (str, Mapping)):
+            raw_candidates = [raw_candidates]
+        requested_channel = str(requirements.get("channel") or "").strip()
+        requested_currency = str(requirements.get("currency") or "").strip()
+        candidates: List[Dict[str, str]] = []
+        seen = set()
+        for raw_candidate in raw_candidates:
+            if isinstance(raw_candidate, str):
+                candidate = {"url": raw_candidate}
+            elif isinstance(raw_candidate, Mapping):
+                candidate = {
+                    key: str(raw_candidate.get(key) or "").strip()
+                    for key in ("url", "channel", "currency")
+                }
+            else:
+                continue
+            url = canonical_reference(candidate.get("url"))
+            if not url or url in seen:
+                continue
+            if requested_channel and candidate.get("channel") != requested_channel:
+                continue
+            if requested_currency and candidate.get("currency") != requested_currency:
+                continue
+            seen.add(url)
+            candidates.append(
+                {
+                    "url": url,
+                    "channel": candidate.get("channel", ""),
+                    "currency": candidate.get("currency", ""),
+                }
+            )
+        return candidates
 
     def get_budget_status(self) -> Dict[str, int]:
         return {"limit": self.max_calls_per_query, "used": self._calls_in_run}

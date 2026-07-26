@@ -71,6 +71,7 @@ def test_shipped_config_has_only_loop_and_per_tool_budgets() -> None:
         "search_recovery": 2,
         "local_docs": 2,
     }
+    assert config["termination"]["max_synthesis_attempts"] == 2
 
 
 def test_web_tool_enforces_its_own_budget() -> None:
@@ -221,6 +222,94 @@ def test_fetch_url_does_not_retain_short_shell_as_authority() -> None:
     assert len(outcomes) == 1
     assert outcomes[0]["status"] == "no_data"
     assert outcomes[0]["chars"] == 0
+
+
+def test_fetch_url_passes_structured_pricing_acceptance_to_router() -> None:
+    class Router:
+        acceptance_results = []
+
+        @classmethod
+        def extract(cls, urls, objective=None, accept_content=None):
+            assert callable(accept_content)
+            incomplete = "GLM-5.2 pricing row " + ("x" * 700)
+            complete = """# 产品价格
+|模型名称 |上下文 (千tokens) |输入单价 (百万tokens) |输出单价 (百万tokens) |缓存存储 (百万tokens/小时) |缓存命中 (百万tokens) |
+| --- | --- | --- | --- | --- | --- |
+|GLM-5.2 |200 |8元 |28元 |1元 |2元 |"""
+            cls.acceptance_results = [
+                accept_content(incomplete),
+                accept_content(complete),
+            ]
+            return ReferenceExtraction(
+                provider="parallel_extract",
+                contents=[
+                    ReferenceContent(
+                        provider="parallel_extract",
+                        requested_url=urls[0],
+                        url=urls[0],
+                        content=complete,
+                    )
+                ],
+            )
+
+    query = "对于GLM5.2, 3M输入，300K输出，30M输入缓存命中的价格"
+    tool = ReActFetchUrlTool(config={}, min_content_chars=20)
+    tool._router = Router()
+    tool.set_analysis(analyze_query(query, allow_search=True))
+
+    result = tool._run("https://example.com/pricing", objective=query)
+
+    assert Router.acceptance_results[0][0] is False
+    assert Router.acceptance_results[1] == (True, "complete_pricing_tuple")
+    assert "GLM-5.2" in result
+
+
+def test_fetch_url_exposes_channel_filtered_configured_pricing_sources() -> None:
+    config = {
+        "orchestration": {
+            "pricing_sources": {
+                "glm": [
+                    {
+                        "url": "https://bigmodel.cn/pricing",
+                        "channel": "domestic",
+                        "currency": "CNY",
+                    },
+                    {
+                        "url": "https://docs.z.ai/guides/overview/pricing",
+                        "channel": "global",
+                        "currency": "USD",
+                    },
+                ]
+            }
+        }
+    }
+    tool = ReActFetchUrlTool(config=config)
+
+    unspecified = analyze_query(
+        "GLM5.2 的 1M 输入价格",
+        allow_search=True,
+    )
+    global_only = analyze_query(
+        "按 Z.ai 美元价格算 GLM5.2 的 1M 输入成本",
+        allow_search=True,
+    )
+
+    assert [
+        candidate["url"]
+        for candidate in tool.get_pricing_source_candidates(
+            unspecified.numeric_requirements
+        )
+    ] == [
+        "https://bigmodel.cn/pricing",
+        "https://docs.z.ai/guides/overview/pricing",
+    ]
+    assert tool.get_pricing_source_candidates(global_only.numeric_requirements) == [
+        {
+            "url": "https://docs.z.ai/guides/overview/pricing",
+            "channel": "global",
+            "currency": "USD",
+        }
+    ]
 
 
 def test_fetch_url_is_registered_with_independent_budget() -> None:

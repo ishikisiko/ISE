@@ -384,6 +384,274 @@ class TestTerminationSemantics:
             for verdict in result["verdicts"]
         )
 
+    def test_complete_pricing_tuple_forces_tool_free_decimal_synthesis(self):
+        class CompletePricingFetchTool:
+            name = "fetch_url"
+            description = "test fetch"
+
+            @staticmethod
+            def get_pricing_source_candidates(requirements=None):
+                return [
+                    {
+                        "url": "https://bigmodel.example/pricing",
+                        "channel": "domestic",
+                        "currency": "CNY",
+                    }
+                ]
+
+            @staticmethod
+            def invoke(args):
+                return "Fetched complete official pricing table [E1]."
+
+            @staticmethod
+            def get_last_evidence_records():
+                return [
+                    {
+                        "source_type": "web",
+                        "source_tier": "official",
+                        "reference": "https://bigmodel.example/pricing",
+                        "content": """# 产品价格
+|模型名称 |上下文 (千tokens) |输入单价 (百万tokens) |输出单价 (百万tokens) |缓存存储 (百万tokens/小时) |缓存命中 (百万tokens) |
+| --- | --- | --- | --- | --- | --- |
+|GLM-5.2 |200 |8元 |28元 |1元 |2元 |""",
+                        "metadata": {
+                            "eid": 1,
+                            "retrieval_kind": "fetch_url",
+                            "content_chars": 900,
+                            "source_target": "GLM5.2",
+                        },
+                    }
+                ]
+
+            @staticmethod
+            def get_last_fetch_outcomes():
+                return [
+                    {
+                        "url": "https://bigmodel.example/pricing",
+                        "status": "success",
+                        "chars": 900,
+                    }
+                ]
+
+        query = "对于GLM5.2, 3M输入，300K输出，30M输入缓存命中的价格"
+        analysis = analyze_query(query, allow_search=True)
+        model = NativeScriptedChatModel(
+            replies=[
+                _tool_call(
+                    "fetch_url",
+                    {"url": "https://bigmodel.example/pricing"},
+                )
+            ]
+        )
+        judge = ScriptedChatModel(
+            replies=['{"passes": false, "missing_constraints": ["unused"]}']
+        )
+        runner = ReactLoopGraphRunner(
+            llm=model,
+            tools=[CompletePricingFetchTool()],
+            max_iterations=5,
+            judge_llm=judge,
+            query=query,
+            analysis=analysis,
+        )
+
+        result = runner.run(query)
+
+        assert result["loop_status"] == "succeeded"
+        assert result["forced_synthesis"] is True
+        assert result["synthesis_attempts"] == 1
+        assert result["fetch_outcomes"][0]["status"] == "success"
+        assert result["iterations"] == 2
+        assert model.calls == 0
+        assert judge.calls == 0
+        assert "3×8=24 + 0.3×28=8.4 + 30×2=60" in result["answer"]
+        assert "**¥92.4**" in result["answer"]
+        assert result["verdicts"][0]["reason"] == "ready_to_synthesize"
+        assert result["verdicts"][-1]["reason"] == "constraints_satisfied"
+
+    def test_incomplete_pricing_row_returns_specific_evidence_gap(self):
+        class IncompletePricingFetchTool:
+            name = "fetch_url"
+            description = "test fetch"
+
+            @staticmethod
+            def invoke(args):
+                return "Fetched an incomplete official pricing row [E1]."
+
+            @staticmethod
+            def get_last_evidence_records():
+                return [
+                    {
+                        "source_type": "web",
+                        "source_tier": "official",
+                        "reference": "https://bigmodel.example/pricing",
+                        "content": (
+                            "# 产品价格\n输入单价 (百万tokens) 输出单价 "
+                            "(百万tokens) 缓存命中 (百万tokens)\n|GLM-5.2"
+                        ),
+                        "metadata": {
+                            "eid": 1,
+                            "retrieval_kind": "fetch_url",
+                            "content_chars": 800,
+                            "source_target": "GLM5.2",
+                        },
+                    }
+                ]
+
+            @staticmethod
+            def get_last_fetch_outcomes():
+                return [
+                    {
+                        "url": "https://bigmodel.example/pricing",
+                        "status": "no_data",
+                        "chars": 800,
+                        "error_type": "objective_incomplete",
+                        "exhausted": True,
+                    }
+                ]
+
+        query = "对于GLM5.2, 3M输入，300K输出，30M输入缓存命中的价格"
+        analysis = analyze_query(query, allow_search=True)
+        model = NativeScriptedChatModel(
+            replies=[
+                _tool_call(
+                    "fetch_url",
+                    {"url": "https://bigmodel.example/pricing"},
+                )
+            ]
+        )
+        runner = ReactLoopGraphRunner(
+            llm=model,
+            tools=[IncompletePricingFetchTool()],
+            max_iterations=1,
+            query=query,
+            analysis=analysis,
+        )
+
+        result = runner.run(query)
+
+        assert result["loop_status"] == "evidence_insufficient"
+        assert result["forced_synthesis"] is True
+        assert result["synthesis_attempts"] == 1
+        assert result["fetch_outcomes"][0]["error_type"] == "objective_incomplete"
+        assert "输入单价" in result["answer"]
+        assert "缓存命中输入单价" in result["answer"]
+        assert "迭代次数用尽" not in result["answer"]
+        assert any(
+            "pricing_rate:input" in verdict["constraints_missing"]
+            for verdict in result["verdicts"]
+        )
+
+    def test_configured_pricing_sources_fall_back_without_another_llm_turn(self):
+        class PricingFetchTool:
+            name = "fetch_url"
+            description = "test fetch"
+
+            def __init__(self):
+                self.calls = []
+                self.last_records = []
+                self.last_outcomes = []
+
+            @staticmethod
+            def get_pricing_source_candidates(requirements=None):
+                return [
+                    {"url": "https://bigmodel.example/pricing"},
+                    {"url": "https://docs.z.example/pricing"},
+                ]
+
+            def invoke(self, args):
+                url = args["url"]
+                self.calls.append(url)
+                if "bigmodel" in url:
+                    self.last_records = []
+                    self.last_outcomes = [
+                        {
+                            "url": url,
+                            "status": "no_data",
+                            "error_type": "objective_incomplete",
+                            "exhausted": True,
+                        }
+                    ]
+                    return '{"status":"no_data","error_type":"objective_incomplete"}'
+                self.last_records = [
+                    {
+                        "source_type": "web",
+                        "source_tier": "official",
+                        "reference": url,
+                        "content": """Prices per 1M tokens.
+| Model | Input | Cached Input | Cached Input Storage | Output |
+| GLM-5.2 | $1.4 | $0.26 | Limited-time Free | $4.4 |""",
+                        "metadata": {
+                            "eid": 1,
+                            "retrieval_kind": "fetch_url",
+                            "content_chars": 800,
+                            "source_target": "GLM5.2",
+                        },
+                    }
+                ]
+                self.last_outcomes = [
+                    {"url": url, "status": "success", "chars": 800}
+                ]
+                return "Fetched complete pricing [E1]."
+
+            def get_last_evidence_records(self):
+                return list(self.last_records)
+
+            def get_last_fetch_outcomes(self):
+                return list(self.last_outcomes)
+
+            def get_budget_status(self):
+                return {"limit": 2, "used": len(self.calls)}
+
+        query = "对于GLM5.2, 3M输入，300K输出，30M输入缓存命中的价格"
+        analysis = analyze_query(query, allow_search=True)
+        model = NativeScriptedChatModel(replies=["unused"])
+        tool = PricingFetchTool()
+        runner = ReactLoopGraphRunner(
+            llm=model,
+            tools=[tool],
+            max_iterations=5,
+            query=query,
+            analysis=analysis,
+        )
+
+        result = runner.run(query)
+
+        assert result["loop_status"] == "succeeded"
+        assert tool.calls == [
+            "https://bigmodel.example/pricing",
+            "https://docs.z.example/pricing",
+        ]
+        assert model.calls == 0
+        assert result["iterations"] == 3
+        assert [verdict["reason"] for verdict in result["verdicts"]] == [
+            "pricing_source_recovery",
+            "ready_to_synthesize",
+            "constraints_satisfied",
+        ]
+        assert "**$13.32**" in result["answer"]
+
+    def test_pricing_process_narration_at_budget_still_gets_synthesis(self):
+        query = "对于GLM5.2, 3M输入，300K输出，30M输入缓存命中的价格"
+        analysis = analyze_query(query, allow_search=True)
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(
+                replies=["我需要先搜索价格信息，然后我会计算并回答用户。"]
+            ),
+            tools=[],
+            max_iterations=1,
+            query=query,
+            analysis=analysis,
+        )
+
+        result = runner.run(query)
+
+        assert result["loop_status"] == "evidence_insufficient"
+        assert result["forced_synthesis"] is True
+        assert result["synthesis_attempts"] == 1
+        assert "可核验官方完整价目元组" in result["answer"]
+        assert "迭代次数用尽" not in result["answer"]
+
     def test_multi_token_entity_does_not_deadlock_official_coverage(self):
         """A single-entity query whose name tokenizes into several entities
         must not demand official coverage per token.

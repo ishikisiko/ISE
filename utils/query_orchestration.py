@@ -105,6 +105,7 @@ TRACKING_OR_SENSITIVE_QUERY_MARKERS = (
 
 DEFAULT_TERMINATION_CONFIG: Dict[str, Any] = {
     "max_iterations": 5,
+    "max_synthesis_attempts": 2,
     "judge_interval": 2,
     "repeat_threshold": 2,
     "no_progress_threshold": 2,
@@ -427,6 +428,7 @@ class QueryAnalysis:
     critical_ambiguity: bool = False
     claim_classes: List[str] = field(default_factory=list)
     constraints: Dict[str, Any] = field(default_factory=dict)
+    numeric_requirements: Dict[str, Any] = field(default_factory=dict)
     freshness: Optional[str] = None
     time_scope: Dict[str, Any] = field(default_factory=dict)
     search_allowed: bool = True
@@ -445,6 +447,7 @@ class QueryAnalysis:
             "critical_ambiguity": bool(self.critical_ambiguity),
             "claim_classes": _dedupe_strings(self.claim_classes, limit=8),
             "constraints": _safe_mapping(self.constraints),
+            "numeric_requirements": _safe_mapping(self.numeric_requirements),
             "freshness": self.freshness,
             "time_scope": _safe_mapping(self.time_scope),
             "search_allowed": bool(self.search_allowed),
@@ -509,6 +512,12 @@ def analyze_query(
     brand_candidates = _extract_brand_candidates(raw_query)
     entities = _dedupe_strings(entities + model_tokens + brand_candidates, limit=8)
 
+    # Import lazily: evidence package initialization itself uses the canonical
+    # URL helpers from this module.
+    from evidence.pricing_claims import parse_pricing_request
+
+    numeric_requirements = parse_pricing_request(raw_query, entities=entities)
+
     ambiguities: List[str] = []
     critical = False
     if has_comparison and len(comparison_members) < 2:
@@ -552,6 +561,7 @@ def analyze_query(
         critical_ambiguity=critical,
         claim_classes=_dedupe_strings(claim_classes, limit=8),
         constraints=constraints,
+        numeric_requirements=numeric_requirements,
         freshness=time_constraint.freshness if time_constraint.days else ("current" if "current" in claim_classes else None),
         time_scope={
             "days": time_constraint.days,

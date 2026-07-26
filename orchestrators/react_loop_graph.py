@@ -34,6 +34,12 @@ from utils.timing_utils import extract_token_usage
 from utils.time_parser import TimeConstraint
 from utils.workflow_trace import WorkflowTracer, ensure_tracer
 from evidence.source_verdict import is_authoritative_tier
+from evidence.pricing_claims import (
+    collect_complete_pricing_facts,
+    extract_pricing_facts,
+    pricing_answer_failures,
+    render_pricing_answer,
+)
 
 LOOP_STATUSES = (
     "succeeded",
@@ -128,6 +134,9 @@ _VERDICT_REASON_LABELS = {
     "clarification_required": "需要澄清",
     "invalid_tool_request": "工具调用格式无效",
     "process_narration": "过程性文本，继续补充",
+    "ready_to_synthesize": "证据齐备，转入综合",
+    "forced_synthesis": "检索结束，生成可交付结论",
+    "pricing_source_recovery": "切换到已配置的官方价目页",
 }
 
 
@@ -213,6 +222,7 @@ class ReactLoopGraphRunner:
         self.tools_by_name = {getattr(t, "name", ""): t for t in self.tools}
         self.max_iterations = max(1, int(max_iterations or 5))
         self.eval_cfg = normalize_termination_config(termination_config)
+        self.max_synthesis_attempts = self.eval_cfg["max_synthesis_attempts"]
         self.judge_llm = judge_llm
         self.query = query
         self.time_constraint = time_constraint
@@ -291,6 +301,21 @@ class ReactLoopGraphRunner:
             parts.append(
                 "涉及价格、数字或当前事实时必须以权威来源为依据；若搜索命中官方页面"
                 "但摘要没有所需数值，必须调用 fetch_url 阅读该页面后再回答"
+            )
+        pricing_requirements = self._pricing_requirements()
+        if pricing_requirements:
+            labels = {
+                "input": "输入",
+                "output": "输出",
+                "cached_input": "缓存命中输入",
+            }
+            required = "、".join(
+                labels.get(role, role)
+                for role in pricing_requirements.get("required_rates") or []
+            )
+            parts.append(
+                f"这是用量价格计算题；同一官方完整正文必须同时给出 {required} 的单价、"
+                "币种和计费单位，缺一不可。信息齐备后不要继续检索"
             )
         if not parts:
             return ""
@@ -644,6 +669,7 @@ class ReactLoopGraphRunner:
                 "messages": Annotated[list, add_messages],
                 "evidence_pool": List[str],
                 "evidence_records": List[Dict[str, Any]],
+                "fetch_outcomes": List[Dict[str, Any]],
                 "iteration": int,
                 "verdicts": List[Dict[str, Any]],
                 "constraints_met": List[str],
@@ -662,6 +688,10 @@ class ReactLoopGraphRunner:
                 "termination_reason": Optional[str],
                 "final_answer": Optional[str],
                 "judge_error": Optional[str],
+                "next_action": str,
+                "phase": str,
+                "synthesis_attempts": int,
+                "forced_synthesis": bool,
             },
         )
 
@@ -669,17 +699,29 @@ class ReactLoopGraphRunner:
         builder.add_node("act", self._act)
         builder.add_node("observe", self._observe)
         builder.add_node("evaluate", self._evaluate)
-        builder.add_edge(START, "act")
+        builder.add_node("synthesize", self._synthesize)
+        builder.add_node("pricing_fetch", self._pricing_fetch)
+        builder.add_edge(
+            START,
+            "pricing_fetch" if self._pricing_source_candidates() else "act",
+        )
         builder.add_conditional_edges(
             "act",
             self._route_after_act,
             {"observe": "observe", "evaluate": "evaluate"},
         )
         builder.add_edge("observe", "evaluate")
+        builder.add_edge("synthesize", "evaluate")
+        builder.add_edge("pricing_fetch", "observe")
         builder.add_conditional_edges(
             "evaluate",
             self._route_after_evaluate,
-            {"act": "act", "end": END},
+            {
+                "act": "act",
+                "pricing_fetch": "pricing_fetch",
+                "synthesize": "synthesize",
+                "end": END,
+            },
         )
         compile_kwargs: Dict[str, Any] = {}
         if checkpointer is not None:
@@ -734,6 +776,8 @@ class ReactLoopGraphRunner:
         return {
             "messages": [response],
             "iteration": iteration,
+            "phase": "loop",
+            "next_action": "evaluate",
             "last_round_new_evidence": False,
             "last_round_observations": [],
             "final_proposed": not tool_calls,
@@ -953,6 +997,234 @@ class ReactLoopGraphRunner:
             "last_round_observations": new_observations,
         }
 
+    def _pricing_source_candidates(self) -> List[Dict[str, str]]:
+        requirements = self._pricing_requirements()
+        tool = self.tools_by_name.get("fetch_url")
+        getter = getattr(tool, "get_pricing_source_candidates", None)
+        if not requirements or not callable(getter):
+            return []
+        try:
+            return [
+                dict(candidate)
+                for candidate in list(getter(requirements) or [])
+                if isinstance(candidate, dict) and candidate.get("url")
+            ]
+        except Exception:  # noqa: BLE001 - configured recovery is best effort
+            return []
+
+    def _next_pricing_source(
+        self, state: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, str]]:
+        state = state or {}
+        tool = self.tools_by_name.get("fetch_url")
+        budget_getter = getattr(tool, "get_budget_status", None)
+        if callable(budget_getter):
+            try:
+                budget = budget_getter() or {}
+                if int(budget.get("used") or 0) >= int(budget.get("limit") or 0):
+                    return None
+            except (TypeError, ValueError):
+                pass
+        attempted = {
+            canonical_reference(outcome.get("url"))
+            for outcome in list(state.get("fetch_outcomes") or [])
+            if isinstance(outcome, dict)
+        }
+        attempted.update(
+            canonical_reference(record.get("reference"))
+            for record in list(state.get("evidence_records") or [])
+            if isinstance(record, dict)
+            and str((record.get("metadata") or {}).get("retrieval_kind") or "")
+            == "fetch_url"
+        )
+        seen_fingerprints = {
+            str(value).casefold()
+            for value in list(state.get("seen_fingerprints") or [])
+        }
+        return next(
+            (
+                candidate
+                for candidate in self._pricing_source_candidates()
+                if canonical_reference(candidate.get("url")) not in attempted
+                and (
+                    "fetch_url("
+                    + canonical_reference(candidate.get("url")).casefold()
+                    + ")"
+                )
+                not in seen_fingerprints
+            ),
+            None,
+        )
+
+    def _pricing_fetch(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Call a configured official price page without spending an LLM turn."""
+        candidate = self._next_pricing_source(state)
+        if candidate is None:
+            raise RuntimeError("No unattempted configured pricing source remains.")
+        iteration = int(state.get("iteration") or 0) + 1
+        step_id = self._iteration_step_id(iteration)
+        self.tracer.begin(
+            step_id,
+            f"第 {iteration} 轮",
+            detail="正在读取已配置的官方价目页",
+        )
+        call = {
+            "name": "fetch_url",
+            "args": {
+                "url": candidate["url"],
+                "objective": self.query,
+            },
+            "id": f"call_{uuid4().hex[:12]}",
+            "type": "tool_call",
+        }
+        return {
+            "messages": [AIMessage(content="", tool_calls=[call])],
+            "iteration": iteration,
+            "phase": "loop",
+            "next_action": "observe",
+            "last_round_new_evidence": False,
+            "last_round_observations": [],
+            "final_proposed": False,
+            "invalid_tool_request": None,
+            "invalid_final_response": None,
+        }
+
+    def _pricing_requirements(self) -> Dict[str, Any]:
+        requirements = getattr(self.analysis, "numeric_requirements", None)
+        if not isinstance(requirements, dict):
+            return {}
+        if requirements.get("operation") != "pricing_total":
+            return {}
+        return requirements
+
+    def _pricing_fact_sets(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        requirements = self._pricing_requirements()
+        if not requirements:
+            return []
+        records = [
+            record
+            for record in list(state.get("evidence_records") or [])
+            if isinstance(record, dict)
+        ]
+        return collect_complete_pricing_facts(records, requirements)
+
+    def _pricing_missing_constraints(self, state: Dict[str, Any]) -> List[str]:
+        requirements = self._pricing_requirements()
+        if not requirements or self._pricing_fact_sets(state):
+            return []
+
+        official_fetches = [
+            record
+            for record in list(state.get("evidence_records") or [])
+            if isinstance(record, dict)
+            and str(record.get("source_tier") or "").casefold() == "official"
+            and str((record.get("metadata") or {}).get("retrieval_kind") or "")
+            == "fetch_url"
+        ]
+        candidates = [
+            extract_pricing_facts(record.get("content"), requirements)
+            for record in official_fetches
+        ]
+        best = max(
+            candidates,
+            key=lambda item: len((item or {}).get("rates") or {}),
+            default={},
+        )
+        gaps = [
+            f"pricing_rate:{role}"
+            for role in requirements.get("required_rates") or []
+            if role not in (best.get("rates") or {})
+        ]
+        if not official_fetches:
+            gaps.append("pricing_source:official_fetched_text")
+        if not best.get("currency"):
+            gaps.append("pricing_currency")
+        if not best.get("per_tokens"):
+            gaps.append("pricing_billing_unit")
+        if best.get("currency_matches") is False:
+            gaps.append("pricing_currency_mismatch")
+        return list(dict.fromkeys(gaps))
+
+    def _pricing_insufficient_answer(self, state: Dict[str, Any]) -> str:
+        requirements = self._pricing_requirements()
+        subject = str(requirements.get("subject") or "该模型")
+        role_labels = {
+            "input": "输入单价",
+            "output": "输出单价",
+            "cached_input": "缓存命中输入单价",
+        }
+        missing = [
+            role_labels.get(gap.split(":", 1)[1], gap)
+            for gap in self._pricing_missing_constraints(state)
+            if gap.startswith("pricing_rate:")
+        ]
+        records = [
+            record
+            for record in list(state.get("evidence_records") or [])
+            if isinstance(record, dict) and is_authoritative_tier(record.get("source_tier"))
+        ]
+        raw_eid = next(
+            (
+                (record.get("metadata") or {}).get("eid")
+                for record in records
+                if (record.get("metadata") or {}).get("eid")
+            ),
+            None,
+        )
+        if isinstance(raw_eid, int) and not isinstance(raw_eid, bool) and raw_eid > 0:
+            eid = f"E{raw_eid}"
+        else:
+            eid = str(raw_eid or "").strip()
+        citation = f" [{eid}]" if re.fullmatch(r"E\d+", eid) else ""
+        if records:
+            first = (
+                f"已找到 {subject} 的权威相关页面，但抓取到的正文没有形成可核验的完整价目元组"
+                f"{citation}。"
+            )
+        else:
+            first = f"现有证据中没有 {subject} 的可核验官方完整价目元组。"
+        detail = "、".join(missing) if missing else "币种或计费单位"
+        return (
+            first
+            + f"当前仍缺少：{detail}。为避免把不同渠道或不同币种的费率混算，本次不输出猜测总价。"
+        )
+
+    def _synthesize(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Produce a tool-free deliverable after retrieval is ready or exhausted."""
+        iteration = int(state.get("iteration") or 0) + 1
+        attempt = int(state.get("synthesis_attempts") or 0) + 1
+        step_id = self._iteration_step_id(iteration)
+        self.tracer.begin(step_id, f"第 {iteration} 轮", detail="正在综合已核验证据")
+        fact_sets = self._pricing_fact_sets(state)
+        if fact_sets:
+            answer = render_pricing_answer(self._pricing_requirements(), fact_sets)
+            detail = "已完成确定性价格计算"
+        else:
+            answer = self._pricing_insufficient_answer(state)
+            detail = "已生成证据不足说明"
+        self.tracer.end(
+            step_id,
+            detail=detail,
+            items=[{"label": "工具调用", "value": "无"}],
+            status="done",
+        )
+        return {
+            "messages": [AIMessage(content=answer)],
+            "iteration": iteration,
+            "phase": "synthesis",
+            "synthesis_attempts": attempt,
+            "forced_synthesis": True,
+            "next_action": "evaluate",
+            "final_proposed": True,
+            "invalid_tool_request": None,
+            "invalid_final_response": None,
+            # Synthesis is a new candidate, not another failed retrieval round.
+            "last_round_new_evidence": True,
+            "last_round_observations": [],
+            "fingerprint_streak": 0,
+            "no_progress_streak": 0,
+        }
+
     def _tool_result_message(self, call: Dict[str, Any], content: str) -> Any:
         """Wrap a tool result for the conversation; HumanMessage in shim mode."""
         if self._use_native_tools:
@@ -1073,6 +1345,7 @@ class ReactLoopGraphRunner:
         should_judge = (
             self.judge_llm is not None
             and bool(draft.strip())
+            and not bool(self._pricing_requirements())
             and not invalid_tool_request
             and not invalid_final_response
             and preliminary.action != TerminationAction.CLARIFY
@@ -1093,8 +1366,37 @@ class ReactLoopGraphRunner:
         context.judge_error = judge_error
         decision = evaluate_termination(context)
 
+        pricing_requirements = self._pricing_requirements()
+        pricing_ready = bool(self._pricing_fact_sets(state))
+        pricing_source = self._next_pricing_source(state)
+        pricing_recovery = bool(
+            pricing_requirements
+            and not pricing_ready
+            and pricing_source
+            and str(state.get("phase") or "loop") == "loop"
+            and decision.action != TerminationAction.CLARIFY
+        )
+        terminal_without_answer = decision.action in {
+            TerminationAction.EXHAUSTED,
+            TerminationAction.STAGNATED,
+            TerminationAction.UNRECOVERABLE,
+            TerminationAction.RETURN_INSUFFICIENT,
+        }
+        force_synthesis = bool(
+            pricing_requirements
+            and not pricing_recovery
+            and str(state.get("phase") or "loop") == "loop"
+            and int(state.get("synthesis_attempts") or 0)
+            < self.max_synthesis_attempts
+            and (pricing_ready or terminal_without_answer)
+        )
+
         reason = decision.reason
-        if invalid_tool_request:
+        if pricing_recovery:
+            reason = "pricing_source_recovery"
+        elif force_synthesis:
+            reason = "ready_to_synthesize" if pricing_ready else "forced_synthesis"
+        elif invalid_tool_request:
             reason = "invalid_tool_request"
         elif invalid_final_response:
             reason = "process_narration"
@@ -1110,13 +1412,27 @@ class ReactLoopGraphRunner:
             new_evidence=bool(state["last_round_new_evidence"]),
             constraints_met=list(decision.constraints_met),
             constraints_missing=list(decision.missing_constraints),
-            should_continue=decision.should_continue,
+            should_continue=(
+                True
+                if pricing_recovery or force_synthesis
+                else decision.should_continue
+            ),
             reason=reason,
             judge_used=decision.judge_used,
             judge_error=decision.judge_error,
-            action=decision.action.value,
+            action=(
+                "pricing_fetch"
+                if pricing_recovery
+                else "synthesize"
+                if force_synthesis
+                else decision.action.value
+            ),
             deterministic_pass=decision.deterministic_pass,
-            hard_stop=decision.hard_stop,
+            hard_stop=(
+                False
+                if pricing_recovery or force_synthesis
+                else decision.hard_stop
+            ),
             failure_types=list(decision.failure_types),
             rule_hits=list(decision.rule_hits),
             evidence_sufficiency=decision.evidence_sufficiency,
@@ -1131,7 +1447,11 @@ class ReactLoopGraphRunner:
 
         termination_reason: Optional[str] = None
         final_answer: Optional[str] = None
-        if decision.action == TerminationAction.RETURN:
+        if pricing_recovery:
+            update["next_action"] = "pricing_fetch"
+        elif force_synthesis:
+            update["next_action"] = "synthesize"
+        elif decision.action == TerminationAction.RETURN:
             termination_reason = "succeeded"
             final_answer = draft
         elif decision.action in {
@@ -1181,6 +1501,12 @@ class ReactLoopGraphRunner:
 
         update["termination_reason"] = termination_reason
         update["final_answer"] = final_answer
+        if not pricing_recovery and not force_synthesis:
+            update["next_action"] = "end" if termination_reason else (
+                "synthesize"
+                if str(state.get("phase") or "loop") == "synthesis"
+                else "act"
+            )
         update["verdicts"] = list(state["verdicts"]) + [verdict.to_dict()]
         self._trace_verdict(iteration, verdict)
         return update
@@ -1299,12 +1625,19 @@ class ReactLoopGraphRunner:
             or "current" in claim_classes
         )
         try:
-            return check_citations(
+            failures = check_citations(
                 draft,
                 records,
                 requires_official_pricing=requires_official_pricing,
                 temporal_required=temporal_required,
             )
+            requirements = self._pricing_requirements()
+            fact_sets = self._pricing_fact_sets(state)
+            if requirements and fact_sets:
+                failures.extend(
+                    pricing_answer_failures(draft, requirements, fact_sets)
+                )
+            return failures
         except Exception:  # noqa: BLE001 - citation check must not break the loop
             return []
 
@@ -1387,8 +1720,14 @@ class ReactLoopGraphRunner:
                 and str((record.get("metadata") or {}).get("source_target") or "").strip()
             }
         )
+        pricing_gaps = self._pricing_missing_constraints(state)
+        constraints_missing = list(
+            dict.fromkeys(list(constraints_missing) + pricing_gaps)
+        )
+        phase = str(state.get("phase") or "loop")
+        synthesis_attempts = int(state.get("synthesis_attempts") or 0)
         return TerminationContext(
-            phase="loop",
+            phase=phase,
             requires_evidence=requires_evidence,
             final_proposed=final_proposed,
             answer=draft,
@@ -1426,10 +1765,19 @@ class ReactLoopGraphRunner:
             repeat_threshold=self.eval_cfg["repeat_threshold"],
             no_progress_threshold=self.eval_cfg["no_progress_threshold"],
             tool_error_threshold=self.eval_cfg["tool_error_threshold"],
-            can_continue=self._has_remaining_tool_budget(),
+            can_continue=(
+                self._has_remaining_tool_budget()
+                if phase == "loop"
+                else synthesis_attempts < self.max_synthesis_attempts
+                and not pricing_gaps
+            ),
             budget=CriticBudgetState(
                 iteration=int(state.get("iteration") or 0),
-                max_iterations=self.max_iterations,
+                max_iterations=(
+                    self.max_iterations
+                    if phase == "loop"
+                    else self.max_iterations + self.max_synthesis_attempts + 1
+                ),
             ),
         )
 
@@ -1443,7 +1791,14 @@ class ReactLoopGraphRunner:
 
     @staticmethod
     def _route_after_evaluate(state: Dict[str, Any]) -> str:
-        return "end" if state.get("termination_reason") else "act"
+        if state.get("termination_reason"):
+            return "end"
+        action = str(state.get("next_action") or "act")
+        return (
+            action
+            if action in {"act", "pricing_fetch", "synthesize"}
+            else "act"
+        )
 
     # ------------------------------------------------------------------
     # Evaluation helpers
@@ -1605,6 +1960,10 @@ class ReactLoopGraphRunner:
             "termination_reason": None,
             "final_answer": None,
             "judge_error": None,
+            "next_action": "act",
+            "phase": "loop",
+            "synthesis_attempts": 0,
+            "forced_synthesis": False,
         }
 
     def _build_followup_state_input(
@@ -1641,6 +2000,10 @@ class ReactLoopGraphRunner:
             "termination_reason": None,
             "final_answer": None,
             "judge_error": None,
+            "next_action": "act",
+            "phase": "loop",
+            "synthesis_attempts": 0,
+            "forced_synthesis": False,
         }
 
     def _compute_message_removals(self, graph: Any, config: Dict[str, Any]) -> List[Any]:
@@ -1706,7 +2069,11 @@ class ReactLoopGraphRunner:
                 checkpointer = mgr.saver
         graph = self.build_graph(checkpointer=checkpointer)
 
-        config: Dict[str, Any] = {"recursion_limit": self.max_iterations * 4 + 10}
+        config: Dict[str, Any] = {
+            "recursion_limit": (
+                self.max_iterations + self.max_synthesis_attempts
+            ) * 4 + 10
+        }
         resume = False
         if conversation_id and checkpointer and mgr is not None:
             config["configurable"] = {"thread_id": str(conversation_id)}
@@ -1737,6 +2104,9 @@ class ReactLoopGraphRunner:
             "judge_error": final_state.get("judge_error"),
             "search_hits": [],
             "evidence_records": list(final_state.get("evidence_records") or []),
+            "fetch_outcomes": list(final_state.get("fetch_outcomes") or []),
+            "synthesis_attempts": int(final_state.get("synthesis_attempts") or 0),
+            "forced_synthesis": bool(final_state.get("forced_synthesis")),
             "conversation_resumed": resume,
         }
         trace_events, trace_truncated = self._trace_events()

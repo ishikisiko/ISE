@@ -240,6 +240,9 @@ class ReactAgentOrchestrator:
             "clarification_required": "需要澄清",
             "invalid_tool_request": "工具调用格式无效",
             "process_narration": "过程性文本，继续补充",
+            "ready_to_synthesize": "证据齐备，转入综合",
+            "forced_synthesis": "检索结束，生成可交付结论",
+            "pricing_source_recovery": "切换到已配置的官方价目页",
         }
         verdict_items = [
             {
@@ -351,6 +354,11 @@ class ReactAgentOrchestrator:
             "loop_iterations": loop_result.get("iterations"),
             "loop_verdicts": list(loop_result.get("verdicts") or []),
             "loop_termination_reason": loop_result.get("termination_reason"),
+            "loop_fetch_outcomes": list(loop_result.get("fetch_outcomes") or []),
+            "loop_synthesis_attempts": int(
+                loop_result.get("synthesis_attempts") or 0
+            ),
+            "loop_forced_synthesis": bool(loop_result.get("forced_synthesis")),
             "react_trace": list(loop_result.get("trace_events") or []),
             "react_trace_truncated": bool(loop_result.get("trace_truncated")),
             "final_executor": "agentic_loop",
@@ -363,6 +371,12 @@ class ReactAgentOrchestrator:
             "skill_tools_used": skill_tools_used,
             "termination_policy": {
                 "max_iterations": self.max_iterations,
+                "max_synthesis_attempts": int(
+                    (self.config.get("termination") or {}).get(
+                        "max_synthesis_attempts", 2
+                    )
+                    or 2
+                ),
                 "judge_interval": int(
                     (self.config.get("termination") or {}).get("judge_interval", 2) or 2
                 ),
