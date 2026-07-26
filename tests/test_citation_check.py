@@ -94,3 +94,33 @@ def test_citation_marker_does_not_count_as_number():
     records = [_record(12, tier="official", fetched=True)]
     answer = "官方输入价 ¥2.60 [E12]。"
     assert check_citations(answer, records, requires_official_pricing=True) == []
+
+
+def test_version_digits_in_product_name_do_not_demand_citation():
+    # "K2.7" leaked a bare "7" through the number regex, so a pure lead-in
+    # sentence with no claim in it was reported as an uncited numeric claim.
+    records = [_record(1, tier="official", fetched=True)]
+    answer = "根据 Kimi 官方定价页面，Kimi K2.7 Code HighSpeed 的价格如下（每 1M tokens）："
+    assert check_citations(answer, records, requires_official_pricing=True) == []
+
+
+def test_real_numbers_still_require_citation_alongside_version_names():
+    records = [_record(1, tier="official", fetched=True)]
+    answer = "Kimi K2.7 Code HighSpeed 的输出价格是 ¥54.00。"
+    failures = check_citations(answer, records, requires_official_pricing=True)
+    assert any(f["type"] == "citation_missing" for f in failures)
+
+
+def test_unofficial_figure_labelled_as_unverified_is_accepted():
+    # The failure's own detail offers "或明确标注该数值未经官方核实" as the
+    # remedy, so an explicitly hedged third-party figure must pass.
+    records = [_record(1, tier="official", fetched=True), _record(2, tier="unknown", fetched=False)]
+    answer = "第三方平台列出 $1.90 / 1M tokens [E2]，该数据未经官方确认，仅供参考。"
+    assert check_citations(answer, records, requires_official_pricing=True) == []
+
+
+def test_unofficial_figure_without_hedge_is_still_rejected():
+    records = [_record(1, tier="official", fetched=True), _record(2, tier="unknown", fetched=False)]
+    answer = "输入价格为 $1.90 / 1M tokens [E2]。"
+    failures = check_citations(answer, records, requires_official_pricing=True)
+    assert any(f["type"] == "citation_not_authoritative" for f in failures)

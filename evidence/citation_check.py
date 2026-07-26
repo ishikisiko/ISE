@@ -34,6 +34,20 @@ _PRICING_CUES_RE = re.compile(
     re.IGNORECASE,
 )
 _DATE_KEYS = ("retrieved_at", "published_at")
+# Alphanumeric runs such as ``K2.7``, ``GPT-4`` or ``1M``. A digit welded to
+# letters is part of a product name or a unit, not a claim: ``K2.7`` otherwise
+# leaks a bare ``7`` and makes every lead-in sentence look like an uncited
+# numeric claim. Pure-digit runs (``2.60``, ``262``, ``144``) are untouched.
+_ALNUM_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*")
+# An explicit "this figure is not official" hedge. ``citation_not_authoritative``
+# offers this as the alternative to citing an official source, so the check has
+# to actually honour it; otherwise a correctly-labelled third-party figure is
+# rejected forever and the loop stagnates.
+_UNVERIFIED_HEDGE_RE = re.compile(
+    r"未经官方|未经核实|未获官方|非官方|官方未|第三方|仅供参考|供参考|"
+    r"unverified|unconfirmed|not\s+official|third[-\s]?party",
+    re.IGNORECASE,
+)
 
 
 def _is_fetched(record: Dict[str, Any]) -> bool:
@@ -72,8 +86,20 @@ def _eid_map(records: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
     return mapping
 
 
+def _strip_identifier_tokens(text: str) -> str:
+    """Blank out alphanumeric identifiers so version digits are not claims."""
+
+    def replace(match: "re.Match[str]") -> str:
+        token = match.group(0)
+        if any(ch.isalpha() for ch in token) and any(ch.isdigit() for ch in token):
+            return " "
+        return token
+
+    return _ALNUM_TOKEN_RE.sub(replace, text)
+
+
 def _significant_numbers(sentence: str) -> List[str]:
-    body = _CITATION_RE.sub(" ", sentence)
+    body = _strip_identifier_tokens(_CITATION_RE.sub(" ", sentence))
     return [
         token
         for token in _NUMBER_RE.findall(body)
@@ -150,6 +176,10 @@ def check_citations(
             # All local citations were hallucinated; already reported above.
             continue
         if not any(is_authoritative_tier(r.get("source_tier")) for r in local_records):
+            if _UNVERIFIED_HEDGE_RE.search(sentence):
+                # Explicitly labelled as unofficial: the reader is not misled,
+                # which is exactly the remedy this failure's detail asks for.
+                continue
             failures.append(
                 {
                     "type": "citation_not_authoritative",

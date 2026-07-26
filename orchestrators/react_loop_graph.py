@@ -64,6 +64,27 @@ _TEXTUAL_TOOL_ERRORS = (
     "tool error:",
     "tool failed:",
 )
+
+# Failures that only more evidence can close. Everything else the critic can
+# emit (citation markers, judge-detected mismatches between a figure and the
+# source it cites, an omitted comparison member) is fixed by editing the draft,
+# so the rejection message must not send the model back to the tools for them.
+_RETRIEVAL_FIXABLE_FAILURES = frozenset(
+    {
+        "acknowledged_insufficient_information",
+        "authority_policy_not_met",
+        "citation_needs_official_source",
+        "comparison_coverage_missing",
+        "missing_comparison_coverage",
+        "missing_time_constraint",
+        "needs_multi_hop_reasoning",
+        "no_evidence",
+        "search_unavailable",
+        "target_official_coverage_missing",
+        "target_official_pricing_coverage_missing",
+        "temporal_coverage_missing",
+    }
+)
 _TRACE_EVENT_LIMIT = 40
 _PROCESS_NARRATION_MARKERS = (
     "用户要求",
@@ -1154,17 +1175,8 @@ class ReactLoopGraphRunner:
                 )
             ]
         elif final_proposed and decision.should_continue:
-            rejected = list(decision.missing_constraints) or ["semantic_sufficiency"]
-            fetch_instruction = self._official_fetch_instruction(state)
             update["messages"] = [
-                HumanMessage(
-                    content=(
-                        "你的回答尚未满足以下约束："
-                        + "、".join(rejected)
-                        + "。"
-                        + fetch_instruction
-                    )
-                )
+                HumanMessage(content=self._rejection_message(state, decision))
             ]
 
         update["termination_reason"] = termination_reason
@@ -1172,6 +1184,46 @@ class ReactLoopGraphRunner:
         update["verdicts"] = list(state["verdicts"]) + [verdict.to_dict()]
         self._trace_verdict(iteration, verdict)
         return update
+
+    def _rejection_message(self, state: Dict[str, Any], decision: Any) -> str:
+        """Tell the model what to change, in terms it can act on.
+
+        The critic already produces model-facing rule details ("这句话包含具体
+        数值却没有标注来源编号 [En]"). Feeding back ``missing_constraints``
+        instead echoed machine labels built from the model's own sentences
+        (``citation_missing:根据 Kimi 官方定价页面...``), which said nothing
+        actionable. Paired with an unconditional fetch nudge, the model kept
+        re-running retrieval when the actual fix was to edit the answer.
+        """
+        details: List[str] = []
+        for hit in list(getattr(decision, "rule_hits", None) or []):
+            detail = str((hit or {}).get("detail") or "").strip()
+            if detail and detail not in details:
+                details.append(detail)
+        if not details:
+            details = [
+                str(constraint)
+                for constraint in list(decision.missing_constraints)[:6]
+            ] or ["semantic_sufficiency"]
+
+        failure_types = [str(value) for value in (decision.failure_types or [])]
+        needs_retrieval = any(
+            value in _RETRIEVAL_FIXABLE_FAILURES
+            or value.startswith("constraint_missing:")
+            for value in failure_types
+        )
+        closing = (
+            self._official_fetch_instruction(state)
+            if needs_retrieval
+            else
+            # Nothing here is fixed by more evidence: the draft must be edited
+            # so each figure matches the source it cites. Sending the model
+            # back to the tools burns budget and stagnates the loop instead of
+            # returning the answer it already has.
+            "请直接修改答案本身：让每个数值与其引用的证据严格对应，必要时补全或"
+            "更换 [En] 标注；不要再调用检索工具。"
+        )
+        return "你的回答尚未通过校验：" + "；".join(details[:6]) + "。" + closing
 
     def _official_fetch_instruction(self, state: Dict[str, Any]) -> str:
         """Suggest fetching an unfetched authoritative hit, or steer away from
@@ -1315,14 +1367,18 @@ class ReactLoopGraphRunner:
         )
         claim_classes = set(getattr(self.analysis, "claim_classes", None) or [])
         authority_required = bool(analysis_constraints.get("authority_required"))
+        # Per-target official coverage only means something for an explicit
+        # comparison: ``comparison_members`` is the curated list of things the
+        # answer must cover one by one. ``analysis.entities`` is a token bag
+        # ("Kimi K2.7 Code HighSpeed" -> K2.7 / Kimi / Code / HighSpeed) while
+        # ``source_target`` can only ever name the single entity that owns the
+        # domain, so requiring coverage per token is unsatisfiable and starves
+        # the loop into stagnation. A single-entity query still gets authority
+        # enforcement from the ``authority`` policy and, for pricing, from the
+        # citation check's official + full-fetch requirement.
         official_targets: List[str] = []
         if authority_required:
-            official_targets = list(
-                dict.fromkeys(
-                    list(comparison_members)
-                    + list(getattr(self.analysis, "entities", None) or [])
-                )
-            )
+            official_targets = list(dict.fromkeys(comparison_members))
         covered_official_entities = sorted(
             {
                 str((record.get("metadata") or {}).get("source_target") or "").strip()

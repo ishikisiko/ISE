@@ -384,6 +384,147 @@ class TestTerminationSemantics:
             for verdict in result["verdicts"]
         )
 
+    def test_multi_token_entity_does_not_deadlock_official_coverage(self):
+        """A single-entity query whose name tokenizes into several entities
+        must not demand official coverage per token.
+
+        ``analysis.entities`` for "Kimi K2.7 Code HighSpeed" is a token bag,
+        while ``source_target`` can only name the one entity that owns the
+        domain. Requiring coverage for every token made the gate unsatisfiable
+        and starved the loop into stagnation with no answer at all.
+        """
+
+        class OfficialFetchTool:
+            name = "fetch_url"
+            description = "test fetch"
+
+            @staticmethod
+            def invoke(args):
+                return "Kimi 官方定价页：输出价格 ¥54.00 / 1M tokens。"
+
+            @staticmethod
+            def get_last_evidence_records():
+                return [
+                    {
+                        "source_type": "web",
+                        "source_tier": "official",
+                        "reference": "https://platform.kimi.example/docs/pricing",
+                        "content": "Kimi 官方定价页：输出价格 ¥54.00 / 1M tokens。",
+                        "metadata": {
+                            "eid": 1,
+                            "retrieval_kind": "fetch_url",
+                            "content_chars": 900,
+                            "source_target": "Kimi",
+                        },
+                    }
+                ]
+
+        analysis = QueryAnalysis(
+            query="Kimi K2.7 Code HighSpeed 的价格是多少？",
+            entities=["K2.7", "Kimi", "Code", "HighSpeed"],
+            claim_classes=["numeric", "pricing"],
+            constraints={"authority_required": True},
+            requires_evidence=True,
+        )
+        draft = "Kimi K2.7 Code HighSpeed 输出价格为 ¥54.00 / 1M tokens [E1]。"
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(
+                replies=[
+                    _tool_call(
+                        "fetch_url",
+                        {"url": "https://platform.kimi.example/docs/pricing"},
+                    ),
+                    draft,
+                ]
+            ),
+            tools=[OfficialFetchTool()],
+            max_iterations=6,
+            query=analysis.query,
+            analysis=analysis,
+        )
+
+        result = runner.run(analysis.query)
+
+        assert result["loop_status"] == "succeeded"
+        assert result["answer"] == draft
+        assert all(
+            not any(
+                str(constraint).startswith("official:")
+                for constraint in verdict["constraints_missing"]
+            )
+            for verdict in result["verdicts"]
+        )
+
+    def test_comparison_member_without_official_evidence_is_gated(self):
+        """Per-target official coverage still applies to explicit comparison
+        members, which is the case the gate was written for."""
+
+        class OfficialFetchTool:
+            name = "fetch_url"
+            description = "test fetch"
+
+            @staticmethod
+            def invoke(args):
+                return "Acme 官方价格页：API 调用 $0.50 per 1M tokens。"
+
+            @staticmethod
+            def get_last_evidence_records():
+                return [
+                    {
+                        "source_type": "web",
+                        "source_tier": "official",
+                        "reference": "https://docs.acme.example/pricing",
+                        "content": "Acme 官方价格页：API 调用 $0.50 per 1M tokens。",
+                        "metadata": {
+                            "eid": 1,
+                            "retrieval_kind": "fetch_url",
+                            "content_chars": 800,
+                            "source_target": "Acme",
+                        },
+                    }
+                ]
+
+        analysis = QueryAnalysis(
+            query="对比 Acme 和 Zeta 的价格",
+            entities=["Acme", "Zeta"],
+            comparison_members=["Acme", "Zeta"],
+            claim_classes=["numeric", "pricing"],
+            constraints={"authority_required": True},
+            requires_evidence=True,
+        )
+        draft = "Acme 的价格为 $0.50 per 1M tokens [E1]，Zeta 暂无官方数据。"
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(
+                replies=[
+                    _tool_call(
+                        "fetch_url",
+                        {"url": "https://docs.acme.example/pricing"},
+                    ),
+                    draft,
+                    draft,
+                    draft,
+                    draft,
+                ]
+            ),
+            tools=[OfficialFetchTool()],
+            max_iterations=4,
+            termination_config={"no_progress_threshold": 2},
+            query=analysis.query,
+            analysis=analysis,
+        )
+
+        result = runner.run(analysis.query)
+
+        assert result["loop_status"] != "succeeded"
+        assert any(
+            "official:Zeta" in verdict["constraints_missing"]
+            for verdict in result["verdicts"]
+        )
+        assert all(
+            "official:Acme" not in verdict["constraints_missing"]
+            for verdict in result["verdicts"]
+        )
+
     def test_numeric_claim_without_citation_is_rejected(self):
         """A numeric claim with no [En] marker at all must surface a
         citation_missing gap rather than passing via pool string inclusion."""
