@@ -234,6 +234,7 @@ def test_extract_llm_stats_sums_tokens_and_counts_capture_rate() -> None:
         "input_tokens": 10,
         "output_tokens": 5,
         "total_tokens": 15,
+        "peak_input_tokens": 10,
     }
 
 

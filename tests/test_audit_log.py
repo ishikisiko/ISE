@@ -89,6 +89,31 @@ def test_build_record_tolerates_missing_result_keys() -> None:
     assert "control" not in record
 
 
+def test_compaction_trace_event_is_kept_in_audit_steps() -> None:
+    event = {
+        "seq": 4,
+        "id": "react_compact_1",
+        "title": "上下文压缩",
+        "status": "done",
+        "items": [
+            {"label": "消息", "value": "10 -> 6"},
+            {"label": "预算", "value": "9000/128000 -> 3200/128000"},
+            {"label": "summary_source", "value": "deterministic"},
+        ],
+    }
+    record = build_audit_record(
+        conversation_id="compaction",
+        query="compact this thread",
+        allow_search=True,
+        events=[event],
+        result={"control": {"compactions": 1, "peak_context_ratio": 0.8}},
+    )
+
+    assert record["steps"][0]["id"] == "react_compact_1"
+    assert record["steps"][0]["items"] == event["items"]
+    assert record["control"]["compactions"] == 1
+
+
 def test_recorder_truncates_and_honors_include_answer(tmp_path: Path) -> None:
     recorder = AuditRecorder(
         str(tmp_path),

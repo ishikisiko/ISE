@@ -581,6 +581,34 @@ def rename_conversation(conversation_id: str) -> Any:
     return jsonify({"conversation_id": cid, "title": title, "custom_title": True})
 
 
+@app.post("/api/conversation/<conversation_id>/compact")
+def compact_conversation(conversation_id: str) -> Any:
+    """Manually compact one persisted ReAct checkpoint without starting a turn."""
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return jsonify({"error": "conversation_id is required"}), 400
+    manager = _conversation_manager()
+    if not manager.has_checkpoint(cid):
+        return jsonify({"error": "Conversation checkpoint not found"}), 404
+    lock = _conversation_lock(cid)
+    assert lock is not None
+    lock.acquire()
+    try:
+        pipeline = build_pipeline()
+        get_loop = getattr(pipeline, "_get_loop_orchestrator", None)
+        loop = get_loop() if callable(get_loop) else None
+        compact = getattr(loop, "compact_conversation", None)
+        result = compact(cid) if callable(compact) else None
+    except Exception as exc:  # noqa: BLE001 - return a useful API failure
+        print(f"[server] compact_conversation failed: {exc}")
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        lock.release()
+    if result is None:
+        return jsonify({"error": "Conversation checkpoint could not be compacted"}), 500
+    return jsonify({"conversation_id": cid, **result})
+
+
 
 def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and normalize an answer request payload.

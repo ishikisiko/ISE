@@ -70,6 +70,7 @@ def test_shipped_config_has_only_loop_and_per_tool_budgets() -> None:
         "fetch_url": 3,
         "search_recovery": 2,
         "local_docs": 2,
+        "recall_evidence": 3,
     }
     assert config["termination"]["max_synthesis_attempts"] == 2
 

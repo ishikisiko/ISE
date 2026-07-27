@@ -1,5 +1,5 @@
-"""Tests for conversation resume: checkpointer state retention, message
-trimming, conversation store CRUD, and follow-up intent classification.
+"""Tests for conversation resume: checkpoint state retention, context
+compaction boundaries, conversation store CRUD, and follow-up intent classification.
 All tests use scripted fake models/tools and a temporary SQLite database; no
 real LLM or search backend is required.
 """
@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from orchestrators import conversation_store
 from orchestrators.conversation_store import ConversationManager, reset_conversation_manager
 from orchestrators.react_loop_graph import ReactLoopGraphRunner, langgraph_available
+from orchestrators.context_compaction import assert_tool_call_pairing
 
 pytestmark = pytest.mark.skipif(not langgraph_available(), reason="langgraph not installed")
 
@@ -169,6 +170,10 @@ class TestFollowupStateInput:
         assert inp["final_proposed"] is False
         assert inp["termination_reason"] is None
         assert inp["final_answer"] is None
+        assert inp["compactions"] == 0
+        assert inp["tokens_at_last_compaction"] == 0
+        assert inp["compaction_blocked"] is False
+        assert inp["peak_context_ratio"] == 0.0
 
     def test_feedback_message_appended(self):
         runner = _runner(["x"], [])
@@ -178,38 +183,30 @@ class TestFollowupStateInput:
         assert isinstance(last, HumanMessage)
         assert last.content == "精简一点"
 
-    def test_trimming_only_targets_tool_messages(self):
+    def test_followup_keeps_native_tool_turns_paired(self):
+        runner = ReactLoopGraphRunner(
+            llm=ScriptedChatModel(replies=["x"]),
+            tools=[],
+        )
+        msgs = [
+            HumanMessage(content="user1", id="u1"),
+            _tool_call("web_search", call_id="t1"),
+            ToolMessage(content="obs1", tool_call_id="t1", id="m1"),
+            AIMessage(content="final", id="a1"),
+        ]
+        graph = self._fake_graph_with_messages(msgs)
+        inp = runner._build_followup_state_input(graph, {}, "继续")
+        assert len(inp["messages"]) == 1
+        assert_tool_call_pairing(msgs)
+
+    def test_history_window_is_not_a_message_trimming_control(self):
         runner = ReactLoopGraphRunner(
             llm=ScriptedChatModel(replies=["x"]),
             tools=[],
             history_window=1,
         )
-        msgs = [
-            HumanMessage(content="user1", id="u1"),
-            ToolMessage(content="obs1", tool_call_id="t1", id="m1"),
-            ToolMessage(content="obs2", tool_call_id="t2", id="m2"),
-            ToolMessage(content="obs3", tool_call_id="t3", id="m3"),
-            ToolMessage(content="obs4", tool_call_id="t4", id="m4"),
-            AIMessage(content="final", id="a1"),
-        ]
-        graph = self._fake_graph_with_messages(msgs)
-        removals = runner._compute_message_removals(graph, {})
-        # Only ToolMessages are trimmable; the AIMessage and HumanMessage survive.
-        removed_ids = [r.id for r in removals]
-        assert "a1" not in removed_ids
-        assert "u1" not in removed_ids
-        assert len(removed_ids) >= 1
-        assert all(rid.startswith("m") for rid in removed_ids)
-
-    def test_no_trimming_within_window(self):
-        runner = ReactLoopGraphRunner(
-            llm=ScriptedChatModel(replies=["x"]),
-            tools=[],
-            history_window=5,
-        )
-        msgs = [ToolMessage(content="o", tool_call_id="t", id=f"m{i}") for i in range(3)]
-        graph = self._fake_graph_with_messages(msgs)
-        assert runner._compute_message_removals(graph, {}) == []
+        assert not hasattr(runner, "history_window")
+        assert not hasattr(runner, "_compute_message_removals")
 
 
 # ---------------------------------------------------------------------------

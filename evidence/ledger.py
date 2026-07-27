@@ -134,6 +134,15 @@ def render_evidence_entry(eid: int, record: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def render_evidence_header(eid: int, record: Dict[str, Any]) -> str:
+    """Render the provenance header and URL without the evidence body."""
+    entry = render_evidence_entry(eid, record)
+    content = str(record.get("content") or "")
+    if content and entry.endswith(content):
+        return entry[: -len(content)].rstrip()
+    return entry
+
+
 class EvidenceLedger:
     """Per-run registry mapping canonical URLs to stable citation IDs."""
 
@@ -160,6 +169,19 @@ class EvidenceLedger:
             self._records[eid] = record
         return eid
 
+    def restore(self, eid: int, record: Dict[str, Any]) -> int:
+        """Restore a persisted record under its existing citation identifier."""
+        normalized = int(eid)
+        if normalized <= 0:
+            return self.register(record)
+        key = _record_key(record)
+        current = self._records.get(normalized)
+        if current is None or _is_richer(record, current):
+            self._records[normalized] = record
+        self._by_key[key] = normalized
+        self._next = max(self._next, normalized + 1)
+        return normalized
+
     def resolve(self, eid: int) -> Optional[Dict[str, Any]]:
         return self._records.get(eid)
 
@@ -175,6 +197,13 @@ class EvidenceLedger:
                 + f"\n... [truncated; {len(entry)} chars total]"
             )
         return entry
+
+    def render_header(self, eid: int, record: Optional[Dict[str, Any]] = None) -> str:
+        """Render the content-free ledger pointer used by context compaction."""
+        stored = record if record is not None else self._records.get(eid)
+        if stored is None:
+            return f"[E{eid}] unknown"
+        return render_evidence_header(eid, stored)
 
     def render_entries(self, pairs: List[Any]) -> str:
         """Render ``[(eid, record), ...]`` joined by blank lines."""

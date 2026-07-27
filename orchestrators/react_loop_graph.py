@@ -33,12 +33,25 @@ from utils.search_routing import extract_json_object
 from utils.timing_utils import extract_token_usage
 from utils.time_parser import TimeConstraint
 from utils.workflow_trace import WorkflowTracer, ensure_tracer
+from utils.config_validation import validate_context_compaction_config
 from evidence.source_verdict import is_authoritative_tier
 from evidence.pricing_claims import (
     collect_complete_pricing_facts,
     extract_pricing_facts,
     pricing_answer_failures,
     render_pricing_answer,
+)
+from orchestrators.context_compaction import (
+    TokenBudget,
+    assert_tool_call_pairing,
+    deterministic_summary,
+    fold_evidence_messages,
+    partition,
+    render_decision_trace,
+    resolve_context_window,
+    safe_cut_index,
+    summarize,
+    truncate_tail,
 )
 
 LOOP_STATUSES = (
@@ -136,6 +149,7 @@ _VERDICT_REASON_LABELS = {
     "process_narration": "过程性文本，继续补充",
     "ready_to_synthesize": "证据齐备，转入综合",
     "forced_synthesis": "检索结束，生成可交付结论",
+    "context_compaction": "上下文超预算，先压缩历史",
     "pricing_source_recovery": "切换到已配置的官方价目页",
 }
 
@@ -216,6 +230,8 @@ class ReactLoopGraphRunner:
         analysis: Optional[Any] = None,
         timing_recorder: Optional[Any] = None,
         execution_trace: Optional[Any] = None,
+        context_compaction_config: Optional[Dict[str, Any]] = None,
+        ledger: Optional[Any] = None,
     ) -> None:
         self.llm = llm
         self.tools = list(tools or [])
@@ -229,7 +245,13 @@ class ReactLoopGraphRunner:
         self.analysis = analysis
         self.timing_recorder = timing_recorder
         self.execution_trace = execution_trace
-        self.history_window = max(1, int(history_window))
+        # ConversationManager still owns history_window for transcript reads;
+        # the loop must never use it to trim native tool-call messages.
+        _ = history_window
+        self.context_compaction_config = validate_context_compaction_config(
+            context_compaction_config
+        )
+        self.ledger = ledger
         # Keep a private recorder for direct callers so the final response can
         # expose the same bounded facts even when no SSE listener is attached.
         self.tracer = ensure_tracer(tracer) if tracer is not None else WorkflowTracer()
@@ -237,6 +259,15 @@ class ReactLoopGraphRunner:
         self.initial_checklist = self._derive_checklist()
         self.system_prompt = TOOL_CALLING_SYSTEM_PROMPT.format(
             success_criteria=self._format_success_criteria()
+        )
+        if "recall_evidence" in self.tools_by_name:
+            self.system_prompt += (
+                "\n- 若历史工具结果只保留 [En] 指针，可调用 recall_evidence "
+                "回灌已登记证据的完整正文；不得把它当作网络搜索工具。"
+            )
+        self._context_window = resolve_context_window(
+            self.context_compaction_config,
+            getattr(self.llm, "model_name", None) or getattr(self.llm, "model", None),
         )
         self._llm_with_tools: Optional[Any] = None
         if self.tools:
@@ -320,6 +351,123 @@ class ReactLoopGraphRunner:
         if not parts:
             return ""
         return "\n成功标准：\n" + "\n".join(f"- {p}" for p in parts)
+
+    # ------------------------------------------------------------------
+    # Context budget and evidence-ledger helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _safe_cut_index(messages: List[Any], desired: int) -> int:
+        """Return a cut that never separates a native tool request from its result."""
+        return safe_cut_index(messages, desired)
+
+    def _new_token_budget(self) -> TokenBudget:
+        return TokenBudget(
+            system_prompt=self.system_prompt,
+            max_tokens=int(getattr(self.llm, "max_tokens", 0) or 0),
+            context_window=self._context_window,
+        )
+
+    def _token_budget(self, state: Optional[Dict[str, Any]] = None) -> TokenBudget:
+        budget = self._new_token_budget()
+        if isinstance(state, dict):
+            budget.restore(state.get("token_budget_state"))
+        return budget
+
+    def _tool_budget_statuses(self) -> Dict[str, Dict[str, Any]]:
+        statuses: Dict[str, Dict[str, Any]] = {}
+        for tool in self.tools:
+            getter = getattr(tool, "get_budget_status", None)
+            if not callable(getter):
+                continue
+            try:
+                status = getter() or {}
+            except Exception:  # noqa: BLE001 - observability cannot stop the loop
+                continue
+            if isinstance(status, dict):
+                statuses[str(getattr(tool, "name", "tool"))] = dict(status)
+        return statuses
+
+    def _context_metrics(self, state: Dict[str, Any]) -> Tuple[TokenBudget, int, float]:
+        budget = self._token_budget(state)
+        amount = budget.estimate(list(state.get("messages") or []))
+        return budget, amount, amount / budget.context_window
+
+    def _restore_ledger_records(self, records: List[Dict[str, Any]]) -> None:
+        """Make checkpointed [En] records available to the recall tool again."""
+        if self.ledger is None:
+            return
+        restore = getattr(self.ledger, "restore", None)
+        if not callable(restore):
+            return
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+            try:
+                eid = int(metadata.get("eid"))
+            except (TypeError, ValueError):
+                continue
+            if eid > 0:
+                restore(eid, record)
+
+    def _can_compact(self, state: Dict[str, Any]) -> bool:
+        if not self.context_compaction_config["enabled"]:
+            return False
+        if state.get("compaction_blocked"):
+            return False
+        _, _amount, ratio = self._context_metrics(state)
+        return ratio >= float(self.context_compaction_config["threshold"])
+
+    def _compaction_debounced(
+        self,
+        state: Dict[str, Any],
+        *,
+        current_budget: Optional[int] = None,
+    ) -> bool:
+        if int(state.get("compactions") or 0) >= int(
+            self.context_compaction_config["max_compactions_per_run"]
+        ):
+            return True
+        last_iteration = state.get("last_compaction_iteration")
+        if last_iteration is not None and int(state.get("iteration") or 0) <= int(last_iteration):
+            return True
+        current = int(
+            current_budget
+            if current_budget is not None
+            else self._context_metrics(state)[1]
+        )
+        prior = int(state.get("tokens_at_last_compaction") or 0)
+        return bool(prior and current >= prior)
+
+    def _trace_compaction(
+        self,
+        *,
+        sequence: int,
+        before_messages: int,
+        after_messages: int,
+        before_budget: int,
+        after_budget: int,
+        summary_source: str,
+        blocked: bool = False,
+    ) -> None:
+        step_id = f"react_compact_{sequence}"
+        self.tracer.begin(step_id, "上下文压缩", detail="正在压缩已消费的证据上下文")
+        self.tracer.end(
+            step_id,
+            detail="压缩受阻" if blocked else "压缩完成",
+            items=[
+                {"label": "消息", "value": f"{before_messages} -> {after_messages}"},
+                {
+                    "label": "预算",
+                    "value": f"{before_budget}/{self._context_window} -> {after_budget}/{self._context_window}",
+                },
+                {
+                    "label": "summary_source",
+                    "value": self._safe_trace_text(summary_source, limit=40),
+                },
+            ],
+            status="error" if blocked else "done",
+        )
 
     # ------------------------------------------------------------------
     # Safe workflow trace helpers
@@ -692,6 +840,16 @@ class ReactLoopGraphRunner:
                 "phase": str,
                 "synthesis_attempts": int,
                 "forced_synthesis": bool,
+                "force_synthesis": bool,
+                "compactions": int,
+                "tokens_at_last_compaction": int,
+                "compaction_blocked": bool,
+                "last_compaction_iteration": Optional[int],
+                "context_budget": int,
+                "context_ratio": float,
+                "peak_context_ratio": float,
+                "summary_source": Optional[str],
+                "token_budget_state": Dict[str, Any],
             },
         )
 
@@ -699,6 +857,7 @@ class ReactLoopGraphRunner:
         builder.add_node("act", self._act)
         builder.add_node("observe", self._observe)
         builder.add_node("evaluate", self._evaluate)
+        builder.add_node("compact", self._compact)
         builder.add_node("synthesize", self._synthesize)
         builder.add_node("pricing_fetch", self._pricing_fetch)
         builder.add_edge(
@@ -708,9 +867,14 @@ class ReactLoopGraphRunner:
         builder.add_conditional_edges(
             "act",
             self._route_after_act,
-            {"observe": "observe", "evaluate": "evaluate"},
+            {
+                "observe": "observe",
+                "evaluate": "evaluate",
+                "synthesize": "synthesize",
+            },
         )
         builder.add_edge("observe", "evaluate")
+        builder.add_edge("compact", "act")
         builder.add_edge("synthesize", "evaluate")
         builder.add_edge("pricing_fetch", "observe")
         builder.add_conditional_edges(
@@ -720,6 +884,7 @@ class ReactLoopGraphRunner:
                 "act": "act",
                 "pricing_fetch": "pricing_fetch",
                 "synthesize": "synthesize",
+                "compact": "compact",
                 "end": END,
             },
         )
@@ -732,6 +897,10 @@ class ReactLoopGraphRunner:
     # Nodes
     # ------------------------------------------------------------------
     def _act(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        # A blocked compaction still returns through the graph's ``act`` edge,
+        # but it must not make another provider call before forced synthesis.
+        if state.get("force_synthesis"):
+            return {"next_action": "synthesize"}
         iteration = int(state["iteration"]) + 1
         iteration_step_id = self._iteration_step_id(iteration)
         self.tracer.begin(iteration_step_id, f"第 {iteration} 轮", detail="模型正在决定下一步")
@@ -773,6 +942,12 @@ class ReactLoopGraphRunner:
                     self._trace_invalid_final_response(iteration, invalid_final_response)
                     response = AIMessage(content="")
 
+        token_budget = self._token_budget(state)
+        token_budget.record_usage(
+            list(state.get("messages") or []),
+            getattr(response, "usage_metadata", None),
+        )
+
         return {
             "messages": [response],
             "iteration": iteration,
@@ -783,6 +958,7 @@ class ReactLoopGraphRunner:
             "final_proposed": not tool_calls,
             "invalid_tool_request": invalid_tool_request,
             "invalid_final_response": invalid_final_response,
+            "token_budget_state": token_budget.to_state(),
         }
 
     def _act_shim(self, history: List[Any]) -> AIMessage:
@@ -976,16 +1152,20 @@ class ReactLoopGraphRunner:
 
         combined_fingerprint = " | ".join(sorted(fingerprints))
 
-        pool_text = "\n".join(state["evidence_pool"])
+        prior_pool = list(state.get("evidence_pool") or [])
+        pool_text = "\n".join(prior_pool)
         ratios = [
             evidence_increment_ratio(pool_text, observation) for observation in new_observations
         ]
         min_ratio = self.eval_cfg["new_evidence_min_ratio"]
         new_evidence = bool(ratios) and any(ratio >= min_ratio for ratio in ratios)
 
+        pool_limit = int(self.context_compaction_config["evidence_pool_max_entries"])
+        bounded_pool = (prior_pool + new_observations)[-pool_limit:]
+
         return {
             "messages": tool_messages,
-            "evidence_pool": list(state["evidence_pool"]) + new_observations,
+            "evidence_pool": bounded_pool,
             "evidence_records": list(state.get("evidence_records") or []) + new_records,
             "fetch_outcomes": list(state.get("fetch_outcomes") or []) + new_fetch_outcomes,
             "tool_error_streak": error_streak,
@@ -995,6 +1175,151 @@ class ReactLoopGraphRunner:
             "fingerprint_streak": duplicate_fingerprint_count,
             "last_round_new_evidence": new_evidence,
             "last_round_observations": new_observations,
+        }
+
+    def _compact(self, state: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:
+        """Apply deterministic pointerization, then summarize only when needed."""
+        messages = list(state.get("messages") or [])
+        budget, before_budget, before_ratio = self._context_metrics(state)
+        before_messages = len(messages)
+        sequence = int(state.get("compactions") or 0) + 1
+        part = partition(
+            messages,
+            int(self.context_compaction_config["keep_recent_rounds"]),
+        )
+        if part.blocked or not part.compressible:
+            self._trace_compaction(
+                sequence=sequence,
+                before_messages=before_messages,
+                after_messages=before_messages,
+                before_budget=before_budget,
+                after_budget=before_budget,
+                summary_source="blocked",
+                blocked=True,
+            )
+            return {
+                "compaction_blocked": True,
+                "force_synthesis": True,
+                "forced_synthesis": True,
+                "next_action": "synthesize",
+                "context_budget": before_budget,
+                "context_ratio": before_ratio,
+                "peak_context_ratio": max(
+                    float(state.get("peak_context_ratio") or 0), before_ratio
+                ),
+                "summary_source": "blocked",
+            }
+
+        records = [
+            record
+            for record in list(state.get("evidence_records") or [])
+            if isinstance(record, dict)
+        ]
+        folded = fold_evidence_messages(part.compressible, self.ledger, records)
+        trace = render_decision_trace(
+            state, tool_budgets=self._tool_budget_statuses()
+        )
+        tier1_messages = list(part.pinned) + folded + [
+            HumanMessage(content="[上下文轨迹]\n" + trace)
+        ] + list(part.recent)
+        tier1_state = dict(state)
+        tier1_state["messages"] = tier1_messages
+        _tier1_budget, tier1_amount, tier1_ratio = self._context_metrics(tier1_state)
+        final_messages = tier1_messages
+        summary_source = "deterministic"
+        protected = [
+            message
+            for message in part.compressible
+            if (
+                isinstance(message, HumanMessage)
+                and not self._message_text(message).lstrip().startswith("[工具")
+            )
+            or (
+                isinstance(message, AIMessage)
+                and not getattr(message, "tool_calls", None)
+                and bool(self._message_text(message).strip())
+            )
+        ]
+
+        if tier1_ratio >= float(self.context_compaction_config["threshold"]):
+            try:
+                summary_text = summarize(
+                    state,
+                    part.compressible,
+                    llm=self.llm,
+                    judge_llm=self.judge_llm,
+                    use_judge_llm=bool(
+                        self.context_compaction_config["use_judge_llm"]
+                    ),
+                    summary_max_tokens=int(
+                        self.context_compaction_config["summary_max_tokens"]
+                    ),
+                    ledger=self.ledger,
+                    evidence_records=records,
+                    tool_budgets=self._tool_budget_statuses(),
+                )
+                summary_source = "llm"
+                summary_message = HumanMessage(
+                    content="[上下文摘要]\n" + summary_text
+                )
+                final_messages = (
+                    list(part.pinned)
+                    + [summary_message]
+                    + protected
+                    + list(part.recent)
+                )
+            except Exception:  # noqa: BLE001 - compaction must never break the loop
+                try:
+                    summary_text = deterministic_summary(
+                        state, tool_budgets=self._tool_budget_statuses()
+                    )
+                    summary_source = "deterministic"
+                    final_messages = list(part.pinned) + [
+                        HumanMessage(content="[上下文摘要]\n" + summary_text)
+                    ] + protected + list(part.recent)
+                except Exception:  # noqa: BLE001 - last resort is a safe tail trim
+                    summary_source = "truncate"
+                    final_messages = truncate_tail(
+                        tier1_messages,
+                        max(1, int(self._context_window * self.context_compaction_config["threshold"])),
+                        preserve=list(part.pinned) + protected + list(part.recent),
+                    )
+
+        try:
+            assert_tool_call_pairing(final_messages)
+        except AssertionError:
+            final_messages = tier1_messages
+            summary_source = "deterministic"
+
+        after_state = dict(state)
+        after_state["messages"] = final_messages
+        _after_budget, after_amount, after_ratio = self._context_metrics(after_state)
+        self._trace_compaction(
+            sequence=sequence,
+            before_messages=before_messages,
+            after_messages=len(final_messages),
+            before_budget=before_budget,
+            after_budget=after_amount,
+            summary_source=summary_source,
+        )
+        from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+        return {
+            "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + final_messages,
+            "compactions": sequence,
+            "tokens_at_last_compaction": after_amount,
+            "compaction_blocked": False,
+            "last_compaction_iteration": int(state.get("iteration") or 0),
+            "context_budget": after_amount,
+            "context_ratio": after_ratio,
+            "peak_context_ratio": max(
+                float(state.get("peak_context_ratio") or 0), before_ratio, after_ratio
+            ),
+            "summary_source": summary_source,
+            "force_synthesis": False,
+            "forced_synthesis": bool(state.get("forced_synthesis")),
+            "next_action": "act",
+            "token_budget_state": budget.to_state(),
         }
 
     def _pricing_source_candidates(self) -> List[Dict[str, str]]:
@@ -1199,9 +1524,13 @@ class ReactLoopGraphRunner:
         if fact_sets:
             answer = render_pricing_answer(self._pricing_requirements(), fact_sets)
             detail = "已完成确定性价格计算"
-        else:
+        elif self._pricing_requirements():
             answer = self._pricing_insufficient_answer(state)
             detail = "已生成证据不足说明"
+        else:
+            draft = self._last_ai_text(list(state.get("messages") or []))
+            answer = self._best_effort_answer(draft, "exhausted")
+            detail = "上下文预算触发收口"
         self.tracer.end(
             step_id,
             detail=detail,
@@ -1214,6 +1543,7 @@ class ReactLoopGraphRunner:
             "phase": "synthesis",
             "synthesis_attempts": attempt,
             "forced_synthesis": True,
+            "force_synthesis": False,
             "next_action": "evaluate",
             "final_proposed": True,
             "invalid_tool_request": None,
@@ -1382,7 +1712,7 @@ class ReactLoopGraphRunner:
             TerminationAction.UNRECOVERABLE,
             TerminationAction.RETURN_INSUFFICIENT,
         }
-        force_synthesis = bool(
+        force_synthesis = bool(state.get("force_synthesis")) or bool(
             pricing_requirements
             and not pricing_recovery
             and str(state.get("phase") or "loop") == "loop"
@@ -1391,11 +1721,28 @@ class ReactLoopGraphRunner:
             and (pricing_ready or terminal_without_answer)
         )
 
+        _context_budget, context_amount, context_ratio = self._context_metrics(state)
+        context_over_budget = self._can_compact(state)
+        compact_next = bool(
+            context_over_budget
+            and not pricing_recovery
+            and not force_synthesis
+            and decision.action == TerminationAction.CONTINUE
+        )
+        if compact_next and self._compaction_debounced(
+            state,
+            current_budget=context_amount,
+        ):
+            compact_next = False
+            force_synthesis = True
+
         reason = decision.reason
         if pricing_recovery:
             reason = "pricing_source_recovery"
         elif force_synthesis:
             reason = "ready_to_synthesize" if pricing_ready else "forced_synthesis"
+        elif compact_next:
+            reason = "context_compaction"
         elif invalid_tool_request:
             reason = "invalid_tool_request"
         elif invalid_final_response:
@@ -1425,6 +1772,8 @@ class ReactLoopGraphRunner:
                 if pricing_recovery
                 else "synthesize"
                 if force_synthesis
+                else "compact"
+                if compact_next
                 else decision.action.value
             ),
             deterministic_pass=decision.deterministic_pass,
@@ -1443,6 +1792,12 @@ class ReactLoopGraphRunner:
             "constraints_missing": list(decision.missing_constraints),
             "no_progress_streak": no_progress_streak,
             "judge_error": judge_error,
+            "context_budget": context_amount,
+            "context_ratio": context_ratio,
+            "peak_context_ratio": max(
+                float(state.get("peak_context_ratio") or 0), context_ratio
+            ),
+            "force_synthesis": force_synthesis,
         }
 
         termination_reason: Optional[str] = None
@@ -1451,6 +1806,8 @@ class ReactLoopGraphRunner:
             update["next_action"] = "pricing_fetch"
         elif force_synthesis:
             update["next_action"] = "synthesize"
+        elif compact_next:
+            update["next_action"] = "compact"
         elif decision.action == TerminationAction.RETURN:
             termination_reason = "succeeded"
             final_answer = draft
@@ -1501,7 +1858,7 @@ class ReactLoopGraphRunner:
 
         update["termination_reason"] = termination_reason
         update["final_answer"] = final_answer
-        if not pricing_recovery and not force_synthesis:
+        if not pricing_recovery and not force_synthesis and not compact_next:
             update["next_action"] = "end" if termination_reason else (
                 "synthesize"
                 if str(state.get("phase") or "loop") == "synthesis"
@@ -1786,6 +2143,8 @@ class ReactLoopGraphRunner:
     # ------------------------------------------------------------------
     @staticmethod
     def _route_after_act(state: Dict[str, Any]) -> str:
+        if state.get("force_synthesis"):
+            return "synthesize"
         last = state["messages"][-1]
         return "observe" if getattr(last, "tool_calls", None) else "evaluate"
 
@@ -1796,7 +2155,7 @@ class ReactLoopGraphRunner:
         action = str(state.get("next_action") or "act")
         return (
             action
-            if action in {"act", "pricing_fetch", "synthesize"}
+            if action in {"act", "pricing_fetch", "synthesize", "compact"}
             else "act"
         )
 
@@ -1937,8 +2296,10 @@ class ReactLoopGraphRunner:
     # ------------------------------------------------------------------
     def _build_initial_state(self, user_input: str) -> Dict[str, Any]:
         """Construct the full state for a brand-new ReAct run."""
+        budget = self._new_token_budget()
+        initial_messages = [HumanMessage(content=user_input)]
         return {
-            "messages": [HumanMessage(content=user_input)],
+            "messages": initial_messages,
             "evidence_pool": [],
             "evidence_records": [],
             "fetch_outcomes": [],
@@ -1964,6 +2325,16 @@ class ReactLoopGraphRunner:
             "phase": "loop",
             "synthesis_attempts": 0,
             "forced_synthesis": False,
+            "force_synthesis": False,
+            "compactions": 0,
+            "tokens_at_last_compaction": 0,
+            "compaction_blocked": False,
+            "last_compaction_iteration": None,
+            "context_budget": budget.estimate(initial_messages),
+            "context_ratio": budget.ratio(initial_messages),
+            "peak_context_ratio": budget.ratio(initial_messages),
+            "summary_source": None,
+            "token_budget_state": budget.to_state(),
         }
 
     def _build_followup_state_input(
@@ -1976,12 +2347,18 @@ class ReactLoopGraphRunner:
 
         ``evidence_pool`` and ``verdicts`` are intentionally omitted so the
         checkpointed values are retained; per-loop control fields are reset for
-        the new turn. Stale tool/observation messages beyond the history window
-        are removed via ``RemoveMessage`` to bound token cost.
+        the new turn. The checkpoint already contains any previous compaction.
         """
-        removals = self._compute_message_removals(graph, config)
+        try:
+            snapshot = graph.get_state(config)
+            values = getattr(snapshot, "values", None) or {}
+            self._restore_ledger_records(
+                list(values.get("evidence_records") or [])
+            )
+        except Exception:  # noqa: BLE001 - a missing checkpoint is harmless here
+            pass
         return {
-            "messages": removals + [HumanMessage(content=user_input)],
+            "messages": [HumanMessage(content=user_input)],
             "iteration": 0,
             "fetch_outcomes": [],
             "constraints_met": [],
@@ -2004,34 +2381,16 @@ class ReactLoopGraphRunner:
             "phase": "loop",
             "synthesis_attempts": 0,
             "forced_synthesis": False,
+            "force_synthesis": False,
+            "compactions": 0,
+            "tokens_at_last_compaction": 0,
+            "compaction_blocked": False,
+            "last_compaction_iteration": None,
+            "context_budget": 0,
+            "context_ratio": 0.0,
+            "peak_context_ratio": 0.0,
+            "summary_source": None,
         }
-
-    def _compute_message_removals(self, graph: Any, config: Dict[str, Any]) -> List[Any]:
-        """Return ``RemoveMessage`` ops for trimmable messages beyond the window.
-
-        Only tool results (``ToolMessage``) and shim-mode observation wrappers
-        (``HumanMessage`` starting with ``[工具``) are eligible for removal;
-        user messages and final answers are always preserved.
-        """
-        try:
-            snapshot = graph.get_state(config)
-        except Exception:  # noqa: BLE001 - trimming is best effort
-            return []
-        values = getattr(snapshot, "values", None) or {}
-        messages = list(values.get("messages") or [])
-
-        trimmable = [
-            m
-            for m in messages
-            if isinstance(m, ToolMessage)
-            or (isinstance(m, HumanMessage) and str(getattr(m, "content", "")).lstrip().startswith("[工具"))
-        ]
-        # Keep a bounded number of recent trimmable entries (heuristic budget).
-        keep_count = self.history_window * 2
-        if len(trimmable) <= keep_count:
-            return []
-        to_remove = trimmable[: len(trimmable) - keep_count]
-        return [RemoveMessage(id=m.id) for m in to_remove if getattr(m, "id", None)]
 
     @staticmethod
     def _checkpointed_verdict_count(graph: Any, config: Dict[str, Any]) -> int:
@@ -2043,6 +2402,63 @@ class ReactLoopGraphRunner:
         values = getattr(snapshot, "values", None) or {}
         verdicts = values.get("verdicts") or []
         return len(verdicts) if isinstance(verdicts, list) else 0
+
+    def _compact_checkpoint_if_needed(
+        self,
+        graph: Any,
+        config: Dict[str, Any],
+        *,
+        force: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Compact a persisted thread before its next follow-up is appended."""
+        try:
+            snapshot = graph.get_state(config)
+        except Exception:  # noqa: BLE001 - unavailable checkpoints remain normal runs
+            return None
+        values = dict(getattr(snapshot, "values", None) or {})
+        if not values:
+            return None
+        self._restore_ledger_records(list(values.get("evidence_records") or []))
+        if not force and not self._can_compact(values):
+            return None
+        update = self._compact(values, force=force)
+        try:
+            graph.update_state(config, update, as_node="compact")
+        except Exception:  # noqa: BLE001 - do not lose a follow-up to maintenance
+            return None
+        return update
+
+    def compact_conversation(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        """Manually compact an existing checkpoint without creating a new thread."""
+        if not conversation_id:
+            return None
+        from orchestrators.conversation_store import get_conversation_manager
+
+        manager = get_conversation_manager()
+        if not manager.enabled or not manager.saver or not manager.has_checkpoint(conversation_id):
+            return None
+        graph = self.build_graph(checkpointer=manager.saver)
+        config: Dict[str, Any] = {
+            "configurable": {"thread_id": str(conversation_id)},
+            "recursion_limit": (self.max_iterations + self.max_synthesis_attempts) * 5 + 10,
+        }
+        try:
+            before = graph.get_state(config)
+            before_values = getattr(before, "values", None) or {}
+            before_count = len(list(before_values.get("messages") or []))
+            update = self._compact_checkpoint_if_needed(graph, config, force=True)
+            if update is None:
+                return None
+            after = graph.get_state(config)
+            after_values = getattr(after, "values", None) or {}
+            return {
+                "before_messages": before_count,
+                "after_messages": len(list(after_values.get("messages") or [])),
+                "summary_source": update.get("summary_source"),
+                "compactions": int(after_values.get("compactions") or 0),
+            }
+        except Exception:  # noqa: BLE001 - endpoint reports absence/failure safely
+            return None
 
     def run(
         self,
@@ -2072,7 +2488,7 @@ class ReactLoopGraphRunner:
         config: Dict[str, Any] = {
             "recursion_limit": (
                 self.max_iterations + self.max_synthesis_attempts
-            ) * 4 + 10
+            ) * 5 + 10
         }
         resume = False
         if conversation_id and checkpointer and mgr is not None:
@@ -2081,6 +2497,8 @@ class ReactLoopGraphRunner:
                 str(conversation_id)
             )
 
+        if resume:
+            self._compact_checkpoint_if_needed(graph, config)
         prior_verdict_count = self._checkpointed_verdict_count(graph, config) if resume else 0
         if resume:
             state_input = self._build_followup_state_input(graph, config, user_input)
@@ -2107,6 +2525,8 @@ class ReactLoopGraphRunner:
             "fetch_outcomes": list(final_state.get("fetch_outcomes") or []),
             "synthesis_attempts": int(final_state.get("synthesis_attempts") or 0),
             "forced_synthesis": bool(final_state.get("forced_synthesis")),
+            "compactions": int(final_state.get("compactions") or 0),
+            "peak_context_ratio": float(final_state.get("peak_context_ratio") or 0),
             "conversation_resumed": resume,
         }
         trace_events, trace_truncated = self._trace_events()

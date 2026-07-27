@@ -37,6 +37,53 @@ def _enable_test_logging(monkeypatch, directory: Path) -> None:
     monkeypatch.setattr(server, "load_base_config", lambda: {"LLM_PROVIDER": "stub"})
 
 
+def test_manual_compact_returns_not_found_without_creating_a_conversation(monkeypatch) -> None:
+    class Manager:
+        def has_checkpoint(self, conversation_id: str) -> bool:
+            return False
+
+    monkeypatch.setattr(server, "_conversation_manager", lambda: Manager())
+    with server.app.test_client() as client:
+        response = client.post("/api/conversation/missing/compact")
+
+    assert response.status_code == 404
+    assert response.get_json()["error"] == "Conversation checkpoint not found"
+
+
+def test_manual_compact_returns_checkpoint_metrics(monkeypatch) -> None:
+    class Manager:
+        def has_checkpoint(self, conversation_id: str) -> bool:
+            return conversation_id == "existing"
+
+    class Loop:
+        def compact_conversation(self, conversation_id: str) -> dict[str, Any]:
+            assert conversation_id == "existing"
+            return {
+                "before_messages": 12,
+                "after_messages": 5,
+                "summary_source": "deterministic",
+                "compactions": 1,
+            }
+
+    class Pipeline:
+        def _get_loop_orchestrator(self) -> Loop:
+            return Loop()
+
+    monkeypatch.setattr(server, "_conversation_manager", lambda: Manager())
+    monkeypatch.setattr(server, "build_pipeline", lambda **kwargs: Pipeline())
+    with server.app.test_client() as client:
+        response = client.post("/api/conversation/existing/compact")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "conversation_id": "existing",
+        "before_messages": 12,
+        "after_messages": 5,
+        "summary_source": "deterministic",
+        "compactions": 1,
+    }
+
+
 def test_process_logging_keeps_terminal_output_and_avoids_duplicates(
     monkeypatch,
     tmp_path: Path,

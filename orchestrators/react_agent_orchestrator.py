@@ -203,6 +203,12 @@ class ReactAgentOrchestrator:
                 analysis=analysis,
                 timing_recorder=timing_recorder,
                 execution_trace=execution_trace,
+                context_compaction_config=(
+                    orchestration_cfg.get("context_compaction")
+                    if isinstance(orchestration_cfg, dict)
+                    else None
+                ),
+                ledger=ledger,
             )
             loop_result = runner.run(user_input, conversation_id=conversation_id)
             resumed = resumed or bool(loop_result.get("conversation_resumed"))
@@ -359,6 +365,8 @@ class ReactAgentOrchestrator:
                 loop_result.get("synthesis_attempts") or 0
             ),
             "loop_forced_synthesis": bool(loop_result.get("forced_synthesis")),
+            "compactions": int(loop_result.get("compactions") or 0),
+            "peak_context_ratio": float(loop_result.get("peak_context_ratio") or 0),
             "react_trace": list(loop_result.get("trace_events") or []),
             "react_trace_truncated": bool(loop_result.get("trace_truncated")),
             "final_executor": "agentic_loop",
@@ -416,6 +424,47 @@ class ReactAgentOrchestrator:
             reset = getattr(tool, "reset_budget", None)
             if callable(reset):
                 reset()
+
+    def compact_conversation(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        """Manually compact one checkpointed conversation without a new answer run."""
+        from evidence.ledger import EvidenceLedger
+        from orchestrators.react_loop_graph import ReactLoopGraphRunner
+
+        cid = str(conversation_id or "").strip()
+        if not cid:
+            return None
+        self._reset_tool_budgets()
+        orchestration_cfg = self.config.get("orchestration") or {}
+        ledger_cfg = (
+            orchestration_cfg.get("evidence_ledger")
+            if isinstance(orchestration_cfg, dict)
+            else None
+        )
+        ledger = EvidenceLedger(
+            max_entry_chars=int(
+                ledger_cfg.get("max_entry_chars") or 8000
+                if isinstance(ledger_cfg, dict)
+                else 8000
+            )
+        )
+        for tool in self.tools:
+            set_ledger = getattr(tool, "set_ledger", None)
+            if callable(set_ledger):
+                set_ledger(ledger)
+        runner = ReactLoopGraphRunner(
+            llm=self.llm,
+            tools=self.tools,
+            max_iterations=self.max_iterations,
+            termination_config=self.config.get("termination") or {},
+            judge_llm=self.judge_llm,
+            context_compaction_config=(
+                orchestration_cfg.get("context_compaction")
+                if isinstance(orchestration_cfg, dict)
+                else None
+            ),
+            ledger=ledger,
+        )
+        return runner.compact_conversation(cid)
 
     @classmethod
     def create_from_config(

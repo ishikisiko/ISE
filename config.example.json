@@ -101,6 +101,18 @@
             "min_content_chars": 600,
             "max_chars": 8000
         },
+        "context_compaction": {
+            "_comment": "Bound the ReAct message context. Old tool bodies become ledger pointers first; an LLM summary is used only when the deterministic pass still exceeds the threshold.",
+            "enabled": true,
+            "context_window": 128000,
+            "per_model_window": {},
+            "threshold": 0.75,
+            "keep_recent_rounds": 2,
+            "max_compactions_per_run": 2,
+            "summary_max_tokens": 800,
+            "use_judge_llm": true,
+            "evidence_pool_max_entries": 32
+        },
         "directFetch": {
             "_comment": "Preferred zero-API-key extractor for selected public pages: plain HTTP GET plus bs4 main-text extraction. Extract APIs are used only after this fetch fails or returns no usable content. No JS rendering.",
             "enabled": true,
@@ -121,7 +133,8 @@
             "web_search": 3,
             "fetch_url": 3,
             "search_recovery": 2,
-            "local_docs": 2
+            "local_docs": 2,
+            "recall_evidence": 3
         },
         "judge": {
             "enabled": true,

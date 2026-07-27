@@ -26,7 +26,7 @@ import math
 import os
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 # Add project directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -245,6 +245,7 @@ def extract_llm_stats(result: Dict[str, Any]) -> Dict[str, Any]:
     output_tokens = 0
     total_tokens = 0
     calls_with_tokens = 0
+    peak_input_tokens = 0
     for entry in calls:
         if not isinstance(entry, dict):
             continue
@@ -256,6 +257,7 @@ def extract_llm_stats(result: Dict[str, Any]) -> Dict[str, Any]:
         input_tokens += int(entry_input or 0)
         output_tokens += int(entry_output or 0)
         total_tokens += int(entry_total or 0)
+        peak_input_tokens = max(peak_input_tokens, int(entry_input or 0))
     if total_tokens == 0 and (input_tokens or output_tokens):
         total_tokens = input_tokens + output_tokens
     return {
@@ -264,6 +266,7 @@ def extract_llm_stats(result: Dict[str, Any]) -> Dict[str, Any]:
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
+        "peak_input_tokens": peak_input_tokens,
     }
 
 
@@ -288,6 +291,8 @@ def extract_loop_stats(result: Dict[str, Any]) -> Dict[str, Any]:
         "loop_status": control.get("loop_status"),
         "loop_evidence_records": control.get("loop_evidence_records"),
         "skill_tools_used": list(control.get("skill_tools_used") or []),
+        "compactions": control.get("compactions"),
+        "peak_context_ratio": control.get("peak_context_ratio"),
     }
 
 
@@ -427,6 +432,7 @@ def run_answer_dataset(
     num_results: int,
     max_tokens: int,
     temperature: float,
+    on_progress: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     details: List[Dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
@@ -461,6 +467,8 @@ def run_answer_dataset(
                 "external_api_calls": extract_external_api_calls(result),
             }
         )
+        if on_progress is not None:
+            on_progress(details)
     return details
 
 
@@ -521,6 +529,13 @@ def build_route_summary(details: List[Dict[str, Any]]) -> Dict[str, Any]:
         "input_tokens_per_query": summarise([row.get("input_tokens") for row in details]),
         "output_tokens_per_query": summarise([row.get("output_tokens") for row in details]),
         "total_tokens_per_query": summarise([row.get("total_tokens") for row in details]),
+        "peak_input_tokens_per_query": summarise(
+            [row.get("peak_input_tokens") for row in details]
+        ),
+        "compactions_per_query": summarise([row.get("compactions") for row in details]),
+        "peak_context_ratio_per_query": summarise(
+            [row.get("peak_context_ratio") for row in details]
+        ),
         "external_api_calls_per_query": summarise([row.get("external_api_calls") for row in details]),
         "token_capture_rate": summarise_rate(
             [
@@ -542,6 +557,13 @@ def build_answer_summary(details: List[Dict[str, Any]]) -> Dict[str, Any]:
         "input_tokens_per_query": summarise([row.get("input_tokens") for row in details]),
         "output_tokens_per_query": summarise([row.get("output_tokens") for row in details]),
         "total_tokens_per_query": summarise([row.get("total_tokens") for row in details]),
+        "peak_input_tokens_per_query": summarise(
+            [row.get("peak_input_tokens") for row in details]
+        ),
+        "compactions_per_query": summarise([row.get("compactions") for row in details]),
+        "peak_context_ratio_per_query": summarise(
+            [row.get("peak_context_ratio") for row in details]
+        ),
         "external_api_calls_per_query": summarise([row.get("external_api_calls") for row in details]),
         "token_capture_rate": summarise_rate(
             [
@@ -658,8 +680,12 @@ def compare_runs(plan_dir: str, loop_dir: str) -> Dict[str, Any]:
             entry["latency_ms_loop"] = _num(l.get("latency_ms"))
             entry["total_tokens_plan"] = _num(p.get("total_tokens"))
             entry["total_tokens_loop"] = _num(l.get("total_tokens"))
+            entry["peak_input_tokens_plan"] = _num(p.get("peak_input_tokens"))
+            entry["peak_input_tokens_loop"] = _num(l.get("peak_input_tokens"))
             entry["loop_iterations"] = l.get("loop_iterations")
             entry["loop_status"] = l.get("loop_status")
+            entry["compactions"] = l.get("compactions")
+            entry["peak_context_ratio"] = _num(l.get("peak_context_ratio"))
             per_query.append(entry)
 
         route_rate = lambda rows: summarise_rate([r.get("route_correct") for r in rows])["rate"]
@@ -679,6 +705,9 @@ def compare_runs(plan_dir: str, loop_dir: str) -> Dict[str, Any]:
             },
             "latency_ms": _aggregate_metric(plan_rows, loop_rows, "latency_ms"),
             "total_tokens": _aggregate_metric(plan_rows, loop_rows, "total_tokens"),
+            "peak_input_tokens": _aggregate_metric(
+                plan_rows, loop_rows, "peak_input_tokens"
+            ),
             "llm_call_count": _aggregate_metric(plan_rows, loop_rows, "llm_call_count"),
             "loop_iterations": summarise([_num(r.get("loop_iterations")) for r in loop_rows]),
             "per_query": per_query,
@@ -797,16 +826,25 @@ def run_baseline(args: argparse.Namespace) -> Dict[str, Any]:
         rows = read_csv_rows(args.answer_dataset)
         if cap is not None:
             rows = rows[:cap]
+        details_path = os.path.join(output_dir, "final_answer_details.jsonl")
+        summary_path = os.path.join(output_dir, "final_answer_summary.json")
+
+        def persist_answer_progress(progress: List[Dict[str, Any]]) -> None:
+            """Keep completed live-provider rows inspectable after a stalled request."""
+            write_jsonl(details_path, progress)
+            write_json(summary_path, build_answer_summary(progress))
+
         details = run_answer_dataset(
             orchestrator,
             rows,
             num_results=args.num_results,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
+            on_progress=persist_answer_progress,
         )
-        write_jsonl(os.path.join(output_dir, "final_answer_details.jsonl"), details)
+        write_jsonl(details_path, details)
         answer_summary = build_answer_summary(details)
-        write_json(os.path.join(output_dir, "final_answer_summary.json"), answer_summary)
+        write_json(summary_path, answer_summary)
         report["datasets"]["final_answer"] = {
             "rows": len(details),
             "summary_file": "final_answer_summary.json",

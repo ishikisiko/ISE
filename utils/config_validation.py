@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, Optional
 
 
 def configured_value(value: Any) -> str:
@@ -25,3 +25,10 @@ def configured_value(value: Any) -> str:
 
 def has_configured_value(value: Any) -> bool:
     return bool(configured_value(value))
+
+
+def validate_context_compaction_config(value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize the bounded-context configuration without accepting bad values."""
+    from orchestrators.context_compaction import normalize_context_compaction_config
+
+    return normalize_context_compaction_config(value)

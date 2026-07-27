@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Mapping, Optional, Type
+from typing import Any, Dict, List, Mapping, Optional, Type, Union
 
 from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -67,6 +67,14 @@ class FetchUrlInput(BaseModel):
     objective: str = Field(
         default="",
         description="Optional context: the user question or what to look for on the page",
+    )
+
+
+class RecallEvidenceInput(BaseModel):
+    """Input schema for reading already-recorded evidence by citation id."""
+
+    evidence_ids: Union[List[str], str] = Field(
+        description="One or more existing citation ids, for example ['E1', '[E2]']"
     )
 
 
@@ -1024,6 +1032,80 @@ class ReActFetchUrlTool(BaseTool):
         return {"limit": self.max_calls_per_query, "used": self._calls_in_run}
 
 
+class ReActRecallEvidenceTool(BaseTool):
+    """Return full records from the current EvidenceLedger without any I/O."""
+
+    name: str = "recall_evidence"
+    description: str = (
+        "Recall the full text of evidence already registered in this run. "
+        "Use citation ids such as E1 or [E1]. This is local-only: it does not "
+        "search, fetch URLs, or add evidence."
+    )
+    args_schema: Type[BaseModel] = RecallEvidenceInput
+    return_direct: bool = False
+
+    max_calls_per_query: int = Field(default=3, exclude=True)
+    _calls_in_run: int = PrivateAttr(default=0)
+    _ledger: Any = PrivateAttr(default=None)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def __init__(self, *, max_calls_per_query: int = 3, **kwargs: Any) -> None:
+        super().__init__(
+            max_calls_per_query=max(1, int(max_calls_per_query)),
+            **kwargs,
+        )
+
+    def _run(
+        self,
+        evidence_ids: Union[List[str], str],
+        run_manager: Optional[CallbackManagerForToolRun] = None,
+    ) -> str:
+        if self._calls_in_run >= self.max_calls_per_query:
+            return json.dumps(
+                {
+                    "status": "rejected",
+                    "reason": "max_calls_per_query",
+                    "limit": self.max_calls_per_query,
+                },
+                ensure_ascii=False,
+            )
+        self._calls_in_run += 1
+        resolver = getattr(self._ledger, "resolve", None)
+        renderer = getattr(self._ledger, "render_entry", None)
+        entries: List[Dict[str, Any]] = []
+        raw_ids = [evidence_ids] if isinstance(evidence_ids, str) else list(evidence_ids or [])
+        for raw_id in raw_ids:
+            token = str(raw_id or "").strip().strip("[]")
+            if token[:1].casefold() == "e":
+                token = token[1:]
+            try:
+                eid = int(token)
+            except (TypeError, ValueError):
+                entries.append({"id": str(raw_id), "status": "not_found"})
+                continue
+            record = resolver(eid) if callable(resolver) else None
+            if record is None:
+                entries.append({"id": f"E{eid}", "status": "not_found"})
+                continue
+            rendered = renderer(eid) if callable(renderer) else str(record)
+            entries.append(
+                {"id": f"E{eid}", "status": "ok", "entry": rendered}
+            )
+        status = "ok" if any(item["status"] == "ok" for item in entries) else "not_found"
+        return json.dumps({"status": status, "entries": entries}, ensure_ascii=False)
+
+    def set_ledger(self, ledger: Any) -> None:
+        self._ledger = ledger
+
+    def reset_budget(self) -> None:
+        self._calls_in_run = 0
+
+    def get_budget_status(self) -> Dict[str, int]:
+        return {"limit": self.max_calls_per_query, "used": self._calls_in_run}
+
+
 def create_react_tools_from_config(
     config: Dict[str, Any],
     llm: Optional[BaseChatModel] = None,
@@ -1055,6 +1137,12 @@ def create_react_tools_from_config(
             return max(1, int(raw))
         except (TypeError, ValueError):
             return default
+
+    tools.append(
+        ReActRecallEvidenceTool(
+            max_calls_per_query=tool_budget("recall_evidence", 3)
+        )
+    )
 
     reranker = None
     rerank_cfg = config.get("rerank") or {}
