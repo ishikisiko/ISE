@@ -133,3 +133,97 @@ def _safe_cut_index(messages, desired) -> int:
 - `context_window` 默认值取多少？各 provider 差异大（GLM 200k、部分 OpenAI 兼容端点 128k），保守默认建议 128000，但需要确认实际部署的模型清单
 - `keep_recent_rounds` 默认 2 是否足够？需要在 `final_answer_dataset.csv` 上验证多步比较类问题是否因折叠而退化
 - 手动压缩端点是否需要暴露到前端 UI，还是仅作为调试接口
+
+## 附录 A：基线与退出判据复核（任务 10.4）
+
+**provider 诊断与复跑**：首次复跑时默认 provider `opencode-go` 返回 403。抓原始响应体定位为 Cloudflare `RegionError`——`deepseek-v4-flash` 的最新版仅在中国区托管、需 workspace 显式 opt-in，而本沙箱在美国区（`cf-placement: remote-ORD`）。key 与配置均正常（已过鉴权到区域校验）。opt-in 开启后于 2026-08-01 成功产出一份**开启压缩的全量跑分**（`enabled/`，20 行），下述结论同时有代码层证明与经验证据支撑。
+
+**已落盘产物（`runtime/baseline/`）**：
+
+| 目录 | rows | 说明 |
+|---|---|---|
+| `context-compaction/enabled/` | 20 | 开启态全量跑分（默认 `enabled=true`）；`compactions` 全 0，当前权威数据点 |
+| `context-compaction/disabled/` | 15 | 早期关闭态跑分；携带 `peak_context_ratio`，用作对照 |
+| `context-compaction/disabled-smoke/` | 1 | 关闭态冒烟 |
+| `context-compaction-stress/` | 1 | 人为 `context_window` 极小，ratio 达 6.25；走 `blocked → force_synthesis`，是压缩路径唯一的活跑证据 |
+| `context-compaction/pre-metrics-wiring/` | 1 | 压缩指标接线之前的早期跑分，**无** `peak_context_ratio` 字段，仅作历史保留 |
+
+**真实语料上的峰值占比**：`enabled/`（全量 20 行）的 `peak_context_ratio` 区间 0.040–0.083，p95 ≈ 0.077；`disabled/`（15 行）p95 ≈ 0.067。两者一致，都比 `threshold=0.75` 低一个数量级。`compactions` 在每一问上都是 0——压缩路径在真实查询 + 当前模型窗口（128k）下从未触发，是经验事实而非仅代码推断。
+
+**退出判据复核**：
+
+- 「token 峰值下降且答案质量不劣于变更前」——前者在本工作负载上不可观测（`enabled/` 全量跑分中 `compactions` 全 0，无路径可压，`peak_input_tokens` 与关闭态同量级）；后者同时由代码层与经验证据成立：代码上 `enabled` 仅在 `_can_compact`（`react_loop_graph.py:413`，要求 `enabled` 且 `ratio ≥ threshold`）一处起作用，阈值以下查询无论开关状态都字节一致；经验上 `enabled/` 与 `disabled/` 的 `fact_coverage` 均值 0.351 vs 0.323（未劣化），逐问波动是 provider/搜索的非确定性（逐问 `compactions` 均为 0，与压缩无关）。
+- 「多步比较类问题不因 `keep_recent_rounds=2` 退化」——同理由成立：折叠从未发生，`keep_recent_rounds` 无机会施加影响。
+- 压缩路径的行为正确性由 `tests/test_context_compaction.py`（15 用例）+ 续跑压缩用例（`tests/test_conversation_resume.py`）+ stress 跑分覆盖。
+
+**对 `enabled` 默认 true 的结论**：安全。它在真实语料上是 no-op，但为长会话与未来小窗口模型保留了兜底；切换不改变任何对外行为。该开关是能力开关而非迁移期 flag，不属于 I5 要求在 M5 后删除的运行时开关。
+
+**Open Questions 的收尾回答**：`context_window` 默认 128000 已采纳；`keep_recent_rounds=2` 未观察到退化（路径休眠，且被折叠证据可经 `recall_evidence` 回灌）；手动压缩端点当前仅作调试接口，未接前端。
+
+## 附录 B：场景→测试覆盖矩阵（任务 10.1）
+
+delta specs 共 44 个 scenario，全部有覆盖。核心机制集中在 `tests/test_context_compaction.py`（15 用例，一用例覆盖多 scenario）；跨轮 / 端点 / 配置 / 审计分别落在对应主题测试文件。`react-agent` 的基础 loop 行为（基础流程 / 多工具 / 迭代上限 / 评估确认）由既有 loop 回归集覆盖，非本 change 新增。
+
+**context-compaction（29）**
+
+| Scenario | 覆盖 |
+|---|---|
+| 存在实测基线 | `test_token_budget_uses_measurement_then_calibrated_increment` |
+| 无实测基线 | `test_context_window_resolution_and_missing_usage_fallback` |
+| 上下文窗口取值 | `test_context_window_resolution_and_missing_usage_fallback` |
+| tier-1 足以回落 | `test_compact_uses_tier_one_without_summary_call_when_it_is_enough` |
+| tier-1 不足以回落 | `test_summary_uses_judge_first_and_never_includes_raw_tool_body`（summarize 单元）+ compact 节点 tier-1/truncate 集成 |
+| 折叠旧证据消息 | `test_ledger_headers_and_pointerization_keep_pairing_and_content` |
+| 折叠不破坏证据可追溯性 | 同上 + `test_recall_evidence_is_local_and_budgeted` |
+| 回灌已存在的证据 | `test_recall_evidence_is_local_and_budgeted` |
+| 回灌不存在的编号 | `test_recall_evidence_is_local_and_budgeted`（not_found） |
+| 回灌预算耗尽 | `test_recall_evidence_is_local_and_budgeted`（rejected） |
+| 轨迹包含失败抓取 | `test_partition_and_trace_preserve_recent_rounds_and_reasons` |
+| 轨迹包含驳回理由 | `test_partition_and_trace_preserve_recent_rounds_and_reasons` |
+| 压缩发生在评估之后 | `test_compact_route_is_disabled_but_terminal_still_wins`（路由优先级）+ 图结构 |
+| 首轮用户消息不被压缩 | `test_partition_and_trace_preserve_recent_rounds_and_reasons` + `test_compact_falls_back_to_truncate_when_both_summary_paths_fail` |
+| 切分点落在工具回合中间 | `test_safe_cut_moves_before_a_split_tool_turn` |
+| 压缩后不存在孤儿工具调用 | `test_safe_cut_moves_before_a_split_tool_turn` + `assert_tool_call_pairing`（贯穿各 compact 用例） |
+| 摘要引用既有编号 | `test_summary_rejects_citations_that_are_not_in_the_ledger` |
+| 摘要以用户角色注入 | `test_summary_failure_uses_deterministic_human_message_without_incrementing_iteration` |
+| 摘要 LLM 调用失败 | `test_summary_failure_uses_deterministic_human_message_without_incrementing_iteration` |
+| 全部降级到截断 | `test_compact_falls_back_to_truncate_when_both_summary_paths_fail` |
+| 压缩次数达上限 | `test_blocked_compaction_returns_through_act_before_synthesis` |
+| 压缩无效 | `test_blocked_compaction_returns_through_act_before_synthesis` |
+| 无可压缩区间 | `test_blocked_compaction_returns_through_act_before_synthesis` |
+| 证据池超出上界 | `test_evidence_pool_is_bounded_without_dropping_evidence_records` |
+| 压缩事件进入轨迹 | `test_compaction_trace_exposes_only_sanitized_metrics` + `test_audit_log::test_compaction_trace_event_is_kept_in_audit_steps` |
+| 结果暴露压缩指标 | `react_agent_orchestrator.py:368` 透传 + `test_baseline_runner::extract_loop_stats` + `test_langchain_react_agent::test_react_agent_orchestrator_langgraph_loop_status_metadata` |
+| 压缩被关闭 | `test_compact_route_is_disabled_but_terminal_still_wins` |
+| 手动压缩已有会话 | `test_server_logging::test_manual_compact_returns_checkpoint_metrics` |
+| 手动压缩不存在的会话 | `test_server_logging::test_manual_compact_returns_not_found_without_creating_a_conversation` |
+
+**conversation-resume（4）**
+
+| Scenario | 覆盖 |
+|---|---|
+| 续跑前超出预算 | `test_conversation_resume::test_resume_compacts_over_threshold_checkpoint_and_skips_under_threshold` |
+| 预算内不压缩 | 同上（under-threshold 断言）+ `test_control_fields_reset` |
+| 续跑继承已压缩序列 | `test_followup_keeps_native_tool_turns_paired` + checkpointer 继承机制 |
+| 续跑输入保持配对完整 | `test_followup_keeps_native_tool_turns_paired` |
+
+**react-agent（7）**
+
+| Scenario | 覆盖 |
+|---|---|
+| 基础 ReAct 推理流程 | 既有 loop 回归集（`test_react_loop_graph` / `test_agentic_loop_m*`） |
+| 多工具迭代选择 | 既有 loop 回归集 |
+| 达到最大迭代次数 | 既有 loop 回归集（exhausted） |
+| 缺失 LangGraph 依赖 | `test_langchain_react_agent::test_react_agent_orchestrator_langgraph_missing_package_fails_closed` |
+| 模型提议结束需经评估确认 | 既有 evaluate 回归集 |
+| 终止判定优先于压缩 | `test_compact_route_is_disabled_but_terminal_still_wins` |
+| 压缩后回到决策 | `test_compact_uses_tier_one_without_summary_call_when_it_is_enough`（compact→act）+ 图结构 |
+
+**react-tool-wrapper（4）**
+
+| Scenario | 覆盖 |
+|---|---|
+| Recall returns the stored entry | `test_recall_evidence_is_local_and_budgeted` |
+| Recall of an unknown identifier | `test_recall_evidence_is_local_and_budgeted` |
+| Recall budget is exhausted | `test_recall_evidence_is_local_and_budgeted` |
+| Recall performs no external call | `test_recall_evidence_is_local_and_budgeted`（断言不触发 search/fetch/skill） |

@@ -6,7 +6,7 @@
 Define the explicit LangGraph act/observe/evaluate loop used by the production runtime.
 ## Requirements
 ### Requirement: ReAct Agent 引擎
-系统 SHALL 提供基于显式状态机（LangGraph graph）的迭代推理引擎，图结构为 `act → observe → evaluate → (continue | finish)`。该引擎接收用户查询，输出最终回答，并且是唯一的 ReAct 响应循环实现。
+系统 SHALL 提供基于显式状态机（LangGraph graph）的迭代推理引擎，图结构为 `act → observe → evaluate → (continue | compact | finish)`。`compact` 节点 SHALL 只能由 `evaluate` 进入并且只能回到 `act`，SHALL NOT 递增 `iteration`。该引擎接收用户查询，输出最终回答，并且是唯一的 ReAct 响应循环实现。
 
 #### Scenario: 基础 ReAct 推理流程
 - **WHEN** 用户提交查询且系统使用 ReAct Agent 模式
@@ -33,6 +33,16 @@ Define the explicit LangGraph act/observe/evaluate loop used by the production r
 - **WHEN** 模型在 act 阶段产出最终答案提议
 - **THEN** 循环 SHALL NOT 直接终止
 - **AND** evaluate 节点 SHALL 验证约束 checklist 后方决定是否接受该答案
+
+#### Scenario: 终止判定优先于压缩
+- **WHEN** evaluate 同时判定循环可终止且预算越过压缩阈值
+- **THEN** 系统 SHALL 直接终止
+- **AND** 系统 SHALL NOT 执行压缩
+
+#### Scenario: 压缩后回到决策
+- **WHEN** `compact` 节点执行完毕
+- **THEN** 控制流 SHALL 回到 `act`
+- **AND** `iteration` SHALL NOT 因该次压缩而增加
 
 ### Requirement: Tool-aware ReAct Prompt
 系统 SHALL 为显式状态机注入与实际启用工具一致的系统提示，并且不暴露未启用工具。
@@ -87,3 +97,4 @@ process narration in `answer`.
 - **THEN** the response SHALL be excluded from the final answer
 - **AND** the trace SHALL identify the format outcome without including the
   raw model prose
+

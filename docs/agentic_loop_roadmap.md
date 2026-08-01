@@ -330,6 +330,12 @@ trace/control 与单一配置均有自动化回归；plan/loop 实测与完整�
 | 子 agent | 深度调研类问题下放给独立预算的子 loop |
 | Skill 热加载 / 第三方 skill | 只有当 skill 契约稳定数月后才值得做 |
 
+#### 2026-07 已落地：ReAct 上下文压缩（属于「会话与 loop 状态融合」）
+
+不变量 I4 在 token 维度上的缺口已补齐。`orchestrators/context_compaction.py` + `react_loop_graph.py` 的 `compact` 节点实现了分级压缩：tier-1 把超出保留窗口的工具观察折叠成 ledger 头部指针（确定性、零 LLM），不足以回落时 tier-2 用一次廉价摘要把中间区间收敛成结构化轨迹与答案草稿（不含工具原文）。跨轮不再按条数删消息，`_compute_message_removals` 已退役，续跑直接继承 checkpoint 中已压缩的序列；`recall_evidence` 工具按 `[En]` 回灌被折叠的全文。`orchestration.context_compaction.enabled` 默认 true，节点在图中但关闭态永不被路由选中。
+
+**基线结论（`runtime/baseline/context-compaction/`）**：在 `dataset/final_answer_dataset.csv` 上，峰值上下文占比 p95 ≈ 0.07，比 0.75 阈值低一个数量级——压缩路径在真实语料 + 当前模型窗口（128k）下从未被触发，是一个针对长会话 / 小窗口模型的兜底安全网，而非日常路径。因此 10.4 退出判据里「token 峰值下降」在本工作负载上不可观测（无路径可压），「答案质量不劣于变更前」由代码层保证成立：`enabled` 仅在 `_can_compact`（`enabled` 且 `ratio ≥ threshold`）一处起作用，阈值以下的查询无论开关状态都字节一致。压缩路径的行为正确性由 `tests/test_context_compaction.py` 的 15 个用例、一次人为小窗口的 stress 跑分，以及一份开启态全量跑分（`enabled/`，20 行，`compactions` 全 0）覆盖。详见 `openspec/changes/archive/2026-08-01-add-context-compaction/design.md` 的基线复核与场景覆盖矩阵。
+
 ---
 
 ## 5. 度量

@@ -787,6 +787,16 @@ def main() -> None:
         print(result["answer"])
         if not args.conversation_id:
             print(f"\n[conversation_id] {conversation_id}（使用 --conversation-id {conversation_id} 继续追问）")
+        if args.pretty:
+            control_payload = result.get("control") or {}
+            compactions = control_payload.get("compactions")
+            peak_ratio = control_payload.get("peak_context_ratio")
+            if compactions is not None or peak_ratio is not None:
+                print("\n[上下文压缩]")
+                if compactions is not None:
+                    print(f"- 压缩次数: {compactions}")
+                if peak_ratio is not None:
+                    print(f"- 峰值上下文占比: {peak_ratio:.1%}")
         if args.pretty and isinstance(timings_payload, dict):
             print("\n[响应时间]")
             total_ms = timings_payload.get("total_ms")

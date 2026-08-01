@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool as lc_tool
 
@@ -207,6 +207,71 @@ class TestFollowupStateInput:
         )
         assert not hasattr(runner, "history_window")
         assert not hasattr(runner, "_compute_message_removals")
+
+    def test_resume_compacts_over_threshold_checkpoint_and_skips_under_threshold(self):
+        # Task 7.2 exit criterion: a checkpoint whose estimated context ratio
+        # exceeds the threshold is compacted before the follow-up is appended,
+        # while a sub-threshold checkpoint is left untouched. Compaction must
+        # keep the first user message and the most-recent final answer, and
+        # must not orphan any tool_call.
+        runner = ReactLoopGraphRunner(
+            llm=ScriptedChatModel(replies=["compact summary"]),
+            tools=[],
+            context_compaction_config={
+                "enabled": True,
+                "context_window": 1500,
+                "threshold": 0.1,
+                "keep_recent_rounds": 1,
+            },
+        )
+        big_body = "证据正文段落" * 200
+        messages: List[Any] = [HumanMessage(content="首轮问题", id="u1")]
+        for index in range(1, 4):
+            call_id = f"c{index}"
+            messages.append(
+                AIMessage(
+                    content="",
+                    id=f"a{index}",
+                    tool_calls=[
+                        {"name": "web_search", "args": {"query": "q"}, "id": call_id, "type": "tool_call"}
+                    ],
+                )
+            )
+            messages.append(ToolMessage(content=big_body, tool_call_id=call_id, id=f"t{index}"))
+        messages.append(AIMessage(content="最终答案草稿", id="final"))
+
+        captured: Dict[str, Any] = {}
+
+        def update_state(config, update, as_node=None):
+            captured["update"] = update
+            captured["as_node"] = as_node
+
+        over_graph = SimpleNamespace(
+            get_state=lambda config: SimpleNamespace(
+                values={"messages": messages, "evidence_records": [], "compactions": 0}
+            ),
+            update_state=update_state,
+        )
+        update = runner._compact_checkpoint_if_needed(
+            over_graph, {"configurable": {"thread_id": "t"}}
+        )
+        assert update is not None
+        assert captured["as_node"] == "compact"
+        kept = [m for m in update["messages"] if not isinstance(m, RemoveMessage)]
+        assert kept[0].content == "首轮问题"
+        assert any(
+            isinstance(m, AIMessage) and m.content == "最终答案草稿" for m in kept
+        )
+        assert_tool_call_pairing(kept)
+
+        # Sub-threshold checkpoint is left untouched (no compaction, no write).
+        under_graph = SimpleNamespace(
+            get_state=lambda config: SimpleNamespace(
+                values={"messages": [HumanMessage(content="hi", id="h")], "evidence_records": []}
+            ),
+            update_state=update_state,
+        )
+        assert runner._compact_checkpoint_if_needed(under_graph, {}) is None
 
 
 # ---------------------------------------------------------------------------
