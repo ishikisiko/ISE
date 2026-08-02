@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from llm.api import HKGAIClient
+from llm.api import LLMClient
 from langchain.langchain_support import Document, FileReader, LangChainVectorStore
 from search.rerank import BaseReranker
 from search.search import SearchClient, SearchHit, GoogleSearchClient
@@ -42,7 +42,7 @@ class SearchRAG:
 
     def __init__(
         self,
-        llm_client: HKGAIClient,
+        llm_client: LLMClient,
         search_client: SearchClient,
         data_path: Optional[str] = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
@@ -208,8 +208,7 @@ class SearchRAG:
     ) -> List[SearchHit]:
         """执行颗粒化搜索fallback"""
         import json
-        from api import HKGAIClient
-        
+
         # 第一步：使用LLM生成更宽泛的搜索查询
         broad_search_prompt = (
             f"原始查询：{original_query}\n\n"

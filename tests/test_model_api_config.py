@@ -9,8 +9,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 import server
 from langchain.langchain_llm import create_chat_model, create_role_chat_model
 from langchain.langchain_orchestrator import create_langchain_orchestrator
-from llm.api import LLMClient
-from llm.google_api import build_google_endpoint, build_google_payload
 from main import build_llm_client, build_reranker, build_search_client
 from skills import SkillRegistry
 
@@ -25,10 +23,10 @@ def _provider_config() -> dict:
                 "base_url": "https://example.com/anthropic",
                 "available_models": ["glm-4.6", "glm-4.5-air"],
             },
-            "google": {
-                "api_key": "test-google-key",
-                "model": "gemini-2.5-flash",
-                "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "minimax": {
+                "api_key": "test-minimax-key",
+                "model": "MiniMax-M2",
+                "base_url": "https://api.minimaxi.com/anthropic/v1",
             },
         },
     }
@@ -165,110 +163,6 @@ def test_legacy_client_resolves_opencode_go_model_api_style():
     assert client.anthropic_compatible is True
 
 
-def test_native_google_request_shape(monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "candidates": [
-                    {"content": {"parts": [{"text": "Gemini response"}]}}
-                ]
-            }
-
-    class FakeSession:
-        def post(self, url, **kwargs):
-            captured["url"] = url
-            captured.update(kwargs)
-            return FakeResponse()
-
-    model = create_chat_model(provider="google", config=_provider_config())
-    monkeypatch.setattr(model, "_session", FakeSession())
-
-    response = model.invoke(
-        [SystemMessage(content="Be concise."), HumanMessage(content="Hello")]
-    )
-
-    assert captured["url"].endswith(
-        "/models/gemini-2.5-flash:generateContent"
-    )
-    assert captured["headers"]["x-goog-api-key"] == "test-google-key"
-    assert "Authorization" not in captured["headers"]
-    assert captured["json"]["systemInstruction"]["parts"][0]["text"] == "Be concise."
-    assert captured["json"]["contents"][0]["role"] == "user"
-    assert response.content == "Gemini response"
-
-
-def test_legacy_client_uses_native_google_api():
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "candidates": [
-                    {"content": {"parts": [{"text": "Legacy response"}]}}
-                ]
-            }
-
-    class FakeSession:
-        def post(self, url, **kwargs):
-            captured["url"] = url
-            captured.update(kwargs)
-            return FakeResponse()
-
-    client = LLMClient(
-        api_key="test-google-key",
-        model_id="gemini-2.5-flash",
-        base_url="https://generativelanguage.googleapis.com/v1beta",
-        provider="google",
-    )
-    client.session = FakeSession()
-
-    response = client.chat("Be concise.", "Hello")
-
-    assert captured["url"].endswith(
-        "/models/gemini-2.5-flash:generateContent"
-    )
-    assert captured["headers"]["x-goog-api-key"] == "test-google-key"
-    assert response["content"] == "Legacy response"
-
-
-def test_google_multimodal_payload_and_stream_endpoint():
-    payload = build_google_payload(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this"},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": "data:image/png;base64,abc123"},
-                    },
-                ],
-            }
-        ],
-        max_tokens=200,
-        temperature=0.2,
-        stop=["STOP"],
-    )
-
-    assert payload["contents"][0]["parts"][1] == {
-        "inlineData": {"mimeType": "image/png", "data": "abc123"}
-    }
-    assert payload["generationConfig"]["stopSequences"] == ["STOP"]
-    assert build_google_endpoint(
-        "https://generativelanguage.googleapis.com/v1beta",
-        "models/gemini-2.5-flash",
-        stream=True,
-    ).endswith("/models/gemini-2.5-flash:streamGenerateContent?alt=sse")
-
-
 def test_rerank_enabled_flag_is_authoritative():
     disabled, _ = build_reranker(
         {
@@ -333,7 +227,7 @@ def test_example_placeholders_are_not_treated_as_credentials():
 
 def test_models_api_only_advertises_configured_providers(monkeypatch):
     config = _provider_config()
-    config["providers"]["google"]["api_key"] = "YOUR_GOOGLE_API_KEY_HERE"
+    config["providers"]["minimax"]["api_key"] = "YOUR_MINIMAX_API_KEY_HERE"
     monkeypatch.setattr(server, "load_base_config", lambda: config)
 
     with server.app.test_client() as client:

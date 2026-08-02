@@ -1,4 +1,4 @@
 # LLM client modules
-from .api import LLMClient, HKGAIClient
+from .api import LLMClient
 
-__all__ = ["LLMClient", "HKGAIClient"]
+__all__ = ["LLMClient"]

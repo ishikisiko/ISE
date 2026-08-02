@@ -19,7 +19,7 @@ def test_load_runtime_config_prefers_nlp_config_path(monkeypatch, tmp_path):
 
 def test_load_runtime_config_explicit_path_overrides_env(monkeypatch, tmp_path):
     env_path = tmp_path / "env_config.json"
-    env_path.write_text(json.dumps({"LLM_PROVIDER": "openai"}), encoding="utf-8")
+    env_path.write_text(json.dumps({"LLM_PROVIDER": "minimax"}), encoding="utf-8")
     explicit_path = tmp_path / "explicit_config.json"
     explicit_path.write_text(json.dumps({"LLM_PROVIDER": "zai"}), encoding="utf-8")
 

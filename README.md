@@ -157,11 +157,10 @@ See [ENVIRONMENT.md](ENVIRONMENT.md) for the complete run/test environment guide
 
 ### Supported LLM providers
 
-- **OpenAI** — `LLM_PROVIDER: "openai"`
+- **OpenCode Go** — `LLM_PROVIDER: "opencode-go"` (default)
 - **Anthropic Claude** — `LLM_PROVIDER: "anthropic"`
-- **Google Gemini** — `LLM_PROVIDER: "google"`
-- **GLM (智谱AI)** — `LLM_PROVIDER: "glm"` (default), GLM-4.6
-- **HKGAI** — `LLM_PROVIDER: "hkgai"`
+- **GLM (智谱AI)** — `LLM_PROVIDER: "glm"` / `"zai"`, GLM-4.6
+- **OpenRouter** — `LLM_PROVIDER: "openrouter"`
 - **MiniMax** — `LLM_PROVIDER: "minimax"`, MiniMax-M2 with optional
   [thinking mode](config.example.json) (`thinking.enabled` /
   `thinking.display_in_response`)

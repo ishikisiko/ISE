@@ -8,12 +8,6 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError, Timeout, RequestException
 from urllib3.util.retry import Retry
 
-from llm.google_api import (
-    build_google_endpoint,
-    build_google_payload,
-    extract_google_content,
-)
-
 
 VALID_API_STYLES = {"auto", "openai", "anthropic"}
 
@@ -41,10 +35,10 @@ class LLMClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_id: str = "gpt-3.5-turbo",
-        base_url: str = "https://api.openai.com/v1",
+        model_id: str = "deepseek-v4-flash",
+        base_url: str = "https://opencode.ai/zen/go/v1",
         request_timeout: int = 60,
-        provider: str = "openai",
+        provider: str = "opencode-go",
         max_retries: int = 3,
         backoff_factor: float = 1.0,
         thinking_enabled: bool = False,
@@ -96,14 +90,10 @@ class LLMClient:
             self.headers["x-api-key"] = self.api_key
             # Some Anthropic-compatible providers require an explicit version header
             self.headers["anthropic-version"] = "2023-06-01"
-        elif provider == "openai":
-            self.headers["Authorization"] = f"Bearer {self.api_key}"
         elif provider == "anthropic":
             # Anthropic provider should also use x-api-key and anthopic-version header
             self.headers["x-api-key"] = self.api_key
             self.headers["anthropic-version"] = "2023-06-01"
-        elif provider == "google":
-            self.headers["x-goog-api-key"] = self.api_key
         elif provider in ("glm", "zai") and not self.anthropic_compatible:
             self.headers["Authorization"] = f"Bearer {self.api_key}"
         elif provider == "openrouter":
@@ -188,16 +178,14 @@ class LLMClient:
     ) -> Dict[str, Any]:
         """Chat method for OpenAI-compatible APIs with enhanced error handling."""
         endpoint = f"{self.base_url}/chat/completions"
-        if self.provider == "google":
-            endpoint = build_google_endpoint(self.base_url, self.model_id)
-        elif self.anthropic_compatible:
+        if self.anthropic_compatible:
             endpoint = f"{self.base_url}/messages"
-        
+
         # Build messages array
         messages = [{"role": "system", "content": system_prompt}]
         if extra_messages:
             messages.extend(extra_messages)
-        
+
         # Handle images for supported vision models
         # We enable this for known vision-capable models or if explicitly requested
         vision_keywords = ["grok", "gpt-4", "claude", "gemini", "glm-4v", "glm-4.5v", "claude-4.5-haiku", "vision", "minimax"]
@@ -224,19 +212,12 @@ class LLMClient:
              # The system prompt should contain information about images and any vision metadata
              messages.append({"role": "user", "content": user_prompt})
 
-        if self.provider == "google":
-            payload = build_google_payload(
-                messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-        else:
-            payload = {
-                "model": self.model_id,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            }
+        payload = {
+            "model": self.model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
 
         # GLM/Zai-specific adjustments
         if self.provider in ("glm", "zai") and not self.anthropic_compatible:
@@ -343,8 +324,6 @@ class LLMClient:
         content = ""
         thinking_content = ""
         try:
-            if self.provider == "google":
-                content = extract_google_content(data)
             # Anthropic-style response handling
             if self.anthropic_compatible:
                 # Try to find content blocks
@@ -444,31 +423,22 @@ class LLMClient:
     ) -> Dict[str, Any]:
         """Chat method for OpenAI-compatible APIs with enhanced error handling."""
         endpoint = f"{self.base_url}/chat/completions"
-        if self.provider == "google":
-            endpoint = build_google_endpoint(self.base_url, self.model_id, stream=True)
-        elif self.anthropic_compatible:
+        if self.anthropic_compatible:
             endpoint = f"{self.base_url}/messages"
-        
+
         # Build messages array
         messages = [{"role": "system", "content": system_prompt}]
         if extra_messages:
             messages.extend(extra_messages)
         messages.append({"role": "user", "content": user_prompt})
 
-        if self.provider == "google":
-            payload = build_google_payload(
-                messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-        else:
-            payload = {
-                "model": self.model_id,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": True,
-            }
+        payload = {
+            "model": self.model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
 
         if self.anthropic_compatible:
             system_msg, anthro_msgs = self._convert_to_anthropic_messages(messages)
@@ -556,11 +526,6 @@ class LLMClient:
                             break
                         try:
                             chunk = json.loads(json_str)
-                            if self.provider == "google":
-                                content = extract_google_content(chunk, strip=False)
-                                if content:
-                                    yield content
-                                continue
                             if self.anthropic_compatible:
                                 # Minimax/Athropic style streaming: look for content deltas
                                 # chunk may have 'content', 'type', or nested message
@@ -590,28 +555,3 @@ class LLMClient:
                             continue
         except Exception as e:
             yield f"Error: Failed to process stream: {str(e)}"
-
-
-
-
-class HKGAIClient(LLMClient):
-    """Legacy wrapper for HKGAI service."""
-    
-    def __init__(self, api_key: Optional[str] = None) -> None:
-        super().__init__(
-            api_key=api_key,
-            model_id="HKGAI-V1",
-            base_url="https://oneapi.hkgai.net/v1",
-            provider="hkgai"
-        )
-
-
-if __name__ == "__main__":
-    client = HKGAIClient()
-    system_prompt = "You are a helpful AI assistant providing concise and accurate responses."
-    user_prompt = "what is the capital of China?"
-    result = client.chat(system_prompt, user_prompt)
-    try:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        print(json.dumps(result, indent=2, ensure_ascii=False).encode('utf-8', errors='replace').decode('utf-8'))

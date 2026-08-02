@@ -113,12 +113,10 @@ NLP_Project/
 - **Python 3.x**: 主要开发语言
 
 ### 3.2 大型语言模型 (LLM)
-- **OpenAI**: GPT-3.5-turbo, GPT-4系列
+- **OpenCode Go**: 多模型聚合入口 (DeepSeek, GLM, Kimi, Qwen, MiniMax 等)
 - **Anthropic**: Claude-3 (Sonnet, Haiku, Opus)
-- **Google**: Gemini-pro, Gemini-pro-vision
 - **智谱AI**: GLM-4.6, GLM-4V, GLM-4.5-air
 - **MiniMax**: MiniMax-M2 (支持思考模式)
-- **HKGAI**: HKGAI-V1
 - **通义千问**: Qwen系列（含重排序模型）
 - **OpenRouter**: 多模型聚合平台
 

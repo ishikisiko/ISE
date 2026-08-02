@@ -236,25 +236,6 @@
         }
     },
     "providers": {
-        "openai": {
-            "api_key": "YOUR_OPENAI_API_KEY_HERE",
-            "model": "gpt-3.5-turbo",
-            "base_url": "https://api.openai.com/v1"
-        },
-        "google": {
-            "api_key": "YOUR_GOOGLE_API_KEY_HERE",
-            "model": "gemini-2.5-flash",
-            "base_url": "https://generativelanguage.googleapis.com/v1beta",
-            "available_models": [
-                "gemini-2.5-flash",
-                "gemini-2.5-flash-lite"
-            ]
-        },
-        "hkgai": {
-            "api_key": "YOUR_HKGAI_API_KEY_HERE",
-            "model": "HKGAI-V1",
-            "base_url": "https://oneapi.hkgai.net/v1"
-        },
         "opencode-go": {
             "api_key": "YOUR_OPENCODE_GO_API_KEY_HERE",
             "model": "deepseek-v4-flash",

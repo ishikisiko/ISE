@@ -8,7 +8,7 @@ from typing import Optional, Tuple, Dict, Any, List, Union, Set
 # Add project directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from llm.api import LLMClient, HKGAIClient, resolve_model_api_style
+from llm.api import LLMClient, resolve_model_api_style
 from search.search import (
     CombinedSearchClient,
     BraveSearchClient,
@@ -366,7 +366,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--provider",
         type=str,
-        help="Override the LLM provider or model (opencode-go, openai, anthropic, google, glm, zai, hkgai, openrouter, minimax, or a configured model ID).",
+        help="Override the LLM provider or model (opencode-go, anthropic, glm, zai, openrouter, minimax, or a configured model ID).",
     )
     parser.add_argument(
         "--model",
@@ -447,7 +447,7 @@ def build_llm_client(
             model_id = provider_or_model
     else:
         # Check if it's a known provider name
-        supported_providers = ["opencode-go", "openai", "anthropic", "google", "glm", "zai", "hkgai", "openrouter", "minimax"]
+        supported_providers = ["opencode-go", "anthropic", "glm", "zai", "openrouter", "minimax"]
         if provider_or_model in supported_providers:
             # It's a provider name
             provider = provider_or_model
@@ -475,14 +475,10 @@ def build_llm_client(
                 model_id = None
     
     # Validate provider
-    supported_providers = ["opencode-go", "openai", "anthropic", "google", "glm", "zai", "hkgai", "openrouter", "minimax"]
+    supported_providers = ["opencode-go", "anthropic", "glm", "zai", "openrouter", "minimax"]
     if provider not in supported_providers:
         raise ValueError(f"Unsupported provider '{provider}'. Supported providers: {', '.join(supported_providers)}")
-    
-    if provider == "hkgai":
-        # Use legacy HKGAI client for backward compatibility
-        return HKGAIClient(api_key=config.get("providers", {}).get("hkgai", {}).get("api_key"))
-    
+
     provider_config_raw = config.get("providers", {}).get(provider, {})
     if not provider_config_raw:
         raise ValueError(f"Provider '{provider}' not found in configuration")

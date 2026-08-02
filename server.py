@@ -276,10 +276,7 @@ def build_pipeline(
             "minimax",
             "zai",
             "glm",
-            "openai",
             "anthropic",
-            "google",
-            "hkgai",
             "openrouter",
         ]
         for candidate in preferred_order:

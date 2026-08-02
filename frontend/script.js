@@ -1347,12 +1347,9 @@ document.addEventListener("DOMContentLoaded", () => {
         "opencode-go": { label: "OpenCode Go", order: 1 },
         zai: { label: "Zai", order: 2 },
         glm: { label: "GLM", order: 3 },
-        openai: { label: "OpenAI", order: 4 },
-        anthropic: { label: "Anthropic", order: 5 },
-        google: { label: "Google", order: 6 },
-        minimax: { label: "Minimax", order: 7 },
-        hkgai: { label: "HKGAI", order: 8 },
-        openrouter: { label: "OpenRouter", order: 9 },
+        anthropic: { label: "Anthropic", order: 4 },
+        minimax: { label: "Minimax", order: 5 },
+        openrouter: { label: "OpenRouter", order: 6 },
     };
 
     function refreshTopbarModel() {

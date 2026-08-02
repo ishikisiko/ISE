@@ -19,11 +19,6 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import Field, SecretStr
 
-from llm.google_api import (
-    build_google_endpoint,
-    build_google_payload,
-    extract_google_content,
-)
 from llm.api import resolve_model_api_style
 from utils.config_validation import configured_value
 
@@ -38,17 +33,17 @@ def _load_config() -> Dict[str, Any]:
 
 
 class UniversalChatModel(BaseChatModel):
-    """A universal chat model for native Gemini and compatible chat APIs.
-    
-    Supports OpenCode Go, OpenAI, Anthropic, Google, GLM, ZAI, OpenRouter,
-    MiniMax, and other compatible APIs.
+    """A universal chat model for OpenAI- and Anthropic-style chat APIs.
+
+    Supports OpenCode Go, Anthropic, GLM, ZAI, OpenRouter, MiniMax, and other
+    compatible APIs.
     """
-    
+
     # Pydantic model fields
     api_key: SecretStr = Field(default=None, description="API key for the provider")
-    model_name: str = Field(default="gpt-3.5-turbo", alias="model")
-    base_url: str = Field(default="https://api.openai.com/v1")
-    provider: str = Field(default="openai")
+    model_name: str = Field(default="deepseek-v4-flash", alias="model")
+    base_url: str = Field(default="https://opencode.ai/zen/go/v1")
+    provider: str = Field(default="opencode-go")
     api_style: str = Field(default="auto")
     request_timeout: int = Field(default=60)
     max_retries: int = Field(default=3)
@@ -113,9 +108,7 @@ class UniversalChatModel(BaseChatModel):
         headers = {"Content-Type": "application/json"}
         api_key = self.api_key.get_secret_value() if self.api_key else ""
         
-        if self.provider == "google":
-            headers["x-goog-api-key"] = api_key
-        elif self._anthropic_compatible or self.provider == "anthropic":
+        if self._anthropic_compatible or self.provider == "anthropic":
             headers["x-api-key"] = api_key
             headers["anthropic-version"] = "2023-06-01"
         elif self.provider == "openrouter":
@@ -221,25 +214,16 @@ class UniversalChatModel(BaseChatModel):
         import requests
         
         endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
-        if self.provider == "google":
-            endpoint = build_google_endpoint(self.base_url, self.model_name)
-        elif self._anthropic_compatible:
+        if self._anthropic_compatible:
             endpoint = f"{self.base_url.rstrip('/')}/messages"
-        
+
         converted_messages = self._convert_messages(messages)
-        
+
         max_tokens = kwargs.get("max_tokens", self.max_tokens)
         temperature = kwargs.get("temperature", self.temperature)
         payload: Dict[str, Any]
 
-        if self.provider == "google":
-            payload = build_google_payload(
-                converted_messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                stop=stop,
-            )
-        elif self._anthropic_compatible:
+        if self._anthropic_compatible:
             payload = {
                 "model": self.model_name,
                 "max_tokens": max_tokens,
@@ -261,7 +245,7 @@ class UniversalChatModel(BaseChatModel):
             if self.provider in ("glm", "zai"):
                 payload["stream"] = False
 
-        if stop and self.provider != "google":
+        if stop:
             if self._anthropic_compatible:
                 payload["stop_sequences"] = stop
             else:
@@ -358,9 +342,6 @@ class UniversalChatModel(BaseChatModel):
 
     def _extract_content(self, data: Dict[str, Any]) -> str:
         """Extract content from API response."""
-        if self.provider == "google":
-            return extract_google_content(data)
-
         # Anthropic-style response
         if self._anthropic_compatible:
             content_blocks = None
@@ -428,25 +409,16 @@ class UniversalChatModel(BaseChatModel):
         import requests
         
         endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
-        if self.provider == "google":
-            endpoint = build_google_endpoint(self.base_url, self.model_name, stream=True)
-        elif self._anthropic_compatible:
+        if self._anthropic_compatible:
             endpoint = f"{self.base_url.rstrip('/')}/messages"
-        
+
         converted_messages = self._convert_messages(messages)
-        
+
         max_tokens = kwargs.get("max_tokens", self.max_tokens)
         temperature = kwargs.get("temperature", self.temperature)
         payload: Dict[str, Any]
 
-        if self.provider == "google":
-            payload = build_google_payload(
-                converted_messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                stop=stop,
-            )
-        elif self._anthropic_compatible:
+        if self._anthropic_compatible:
             payload = {
                 "model": self.model_name,
                 "max_tokens": max_tokens,
@@ -466,12 +438,12 @@ class UniversalChatModel(BaseChatModel):
             }
             payload["messages"] = converted_messages
 
-        if stop and self.provider != "google":
+        if stop:
             if self._anthropic_compatible:
                 payload["stop_sequences"] = stop
             else:
                 payload["stop"] = stop
-        
+
         response = self._session.post(
             endpoint,
             headers=self._get_headers(),
@@ -500,8 +472,6 @@ class UniversalChatModel(BaseChatModel):
 
     def _extract_stream_content(self, chunk: Dict[str, Any]) -> str:
         """Extract content from a streaming chunk."""
-        if self.provider == "google":
-            return extract_google_content(chunk, strip=False)
         if self._anthropic_compatible:
             if chunk.get("type") == "content_block_delta":
                 delta = chunk.get("delta") or {}
@@ -553,7 +523,7 @@ def create_chat_model(
     """Factory function to create a chat model from configuration.
     
     Args:
-        provider: Provider name, such as opencode-go, openai, google, or minimax
+        provider: Provider name, such as opencode-go, anthropic, zai, or minimax
         model: Model ID/name
         config: Configuration dictionary (loaded from config.json if not provided)
         **kwargs: Additional parameters passed to UniversalChatModel
@@ -598,7 +568,7 @@ def create_chat_model(
     model_params = {
         "api_key": SecretStr(api_key),
         "model_name": final_model,
-        "base_url": base_url or provider_config.get("base_url", "https://api.openai.com/v1"),
+        "base_url": base_url or provider_config.get("base_url", "https://opencode.ai/zen/go/v1"),
         "provider": provider,
         "api_style": resolve_model_api_style(provider_config, final_model),
         "request_timeout": provider_config.get("request_timeout", llm_settings.get("default_timeout", 60)),
@@ -648,11 +618,6 @@ def create_role_chat_model(
 
 
 # Convenience aliases for specific providers
-def create_openai_chat(**kwargs: Any) -> UniversalChatModel:
-    """Create an OpenAI chat model."""
-    return create_chat_model(provider="openai", **kwargs)
-
-
 def create_anthropic_chat(**kwargs: Any) -> UniversalChatModel:
     """Create an Anthropic chat model."""
     return create_chat_model(provider="anthropic", **kwargs)

@@ -10,7 +10,7 @@ NLP_Project/
 ├── main.py                  # CLI 入口，编排器构建
 ├── server.py                # Flask Web API 服务器
 ├── llm/                     # LLM 客户端模块
-│   └── api.py              # LLMClient, HKGAIClient
+│   └── api.py              # LLMClient
 ├── search/                  # 搜索相关模块
 │   ├── search.py           # 搜索客户端 (Brave, Bright Data, Google)
 │   ├── rerank.py           # 重排序器 (Qwen3Reranker)
