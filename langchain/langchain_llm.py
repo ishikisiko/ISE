@@ -52,6 +52,12 @@ class UniversalChatModel(BaseChatModel):
     display_thinking: bool = Field(default=False)
     temperature: float = Field(default=0.7)
     max_tokens: int = Field(default=5000)
+    # Reasoning/thinking control for reasoning models (e.g. deepseek-v4 which
+    # thinks at "high" effort by default). OpenAI-style values:
+    #   "disabled" -> fully off (fastest)
+    #   "low"/"high"/"max" -> reasoning_effort level
+    # None leaves the provider default untouched.
+    reasoning: Optional[str] = None
     
     # Internal state
     _session: Any = None
@@ -203,6 +209,26 @@ class UniversalChatModel(BaseChatModel):
         
         return system_msg, anthropic_msgs
 
+    def _apply_reasoning(self, payload: Dict[str, Any], level: Optional[str] = None) -> None:
+        """Inject reasoning/thinking controls for reasoning models.
+
+        Only applied on the OpenAI-compatible path. DeepSeek v4 thinks at
+        "high" effort by default; "disabled" fully turns it off (and avoids the
+        requirement to pass ``reasoning_content`` back on tool calls), while
+        "low"/"high"/"max" set ``reasoning_effort``. A per-call ``level`` (from
+        the ``reasoning`` invoke kwarg) takes precedence over the model default
+        so callers can vary reasoning by scenario without mutating a shared
+        model instance.
+        """
+        resolved = self.reasoning if level is None else level
+        resolved = (resolved or "").strip().lower()
+        if not resolved:
+            return
+        if resolved == "disabled":
+            payload["thinking"] = {"type": "disabled"}
+        elif resolved in ("low", "high", "max"):
+            payload["reasoning_effort"] = resolved
+
     def _generate(
         self,
         messages: List[BaseMessage],
@@ -244,6 +270,7 @@ class UniversalChatModel(BaseChatModel):
             payload["messages"] = converted_messages
             if self.provider in ("glm", "zai"):
                 payload["stream"] = False
+            self._apply_reasoning(payload, kwargs.get("reasoning"))
 
         if stop:
             if self._anthropic_compatible:
@@ -437,6 +464,7 @@ class UniversalChatModel(BaseChatModel):
                 "stream": True,
             }
             payload["messages"] = converted_messages
+            self._apply_reasoning(payload, kwargs.get("reasoning"))
 
         if stop:
             if self._anthropic_compatible:
@@ -576,6 +604,7 @@ def create_chat_model(
         "backoff_factor": provider_config.get("backoff_factor", llm_settings.get("backoff_factor", 2.0)),
         "thinking_enabled": thinking_config.get("enabled", False) if isinstance(thinking_config, dict) else False,
         "display_thinking": thinking_config.get("display_in_response", False) if isinstance(thinking_config, dict) else False,
+        "reasoning": provider_config.get("reasoning"),
     }
     
     # Override with kwargs
@@ -606,6 +635,7 @@ def create_role_chat_model(
             "temperature",
             "max_tokens",
             "api_style",
+            "reasoning",
         )
         if role_config.get(key) is not None
     }

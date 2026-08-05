@@ -139,7 +139,23 @@
         "judge": {
             "enabled": true,
             "provider": "opencode-go",
-            "model": "deepseek-v4-flash"
+            "model": "deepseek-v4-flash",
+            "temperature": 0,
+            "max_tokens": 512,
+            "reasoning": "disabled"
+        },
+        "reasoning_policy": {
+            "easy": "low",
+            "hard": "high",
+            "judge_easy": "disabled",
+            "judge_hard": "low",
+            "hard_claim_classes": [
+                "comparison",
+                "pricing",
+                "numeric",
+                "historical",
+                "compliance"
+            ]
         }
     },
     "embeddings": {
@@ -241,6 +257,7 @@
             "model": "deepseek-v4-flash",
             "base_url": "https://opencode.ai/zen/go/v1",
             "api_style": "openai",
+            "reasoning": "low",
             "available_models": [
                 "glm-5.2",
                 "glm-5.1",

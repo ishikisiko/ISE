@@ -118,6 +118,58 @@ def make_runner(
     )
 
 
+class TestReasoningPolicyResolution:
+    """Per-scenario reasoning levels are derived from the query analysis."""
+
+    POLICY = {
+        "easy": "low",
+        "hard": "high",
+        "judge_easy": "disabled",
+        "judge_hard": "low",
+        "hard_claim_classes": ["comparison", "pricing", "numeric", "historical"],
+    }
+
+    @staticmethod
+    def _runner(*, claim_classes, comparison_required=False):
+        analysis = QueryAnalysis(
+            query="q",
+            claim_classes=list(claim_classes),
+            constraints={"comparison_required": comparison_required},
+        )
+        return ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(replies=["unused"]),
+            tools=[],
+            query="q",
+            analysis=analysis,
+            termination_config={"reasoning_policy": TestReasoningPolicyResolution.POLICY},
+        )
+
+    def test_easy_scenario_uses_low_and_disabled_judge(self):
+        runner = self._runner(claim_classes=["current"])
+        assert runner._act_reasoning == "low"
+        assert runner._judge_reasoning == "disabled"
+
+    def test_comparison_scenario_uses_high_and_low_judge(self):
+        runner = self._runner(claim_classes=["comparison"], comparison_required=True)
+        assert runner._act_reasoning == "high"
+        assert runner._judge_reasoning == "low"
+
+    def test_pricing_scenario_is_hard(self):
+        runner = self._runner(claim_classes=["numeric", "pricing"])
+        assert runner._act_reasoning == "high"
+
+    def test_no_policy_falls_back_to_model_default(self):
+        analysis = QueryAnalysis(query="q", claim_classes=["comparison"])
+        runner = ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(replies=["unused"]),
+            tools=[],
+            query="q",
+            analysis=analysis,
+        )
+        assert runner._act_reasoning is None
+        assert runner._judge_reasoning is None
+
+
 class TestTerminationSemantics:
     def test_authority_rejection_points_directly_to_unfetched_official_page(self):
         analysis = QueryAnalysis(

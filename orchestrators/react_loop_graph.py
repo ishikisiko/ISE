@@ -287,10 +287,18 @@ class ReactLoopGraphRunner:
         self.max_iterations = max(1, int(max_iterations or 5))
         self.eval_cfg = normalize_termination_config(termination_config)
         self.max_synthesis_attempts = self.eval_cfg["max_synthesis_attempts"]
+        # Per-scenario reasoning levels (DeepSeek v4 thinks at "high" by
+        # default; easy queries run faster at "low"/"disabled", hard queries
+        # keep "high" for answer quality). Resolved per-query from the analysis
+        # and applied as a per-call kwarg so shared model objects stay untouched.
+        self._reasoning_policy = (termination_config or {}).get("reasoning_policy") or {}
+        self._act_reasoning: Optional[str] = None
+        self._judge_reasoning: Optional[str] = None
         self.judge_llm = judge_llm
         self.query = query
         self.time_constraint = time_constraint
         self.analysis = analysis
+        self._resolve_reasoning_levels()
         self.timing_recorder = timing_recorder
         self.execution_trace = execution_trace
         # ConversationManager still owns history_window for transcript reads;
@@ -349,6 +357,35 @@ class ReactLoopGraphRunner:
     # ------------------------------------------------------------------
     # Setup helpers
     # ------------------------------------------------------------------
+    def _resolve_reasoning_levels(self) -> None:
+        """Pick per-scenario reasoning levels for the act and judge LLM calls.
+
+        Easy scenarios (listing/existence, simple lookup, volatile-value) run
+        at a low level for speed; hard scenarios (comparison, pricing/numeric,
+        historical, compliance) keep a high level so the final answer keeps
+        quality. Levels are passed per call, so a model shared across queries
+        (the server caches it) is never mutated.
+        """
+        policy = self._reasoning_policy or {}
+        if not policy:
+            # No policy configured: leave calls at each model's own default.
+            self._act_reasoning = None
+            self._judge_reasoning = None
+            return
+        easy = str(policy.get("easy", "low")).lower()
+        hard = str(policy.get("hard", "high")).lower()
+        judge_easy = str(policy.get("judge_easy", "disabled")).lower()
+        judge_hard = str(policy.get("judge_hard", "low")).lower()
+        hard_classes = set(policy.get("hard_claim_classes") or ())
+        claim = set(getattr(self.analysis, "claim_classes", None) or [])
+        constraints = getattr(self.analysis, "constraints", None) or {}
+        is_hard = bool(claim & hard_classes) or bool(
+            constraints.get("comparison_required")
+            or constraints.get("historical_coverage_required")
+        )
+        self._act_reasoning = hard if is_hard else easy
+        self._judge_reasoning = judge_hard if is_hard else judge_easy
+
     def _derive_checklist(self) -> List[str]:
         """Derive the initial constraint checklist.
 
@@ -357,8 +394,9 @@ class ReactLoopGraphRunner:
         """
         checklist: List[str] = []
         analysis_constraints = getattr(self.analysis, "constraints", None)
+        existence_query = bool(getattr(self.analysis, "existence_query", False))
         if isinstance(analysis_constraints, dict) and analysis_constraints:
-            if analysis_constraints.get("temporal_required"):
+            if analysis_constraints.get("temporal_required") and not existence_query:
                 checklist.append("time_constraint")
             if analysis_constraints.get("comparison_required"):
                 checklist.append("comparison")
@@ -1019,7 +1057,7 @@ class ReactLoopGraphRunner:
         try:
             if self._use_native_tools:
                 messages = [SystemMessage(content=self.system_prompt)] + list(state["messages"])
-                response = self._llm_with_tools.invoke(messages)
+                response = self._llm_with_tools.invoke(messages, reasoning=self._act_reasoning)
             else:
                 response = self._act_shim(list(state["messages"]))
         except Exception as exc:  # noqa: BLE001 - surfaced as a safe workflow failure
@@ -1074,7 +1112,7 @@ class ReactLoopGraphRunner:
     def _act_shim(self, history: List[Any]) -> AIMessage:
         """Tool-calling via JSON prompt for chat models without bind_tools."""
         messages = [SystemMessage(content=self._shim_system_prompt())] + history
-        response = self.llm.invoke(messages)
+        response = self.llm.invoke(messages, reasoning=self._act_reasoning)
         text = response.content if hasattr(response, "content") else str(response)
         if not isinstance(text, str):
             text = str(text)
@@ -1822,7 +1860,25 @@ class ReactLoopGraphRunner:
             TerminationAction.UNRECOVERABLE,
             TerminationAction.RETURN_INSUFFICIENT,
         }
-        force_synthesis = bool(state.get("force_synthesis")) or bool(
+        # When constraints are already satisfied and we have real evidence, but
+        # the model keeps searching instead of answering, force synthesis near
+        # the iteration cap rather than burning the remaining rounds to
+        # exhaustion. This especially helps existence/inventory queries whose
+        # checklist is empty and thus have no other deterministic stop signal.
+        constraints_satisfied = (not missing) and bool(
+            state.get("had_successful_observation")
+        )
+        late_loop_no_answer = bool(
+            not pricing_recovery
+            and not final_proposed
+            and constraints_satisfied
+            and str(state.get("phase") or "loop") == "loop"
+            and int(state.get("iteration") or 0)
+            >= max(3, self.max_iterations - 2)
+            and int(state.get("synthesis_attempts") or 0)
+            < self.max_synthesis_attempts
+        )
+        force_synthesis = bool(state.get("force_synthesis")) or late_loop_no_answer or bool(
             pricing_requirements
             and not pricing_recovery
             and str(state.get("phase") or "loop") == "loop"
@@ -2091,6 +2147,10 @@ class ReactLoopGraphRunner:
             or "temporal" in claim_classes
             or "current" in claim_classes
         )
+        # Existence/inventory questions ("现在有哪些插件") ask what exists, not
+        # what changed: do not demand a dated authoritative source for them.
+        if getattr(self.analysis, "existence_query", False):
+            temporal_required = False
         try:
             failures = check_citations(
                 draft,
@@ -2311,7 +2371,8 @@ class ReactLoopGraphRunner:
         response: Any = None
         try:
             response = self.judge_llm.invoke(
-                [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+                [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)],
+                reasoning=self._judge_reasoning,
             )
             content = response.content if hasattr(response, "content") else str(response)
             payload = extract_json_object(content)

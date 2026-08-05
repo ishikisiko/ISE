@@ -27,6 +27,21 @@ COMPARISON_CUES = (
     " vs ",
 )
 CURRENT_CUES = ("最新", "当前", "现在", "今天", "今日", "latest", "current", "today", "now")
+# Enumeration/inventory phrasing asks "what exists" rather than "what changed".
+# Such queries (e.g. "现在有哪些插件") carry a bare current-state word but are
+# existence questions whose answers need not cite a dated source.
+ENUMERATION_CUES = (
+    "有哪些",
+    "有什么",
+    "都有哪些",
+    "包括哪些",
+    "包含哪些",
+    "有哪些种类",
+    "列出",
+    "列举",
+    "list of",
+    "which ... exist",
+)
 EXPLICIT_TEMPORAL_PATTERNS = (
     r"(?:过去|近|最近)\s*(?:\d+|一|两|三|四|五|六|七|八|九|十)+\s*(?:年|个月|月|天|周)",
     r"(?:历年|历史|趋势|变化趋势|逐年|时间序列)",
@@ -451,6 +466,7 @@ class QueryAnalysis:
     requested_sources: List[str] = field(default_factory=list)
     domain_hint: Optional[str] = None
     requires_evidence: bool = False
+    existence_query: bool = False
     analysis_source: str = "deterministic"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -470,6 +486,7 @@ class QueryAnalysis:
             "requested_sources": _dedupe_strings(self.requested_sources, limit=10),
             "domain_hint": _bounded_text(self.domain_hint, 80) if self.domain_hint else None,
             "requires_evidence": bool(self.requires_evidence),
+            "existence_query": bool(self.existence_query),
             "analysis_source": self.analysis_source,
         }
 
@@ -548,6 +565,12 @@ def analyze_query(
         critical = True
 
     explicit_time = bool(time_constraint.days) or bool(explicit_temporal_match)
+    # An enumeration/inventory question ("现在有哪些插件") carries a bare
+    # current-state word but asks "what exists", not "what changed". Unless the
+    # user gave a genuine time window, it should not demand a dated source.
+    existence_query = bool(
+        _contains_any(raw_query, ENUMERATION_CUES)
+    ) and not explicit_temporal_match
     constraints = {
         "authority_required": any(kind in claim_classes for kind in ("numeric", "current", "compliance")),
         "comparison_required": has_comparison,
@@ -594,6 +617,7 @@ def analyze_query(
         requested_sources=_dedupe_strings(requested_sources or [], limit=10),
         domain_hint=_bounded_text(domain_hint, 80) if domain_hint and str(domain_hint).casefold() != "general" else None,
         requires_evidence=inferred_evidence,
+        existence_query=existence_query,
     )
 
 

@@ -92,6 +92,21 @@ def test_current_query_requires_freshness_not_multi_year_coverage() -> None:
     ]
 
 
+def test_enumeration_with_bare_current_is_existence_not_recency() -> None:
+    # "现在有哪些X" is an inventory/existence question: a bare current-state
+    # word must not impose a recency window. The loop keys off existence_query
+    # to skip the dated-source citation demand, so search still runs.
+    analysis = analyze_query("现在有哪些 deepwiki 的插件或者技能", allow_search=True)
+    assert analysis.existence_query is True
+    assert analysis.requires_evidence is True
+    # A genuine current-value query (volatile value) stays temporal.
+    value_analysis = analyze_query("现在苹果股价是多少", allow_search=True)
+    assert value_analysis.existence_query is False
+    # An enumeration with an explicit window still demands recency.
+    windowed = analyze_query("过去五年有哪些新框架", allow_search=True)
+    assert windowed.existence_query is False
+
+
 def test_multi_year_query_requires_historical_coverage() -> None:
     analysis = analyze_query("对比过去五年的价格趋势", allow_search=True)
     assert analysis.constraints["temporal_required"] is True
