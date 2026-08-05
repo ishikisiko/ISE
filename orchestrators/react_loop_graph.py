@@ -71,6 +71,54 @@ _QUERY_TAG = re.compile(
     r"<query>\s*(?P<query>.*?)\s*</query>",
     re.IGNORECASE | re.DOTALL,
 )
+
+# DeepSeek models emit tool calls as proprietary ``<｜｜DSML｜｜...>`` text
+# markup (U+FF5C fullwidth pipes) instead of native function-call objects when
+# a provider does not translate them. The ReAct loop normalizes that markup
+# back into structured tool calls so execution is not silently skipped.
+_DSML_PIPE = "\uff5c"
+_DSML_HEAD = "<" + _DSML_PIPE * 2 + "DSML" + _DSML_PIPE * 2
+_DSML_TAIL = "</" + _DSML_PIPE * 2 + "DSML" + _DSML_PIPE * 2
+_DSML_INVOKE = re.compile(
+    re.escape(_DSML_HEAD)
+    + r'invoke\s+name="([^"]+)"\s*>(?P<body>.*?)'
+    + re.escape(_DSML_TAIL)
+    + r"invoke\s*>",
+    re.DOTALL,
+)
+_DSML_PARAMETER = re.compile(
+    re.escape(_DSML_HEAD)
+    + r'parameter\s+name="([^"]+)"[^>]*>(?P<value>.*?)'
+    + re.escape(_DSML_TAIL)
+    + r"parameter\s*>",
+    re.DOTALL,
+)
+
+
+def _extract_dsml_tool_calls(text: str) -> List[Tuple[str, Dict[str, str]]]:
+    """Parse DeepSeek DSML tool-call markup into ``(name, args)`` pairs.
+
+    DSML looks like::
+
+        <｜｜DSML｜｜tool_calls>
+          <｜｜DSML｜｜invoke name="web_search">
+            <｜｜DSML｜｜parameter name="query" string="true">q</｜｜DSML｜｜parameter>
+          </｜｜DSML｜｜invoke>
+        </｜｜DSML｜｜tool_calls>
+
+    Returns every parsed invoke (empty list when none are present). Parameter
+    values are kept as strings; schema coercion happens at validation time.
+    """
+    calls: List[Tuple[str, Dict[str, str]]] = []
+    for invoke in _DSML_INVOKE.finditer(text):
+        name = invoke.group(1).strip()
+        args: Dict[str, str] = {}
+        for param in _DSML_PARAMETER.finditer(invoke.group("body")):
+            args[param.group(1).strip()] = param.group("value").strip()
+        calls.append((name, args))
+    return calls
+
+
 _NUMBERED_RESULT = re.compile(r"(?m)^\s*\d+\.\s+")
 _TRACE_SENSITIVE_ASSIGNMENT = re.compile(
     r"(?i)\b(api[_-]?key|authorization|cookie|token|secret|password)\s*([:=])\s*[^\s,;]+"
@@ -644,6 +692,66 @@ class ReactLoopGraphRunner:
             status="error",
         )
 
+    def _validated_tool_call(
+        self,
+        name: str,
+        raw_args: Any,
+    ) -> Tuple[Optional[dict], Optional[str]]:
+        """Validate ``raw_args`` against the named tool's schema.
+
+        Returns ``(call_dict, None)`` on success or ``(None, error_reason)``.
+        Shared by the DSML and other text-markup normalizers.
+        """
+        if name not in self.tools_by_name:
+            return None, f"unsupported_tool: {name}"
+        tool = self.tools_by_name[name]
+        args = raw_args
+        if not isinstance(args, dict):
+            field_names = list((getattr(tool, "args", None) or {}).keys())
+            if len(field_names) != 1:
+                return None, f"invalid_tool_arguments: {name}"
+            args = {field_names[0]: args}
+        try:
+            schema = getattr(tool, "args_schema", None)
+            if schema is not None and hasattr(schema, "model_validate"):
+                args = schema.model_validate(args).model_dump()
+            elif schema is not None and hasattr(schema, "parse_obj"):
+                args = schema.parse_obj(args).dict()
+        except Exception:  # noqa: BLE001 - invalid model markup is loop data
+            return None, f"invalid_tool_arguments: {name}"
+        return (
+            {
+                "name": name,
+                "args": args,
+                "id": f"call_{uuid4().hex[:12]}",
+                "type": "tool_call",
+            },
+            None,
+        )
+
+    def _normalize_dsml_markup(self, text: str) -> Tuple[Any, Optional[str]]:
+        """Convert DeepSeek ``<｜｜DSML｜｜>`` tool-call markup into tool calls.
+
+        A single DSML block may carry several invokes; each one that validates
+        against an enabled tool becomes a structured call. Unsupported or
+        invalid invokes are dropped, and the first offending tool name is
+        surfaced only when nothing usable remained.
+        """
+        parsed = _extract_dsml_tool_calls(text)
+        if not parsed:
+            return AIMessage(content=""), None
+        tool_calls: List[dict] = []
+        first_error: Optional[str] = None
+        for name, raw_args in parsed:
+            call, error = self._validated_tool_call(name, raw_args)
+            if call is not None:
+                tool_calls.append(call)
+            elif first_error is None:
+                first_error = error
+        if tool_calls:
+            return AIMessage(content="", tool_calls=tool_calls), None
+        return AIMessage(content=""), first_error or f"invalid_tool_arguments: {parsed[0][0]}"
+
     def _normalize_function_markup(self, response: Any) -> Tuple[Any, Optional[str]]:
         """Convert supported XML or JSON fallback forms into a tool call.
 
@@ -652,6 +760,8 @@ class ReactLoopGraphRunner:
         tool whose arguments validate against its schema is normalized.
         """
         text = self._message_text(response).strip()
+        if _DSML_HEAD in text:
+            return self._normalize_dsml_markup(text)
         if "<function" not in text.casefold():
             payload = extract_json_object(text)
             if not isinstance(payload, dict):

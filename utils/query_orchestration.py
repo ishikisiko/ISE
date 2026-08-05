@@ -325,6 +325,21 @@ def _is_authoritative_tier(tier: Any) -> bool:
     return is_authoritative_tier(tier)
 
 
+# Trusted tiers rank lower so comparison-quota reservation prefers official /
+# first-party evidence over aggregators when several results cover a member.
+_SOURCE_TIER_RANK: Dict[str, int] = {
+    "authoritative": 0,
+    "official": 0,
+    "first_party": 1,
+    "local": 2,
+}
+
+
+def _source_tier_rank(tier: Any) -> int:
+    """Order source tiers for evidence selection (lower is more trustworthy)."""
+    return _SOURCE_TIER_RANK.get(str(tier or "").strip().casefold(), 3)
+
+
 def _clean_entity_fragment(value: str) -> str:
     text = value.strip(" \t\n,，、;；:：()[]{}<>《》\"'`?？!！")
     text = re.sub(
@@ -1389,6 +1404,45 @@ class EvidenceLedger:
             self._index[key] = entry
             self.entries.append(entry)
 
+    def _reserve_comparison_slots(
+        self,
+        candidates: List[LedgerEntry],
+        item_cap: int,
+    ) -> set:
+        """Return candidate indices protected from the FIFO cap.
+
+        Reserves one slot per comparison member so a fixed-size budget filled
+        from one side of a comparison can never silently drop every result for
+        the other side. Without this guarantee, the deterministic critic's
+        ``comparison_coverage`` rule becomes unsatisfiable and the agent loop
+        spins until the iteration budget is exhausted. The best-tier candidate
+        per member wins; ties keep original insertion order.
+        """
+        members = [
+            str(member).casefold()
+            for member in getattr(self.analysis, "comparison_members", None) or []
+            if member
+        ]
+        if not members:
+            return set()
+        member_set = set(members)
+        # Best (tier, insertion-order) candidate per still-uncovered member.
+        # A single entry may legitimately cover several members.
+        best_per_member: dict = {}
+        for idx, entry in enumerate(candidates):
+            for member in entry.covered_entities:
+                key = str(member).casefold()
+                if key not in member_set or key in best_per_member:
+                    continue
+                best_per_member[key] = (_source_tier_rank(entry.source_tier), idx)
+        reserved: set = set()
+        # Preserve insertion order among the chosen representatives.
+        for _member, (_rank, idx) in sorted(best_per_member.items(), key=lambda kv: kv[1][1]):
+            if len(reserved) >= item_cap:
+                break
+            reserved.add(idx)
+        return reserved
+
     def apply_limits(self, *, max_items: Optional[int] = None, max_references: Optional[int] = None) -> None:
         item_cap = max(1, int(max_items or self.result_budget))
         reference_cap = max(1, int(max_references or item_cap))
@@ -1398,9 +1452,20 @@ class EvidenceLedger:
         # discovery context, while preserving source order inside each class.
         candidates = [entry for entry in self.entries if entry.decision == "retained"]
         candidates.extend(entry for entry in self.entries if entry.decision == "limited")
-        for entry in candidates:
+        reserved = self._reserve_comparison_slots(candidates, item_cap)
+        # Reserved representatives are admitted first so every comparison side
+        # stays represented even when one side dominates the FIFO order; the
+        # remaining candidates then fill the budget in their original order.
+        order = list(reserved)
+        order.extend(i for i in range(len(candidates)) if i not in reserved)
+        for idx in order:
+            entry = candidates[idx]
             reference_key = entry.canonical_reference or f"{entry.source_type}:{entry.source_id}"
-            if retained >= item_cap or (reference_key not in references and len(references) >= reference_cap):
+            if retained >= item_cap:
+                entry.decision = "rejected"
+                entry.reason = "final_evidence_limit"
+                continue
+            if idx not in reserved and reference_key not in references and len(references) >= reference_cap:
                 entry.decision = "rejected"
                 entry.reason = "final_evidence_limit"
                 continue

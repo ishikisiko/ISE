@@ -194,6 +194,61 @@ def test_ledger_result_budget_rejects_overflow() -> None:
     assert ledger.coverage_summary()["rejected"] == 1
 
 
+def test_ledger_keeps_every_comparison_member_under_fifo_pressure() -> None:
+    """Regression: a fixed budget filled from one side of a comparison must
+    not silently drop every result for the other side.
+
+    Previously, when the first-searched member saturated the FIFO cap, the
+    other member's (even official) evidence was rejected with
+    ``final_evidence_limit``. That made ``comparison_coverage`` unsatisfiable
+    and trapped the agent loop until the iteration budget was exhausted
+    (see session ppt-live-03)."
+    """
+    analysis = QueryAnalysis(
+        query="compare GLM-5.2 and K2.7",
+        comparison_members=["GLM-5.2", "K2.7"],
+        constraints={"comparison_required": True},
+    )
+    # Budget equals the per-search result count, so the five GLM-5.2 results
+    # ingested first would otherwise consume every retained slot.
+    ledger = EvidenceLedger(analysis, result_budget=5)
+    ledger.ingest(
+        [
+            _item(f"https://glm.example/{i}", f"GLM-5.2 pricing line {i}", tier="unknown")
+            for i in range(5)
+        ]
+        + [
+            _item("https://kimi.com/pricing", "K2.7 official pricing", tier="official"),
+            _item("https://aggregator.example/k27", "K2.7 pricing aggregator"),
+        ]
+    )
+    ledger.apply_limits()
+
+    summary = ledger.coverage_summary()
+    assert summary["retained"] == 5
+    # Both comparison sides must survive the cap, with the official K2.7 source
+    # preferred over the aggregator for the reserved slot.
+    assert set(summary["comparison_members_covered"]) == {"GLM-5.2", "K2.7"}
+    retained_refs = {item.reference for item in ledger.retained_items()}
+    assert "https://kimi.com/pricing" in retained_refs
+
+
+def test_ledger_non_comparison_keeps_fifo_overflow_rejection() -> None:
+    """Quota reservation must not relax the cap for non-comparison queries."""
+    analysis = QueryAnalysis(query="price")
+    ledger = EvidenceLedger(analysis, result_budget=2)
+    ledger.ingest(
+        [
+            _item(f"https://example.com/{i}", f"item {i}")
+            for i in range(4)
+        ]
+    )
+    ledger.apply_limits()
+    summary = ledger.coverage_summary()
+    assert summary["retained"] == 2
+    assert summary["rejected"] == 2
+
+
 def test_critic_clarifies_critical_ambiguity() -> None:
     decision = evaluate_termination(
         TerminationContext(

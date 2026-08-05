@@ -1534,3 +1534,77 @@ class TestConfig:
     def test_normalize_bad_values_ignored(self):
         cfg = normalize_termination_config({"judge_interval": "abc"})
         assert cfg["judge_interval"] == 2
+
+
+class TestDsmlMarkupNormalization:
+    """DeepSeek emits tool calls as ``<｜｜DSML｜｜...>`` text markup; the loop
+    must normalize it back into structured tool calls or execution is skipped."""
+
+    @staticmethod
+    def _runner() -> "ReactLoopGraphRunner":
+        return ReactLoopGraphRunner(
+            llm=NativeScriptedChatModel(replies=["unused"]),
+            tools=[FakeTools.make("web_search", ["result"])],
+            query="对比 A 和 B",
+        )
+
+    def test_single_invoke_becomes_tool_call(self) -> None:
+        runner = self._runner()
+        dsml = (
+            "<｜｜DSML｜｜tool_calls>"
+            '<｜｜DSML｜｜invoke name="web_search">'
+            '<｜｜DSML｜｜parameter name="query" string="true">GLM-5.2 price</｜｜DSML｜｜parameter>'
+            "</｜｜DSML｜｜invoke>"
+            "</｜｜DSML｜｜tool_calls>"
+        )
+        response, error = runner._normalize_function_markup(AIMessage(content=dsml))
+        assert error is None
+        calls = getattr(response, "tool_calls", None)
+        assert calls and len(calls) == 1
+        assert calls[0]["name"] == "web_search"
+        assert calls[0]["args"] == {"query": "GLM-5.2 price"}
+
+    def test_multiple_invokes_all_become_calls(self) -> None:
+        runner = self._runner()
+        dsml = (
+            "<｜｜DSML｜｜tool_calls>"
+            '<｜｜DSML｜｜invoke name="web_search">'
+            '<｜｜DSML｜｜parameter name="query" string="true">GLM-5.2 price</｜｜DSML｜｜parameter>'
+            "</｜｜DSML｜｜invoke>"
+            '<｜｜DSML｜｜invoke name="web_search">'
+            '<｜｜DSML｜｜parameter name="query" string="true">K2.7 price</｜｜DSML｜｜parameter>'
+            "</｜｜DSML｜｜invoke>"
+            "</｜｜DSML｜｜tool_calls>"
+        )
+        response, error = runner._normalize_function_markup(AIMessage(content=dsml))
+        assert error is None
+        assert [c["args"]["query"] for c in response.tool_calls] == [
+            "GLM-5.2 price",
+            "K2.7 price",
+        ]
+
+    def test_prefix_disclaimer_does_not_block_parsing(self) -> None:
+        # The harness prefixes a disclaimer when surfacing candidate answers;
+        # DSML may appear after such prose and must still be parsed.
+        runner = self._runner()
+        prefix = "现有证据或执行预算不足，以下仅为当前候选信息：\n"
+        dsml = (
+            prefix
+            + '<｜｜DSML｜｜invoke name="web_search">'
+            '<｜｜DSML｜｜parameter name="query" string="true">q</｜｜DSML｜｜parameter>'
+            "</｜｜DSML｜｜invoke>"
+        )
+        response, error = runner._normalize_function_markup(AIMessage(content=dsml))
+        assert error is None
+        assert response.tool_calls[0]["name"] == "web_search"
+
+    def test_unsupported_tool_is_flagged(self) -> None:
+        runner = self._runner()
+        dsml = (
+            '<｜｜DSML｜｜invoke name="nonexistent_tool">'
+            '<｜｜DSML｜｜parameter name="query" string="true">q</｜｜DSML｜｜parameter>'
+            "</｜｜DSML｜｜invoke>"
+        )
+        response, error = runner._normalize_function_markup(AIMessage(content=dsml))
+        assert getattr(response, "tool_calls", None) in (None, [])
+        assert error and "unsupported_tool" in error
