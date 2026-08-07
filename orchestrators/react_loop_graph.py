@@ -153,6 +153,45 @@ _RETRIEVAL_FIXABLE_FAILURES = frozenset(
     }
 )
 _TRACE_EVENT_LIMIT = 40
+_FINAL_ANSWER_PREFIX_RE = re.compile(
+    r'^\s*\{\s*"action"\s*:\s*"final"\s*,\s*"answer"\s*:\s*"',
+    re.IGNORECASE,
+)
+
+
+def _unwrap_final_answer(text: Any) -> Optional[str]:
+    """Recover the plain answer from a stray ``{"action":"final","answer":...}`` wrapper.
+
+    The shim action protocol wraps final answers in JSON. Strict parsing fails
+    when the answer itself contains unescaped quotes or literal newlines, which
+    would otherwise leak the wrapper into the user-facing answer. Try strict JSON
+    first, then fall back to a tolerant prefix/suffix strip.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    payload = extract_json_object(raw)
+    if isinstance(payload, dict) and payload.get("action") == "final":
+        answer = payload.get("answer")
+        if isinstance(answer, str) and answer.strip():
+            return answer.strip()
+    match = _FINAL_ANSWER_PREFIX_RE.match(raw)
+    if match and raw.rstrip().endswith("}"):
+        inner = raw[match.end():].rstrip()
+        if inner.endswith('"}'):
+            inner = inner[:-2]
+        elif inner.endswith('"'):
+            inner = inner[:-1]
+        inner = inner.strip()
+        if inner:
+            return (
+                inner.replace("\\n", "\n")
+                .replace("\\\"", '"')
+                .replace("\\\\", "\\")
+            )
+    return None
+
+
 _PROCESS_NARRATION_MARKERS = (
     "用户要求",
     "用户反馈",
@@ -229,6 +268,7 @@ class LoopVerdict:
     failure_types: List[str] = field(default_factory=list)
     rule_hits: List[Dict[str, str]] = field(default_factory=list)
     evidence_sufficiency: str = "unknown"
+    coverage_gaps: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -246,6 +286,7 @@ class LoopVerdict:
             "failure_types": list(self.failure_types),
             "rule_hits": list(self.rule_hits),
             "evidence_sufficiency": self.evidence_sufficiency,
+            "coverage_gaps": list(self.coverage_gaps),
         }
 
 
@@ -989,6 +1030,8 @@ class ReactLoopGraphRunner:
                 "synthesis_attempts": int,
                 "forced_synthesis": bool,
                 "force_synthesis": bool,
+                "degraded_synthesis": bool,
+                "degraded_caveats": List[str],
                 "compactions": int,
                 "tokens_at_last_compaction": int,
                 "compaction_blocked": bool,
@@ -1675,6 +1718,12 @@ class ReactLoopGraphRunner:
         elif self._pricing_requirements():
             answer = self._pricing_insufficient_answer(state)
             detail = "已生成证据不足说明"
+        elif state.get("degraded_synthesis") and self._has_retained_evidence(state):
+            # Degraded path: the loop exhausted with real evidence but no
+            # usable draft. Generate a fresh cited answer from the retained
+            # evidence pool instead of echoing an empty best-effort stub.
+            answer = self._generate_grounded_synthesis(state)
+            detail = "已基于已核证据生成降级综合答案"
         else:
             draft = self._last_ai_text(list(state.get("messages") or []))
             answer = self._best_effort_answer(draft, "exhausted")
@@ -1887,6 +1936,31 @@ class ReactLoopGraphRunner:
             and (pricing_ready or terminal_without_answer)
         )
 
+        # Phase 1 architecture fix: when the critic reaches a terminal state
+        # (exhausted / stagnated / insufficient) but we actually retained real
+        # evidence, do not throw it away for an empty "exhausted" answer --
+        # degrade to a single grounded synthesis pass that produces a cited
+        # answer (with caveats for any advisory coverage gaps). Pricing keeps
+        # its own deterministic synthesis; this path is for general queries.
+        coverage_gaps = list(getattr(context, "coverage_gaps", None) or [])
+        degraded_synthesis_force = bool(
+            self.eval_cfg.get("degraded_synthesis", True)
+            and not pricing_requirements
+            and not pricing_recovery
+            and not force_synthesis
+            and str(state.get("phase") or "loop") == "loop"
+            and decision.action in {
+                TerminationAction.EXHAUSTED,
+                TerminationAction.STAGNATED,
+                TerminationAction.RETURN_INSUFFICIENT,
+            }
+            and decision.evidence_sufficiency in ("partial", "sufficient")
+            and int(state.get("synthesis_attempts") or 0)
+            < self.max_synthesis_attempts
+        )
+        if degraded_synthesis_force:
+            force_synthesis = True
+
         _context_budget, context_amount, context_ratio = self._context_metrics(state)
         context_over_budget = self._can_compact(state)
         compact_next = bool(
@@ -1905,6 +1979,8 @@ class ReactLoopGraphRunner:
         reason = decision.reason
         if pricing_recovery:
             reason = "pricing_source_recovery"
+        elif degraded_synthesis_force:
+            reason = "degraded_synthesis"
         elif force_synthesis:
             reason = "ready_to_synthesize" if pricing_ready else "forced_synthesis"
         elif compact_next:
@@ -1951,6 +2027,7 @@ class ReactLoopGraphRunner:
             failure_types=list(decision.failure_types),
             rule_hits=list(decision.rule_hits),
             evidence_sufficiency=decision.evidence_sufficiency,
+            coverage_gaps=list(coverage_gaps),
         )
 
         update: Dict[str, Any] = {
@@ -1960,6 +2037,8 @@ class ReactLoopGraphRunner:
             "judge_error": judge_error,
             "context_budget": context_amount,
             "context_ratio": context_ratio,
+            "degraded_synthesis": bool(degraded_synthesis_force),
+            "degraded_caveats": list(coverage_gaps) if degraded_synthesis_force else [],
             "peak_context_ratio": max(
                 float(state.get("peak_context_ratio") or 0), context_ratio
             ),
@@ -2292,6 +2371,7 @@ class ReactLoopGraphRunner:
             repeat_threshold=self.eval_cfg["repeat_threshold"],
             no_progress_threshold=self.eval_cfg["no_progress_threshold"],
             tool_error_threshold=self.eval_cfg["tool_error_threshold"],
+            coverage_mode=self.eval_cfg.get("coverage_mode", "blocking"),
             can_continue=(
                 self._has_remaining_tool_budget()
                 if phase == "loop"
@@ -2420,6 +2500,78 @@ class ReactLoopGraphRunner:
                     return joined
                 return ""
         return ""
+
+    def _has_retained_evidence(self, state: Dict[str, Any]) -> bool:
+        """True when the ledger still holds retained evidence records."""
+        records = [
+            record
+            for record in list(state.get("evidence_records") or [])
+            if isinstance(record, dict)
+        ]
+        return len(records) > 0
+
+    def _generate_grounded_synthesis(self, state: Dict[str, Any]) -> str:
+        """Generate a fresh, cited final answer from the retained evidence pool.
+
+        Degraded-synthesis fallback for the Phase 1 architecture fix: when the
+        loop reached a terminal state with real evidence but no usable draft,
+        ask the model to answer directly from the verified evidence (no tools),
+        surfacing any advisory coverage gaps as explicit caveats instead of
+        fabricating them. Any failure degrades to the best-effort stub.
+        """
+        caveats = list(state.get("degraded_caveats") or [])
+        caveat_line = ""
+        if caveats:
+            names = "、".join(
+                str(gap).replace("comparison:", "").replace("answer_comparison:", "")
+                for gap in caveats
+            )[:240]
+            caveat_line = (
+                f"\n- 以下方面未检索到充分证据，必须在答案中如实说明“证据不足”，不得编造：{names}"
+            )
+        instruction = (
+            "检索阶段已结束。请仅基于上方已核验的工具证据，直接给出面向用户的完整最终答案："
+            "不要调用任何工具，也不要复述计划或过程。每个具体事实或数值后必须标注来源编号 [En]；"
+            "对证据不足的方面如实说明。" + caveat_line
+        )
+        history = list(state.get("messages") or [])
+        started = time.perf_counter()
+        response: Any = None
+        try:
+            # Synthesis is a single tool-free answer: do NOT route the shim
+            # provider through ``_act_shim`` (whose JSON action protocol would
+            # wrap the answer and leak the wrapper when the answer's quotes /
+            # newlines break strict JSON). Invoke the base model directly with
+            # the same system prompt + history + plain-text instruction in both
+            # modes -- no tool binding is needed for synthesis.
+            messages = [
+                SystemMessage(content=self.system_prompt),
+            ] + history + [HumanMessage(content=instruction)]
+            response = self.llm.invoke(messages, reasoning=self._act_reasoning)
+            text = response.content if hasattr(response, "content") else str(response)
+            if not isinstance(text, str):
+                text = str(text)
+            text = text.strip()
+            # Defensive: strip any residual action-protocol wrapper the model
+            # may still emit, even after the plain-text instruction.
+            unwrapped = _unwrap_final_answer(text)
+            if unwrapped:
+                text = unwrapped
+            if text:
+                return text
+        except Exception:  # noqa: BLE001 - degrade to best effort on any failure
+            pass
+        finally:
+            if self.timing_recorder is not None:
+                self.timing_recorder.record_llm_call(
+                    label="degraded_synthesis",
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    provider=getattr(self.llm, "provider", None),
+                    model=getattr(self.llm, "model_name", None),
+                    extra=extract_token_usage(response),
+                )
+        draft = self._last_ai_text(history)
+        return self._best_effort_answer(draft, "exhausted")
 
     @staticmethod
     def _best_effort_answer(draft: str, reason: str) -> str:

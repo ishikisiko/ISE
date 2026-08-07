@@ -12,10 +12,14 @@ from utils.query_orchestration import (
     QueryExecutionTrace,
     TerminationAction,
     TerminationContext,
+    analysis_needs_reconcile,
     analyze_query,
+    apply_reconcile,
     evaluate_termination,
     merge_optional_analysis,
     normalize_termination_config,
+    prepare_analysis,
+    sanitize_comparison_members,
 )
 
 
@@ -413,3 +417,117 @@ def test_normalize_termination_config_keeps_global_bounds() -> None:
     assert normalized["max_iterations"] == 7
     assert normalized["judge_interval"] == 3
     assert normalized["repeat_threshold"] == 4
+
+
+def test_normalize_termination_config_handles_phase1_flags() -> None:
+    normalized = normalize_termination_config(
+        {"coverage_mode": "ADVISORY", "degraded_synthesis": False, "max_iterations": 9}
+    )
+    assert normalized["coverage_mode"] == "advisory"
+    assert normalized["degraded_synthesis"] is False
+    assert normalized["max_iterations"] == 9
+    # Unknown / junk values fall back to the safe defaults.
+    junk = normalize_termination_config({"coverage_mode": "bogus"})
+    assert junk["coverage_mode"] == "blocking"
+    assert junk["degraded_synthesis"] is False  # default in DEFAULT_TERMINATION_CONFIG
+
+
+def test_advisory_coverage_routes_member_gaps_out_of_blocking() -> None:
+    """Phase 1 (M-RC3): parser-derived member completeness is advisory, not blocking."""
+    base = dict(
+        phase="loop",
+        requires_evidence=True,
+        final_proposed=True,
+        answer="Grounded comparison of A versus B",
+        policies=["comparison_coverage"],
+        comparison_members=["A", "B"],
+        evidence=CriticEvidenceState(
+            retained_count=2, available_count=2, covered_entities=("A",)
+        ),
+        had_successful_observation=True,
+    )
+
+    # Blocking (default / backward compatible): the uncovered member is a hard gap.
+    blocking = evaluate_termination(TerminationContext(coverage_mode="blocking", **base))
+    assert "comparison:B" in blocking.missing_constraints
+    assert blocking.action != TerminationAction.RETURN
+
+    # Advisory: the uncovered member is surfaced but never blocks synthesis.
+    ctx_adv = TerminationContext(coverage_mode="advisory", **base)
+    advisory = evaluate_termination(ctx_adv)
+    assert not any(c.startswith("comparison:") for c in advisory.missing_constraints)
+    assert "comparison:B" in ctx_adv.coverage_gaps
+    assert advisory.action == TerminationAction.RETURN
+
+
+# --- Phase 2 (M-RC1): parser demotion + LLM reconcile ---
+
+
+def test_sanitize_drops_instruction_clause_member() -> None:
+    q = (
+        "Tavily Extract,Firecrawl Scrape和brightdata对应的用来获取网页内容的API有什么区别？"
+        "注意不要仅仅停留于“官方宣传”要抓到实际区别"
+    )
+    analysis = analyze_query(q, allow_search=True)
+    assert "注意不要仅仅停留于“官方宣传”要抓到实际区别" in analysis.comparison_members
+    sanitized = sanitize_comparison_members(analysis)
+    assert all(not m.startswith("注意") for m in sanitized.comparison_members)
+    assert "Tavily Extract" in sanitized.comparison_members
+    assert analysis_needs_reconcile(sanitized) is True  # brightdata…有什么 still noisy
+
+
+def test_reconcile_replaces_noisy_members_preserving_constraints() -> None:
+    q = "Tavily和Firecrawl对应的用来获取内容的API有什么区别？注意不要只看宣传"
+    analysis = sanitize_comparison_members(analyze_query(q, allow_search=True))
+    original_constraints = dict(analysis.constraints)
+    original_claim_classes = list(analysis.claim_classes)
+    fake_llm_text = '{"comparison_members": ["Tavily", "Firecrawl"]}'
+    reconciled = apply_reconcile(analysis, q, fake_llm_text)
+    assert reconciled.comparison_members == ["Tavily", "Firecrawl"]
+    assert reconciled.analysis_source == "deterministic+reconciled_llm"
+    # Verified safeguards are never relaxed by reconciliation.
+    assert reconciled.constraints == original_constraints
+    assert reconciled.claim_classes == original_claim_classes
+    assert reconciled.search_allowed == analysis.search_allowed
+
+
+def test_reconcile_ignores_invalid_llm_output() -> None:
+    q = "Tavily和Firecrawl对应的用来获取内容的API有什么区别？"
+    analysis = sanitize_comparison_members(analyze_query(q, allow_search=True))
+    for junk in ("", "这不是JSON", '{"entities": ["x"]}', '{"comparison_members": []}'):
+        out = apply_reconcile(analysis, q, junk)
+        assert out.comparison_members == analysis.comparison_members  # untouched
+
+
+def test_prepare_analysis_reconciles_when_noisy() -> None:
+    q = "Tavily和brightdata对应的用来获取网页内容的API有什么区别？"
+    analysis = analyze_query(q, allow_search=True)
+    calls = []
+
+    def fake_invoke(prompt: str) -> str:
+        calls.append(prompt)
+        return '{"comparison_members": ["Tavily", "brightdata"]}'
+
+    prepared = prepare_analysis(analysis, query=q, reconcile_enabled=True, llm_invoke=fake_invoke)
+    assert calls  # reconcile actually ran
+    assert prepared.comparison_members == ["Tavily", "brightdata"]
+
+
+def test_prepare_analysis_without_llm_only_sanitizes() -> None:
+    q = "Tavily和Firecrawl对应的用来获取内容的API有什么区别？注意不要只看宣传"
+    analysis = analyze_query(q, allow_search=True)
+    prepared = prepare_analysis(analysis, query=q, reconcile_enabled=False, llm_invoke=None)
+    assert all(not m.startswith("注意") for m in prepared.comparison_members)
+    assert prepared.analysis_source == "deterministic"  # no LLM touched it
+
+
+def test_clean_comparison_query_is_not_reconciled() -> None:
+    q = "OpenAI 和 Anthropic 的区别"
+    analysis = analyze_query(q, allow_search=True)
+    assert analysis_needs_reconcile(analysis) is False
+    calls = []
+    prepare_analysis(
+        analysis, query=q, reconcile_enabled=True,
+        llm_invoke=lambda p: calls.append(p) or '{"comparison_members": ["x"]}',
+    )
+    assert calls == []  # clean query never contacts the LLM

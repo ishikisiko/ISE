@@ -7,12 +7,14 @@ provenance usable by the CLI, Flask, RAG, and recovery paths alike.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
+from utils.search_routing import extract_json_object
 from utils.time_parser import TimeConstraint, parse_time_constraint
 
 
@@ -126,6 +128,12 @@ DEFAULT_TERMINATION_CONFIG: Dict[str, Any] = {
     "no_progress_threshold": 2,
     "tool_error_threshold": 2,
     "new_evidence_min_ratio": 0.1,
+    # Phase 1 architecture fix (see docs/architecture-improvement-plan.md):
+    # comparison-member *completeness* can be advisory rather than a hard
+    # blocking gate, and the loop must degrade to a grounded synthesis when it
+    # exhausts with real evidence instead of returning an empty answer.
+    "coverage_mode": "blocking",
+    "degraded_synthesis": False,
 }
 
 
@@ -137,11 +145,18 @@ def normalize_termination_config(config: Optional[Mapping[str, Any]]) -> Dict[st
     for key in merged:
         if key not in config:
             continue
+        value = config[key]
         try:
             if key == "new_evidence_min_ratio":
-                merged[key] = max(0.0, min(1.0, float(config[key])))
+                merged[key] = max(0.0, min(1.0, float(value)))
+            elif key == "coverage_mode":
+                mode = str(value).strip().lower()
+                if mode in ("blocking", "advisory"):
+                    merged[key] = mode
+            elif key == "degraded_synthesis":
+                merged[key] = bool(value)
             else:
-                merged[key] = max(1, int(config[key]))
+                merged[key] = max(1, int(value))
         except (TypeError, ValueError):
             continue
     return merged
@@ -649,6 +664,157 @@ def merge_optional_analysis(
     return analysis
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 architecture fix (M-RC1): demote the deterministic parser from
+# infallible ground truth to a first-class candidate. Comparison members are
+# parser *guesses*; obvious noise is sanitized deterministically, and anything
+# the parser is unsure about can be reconciled by an LLM. Reconciliation may
+# *replace* parser-derived members/entities but never touches verified
+# constraints (temporal / authority) or search flags -- those stay monotonic.
+# ---------------------------------------------------------------------------
+
+# Instructional / hortative clauses a user appends to a comparison question
+# ("...有什么区别？注意不要只看官方宣传"). Leading with one of these means the
+# fragment is not an entity.
+_INSTRUCTION_VERB_PREFIXES = (
+    "注意", "不要", "请勿", "请", "帮我", "务必", "顺带", "另外", "此外",
+    "需要", "应该", "切记", "别只", "重点", "真正",
+)
+# Question words inside a fragment mark it as a sentence, not an entity name.
+_QUESTION_WORDS = (
+    "有什么", "有哪些", "是什么", "怎么样", "多少", "为什么", "哪个好", "哪一种",
+)
+_CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+_BRAND_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
+
+
+def _member_is_unambiguous_noise(member: str) -> bool:
+    """A member that is clearly a sentence fragment, never an entity.
+
+    Dropped by the always-on deterministic sanitizer: instruction-verb-leading
+    clauses ("注意不要...") and long CJK runs carrying no brand/latin token.
+    """
+    text = str(member or "").strip()
+    if not text:
+        return False
+    if any(text.startswith(prefix) for prefix in _INSTRUCTION_VERB_PREFIXES):
+        return True
+    cjk_len = len(_CJK_CHAR_RE.findall(text))
+    if cjk_len >= 6 and not _BRAND_TOKEN_RE.search(text):
+        return True
+    return False
+
+
+def _member_is_noisy(member: str) -> bool:
+    """A member the deterministic parser is unsure about -> worth reconciling."""
+    if _member_is_unambiguous_noise(member):
+        return True
+    text = str(member or "").strip()
+    if any(word in text for word in _QUESTION_WORDS):
+        return True
+    cjk_len = len(_CJK_CHAR_RE.findall(text))
+    if cjk_len >= 8 and _BRAND_TOKEN_RE.search(text):
+        # Mixed long fragment such as "brightdata对应的用来获取网页内容的API有什么":
+        # not droppable (it names a brand) but clearly truncated/noisy.
+        return True
+    return False
+
+
+def sanitize_comparison_members(analysis: QueryAnalysis) -> QueryAnalysis:
+    """Drop unambiguous-noise comparison members (deterministic, always-safe)."""
+    members = list(getattr(analysis, "comparison_members", None) or [])
+    if not members:
+        return analysis
+    cleaned = [m for m in members if not _member_is_unambiguous_noise(m)]
+    if len(cleaned) == len(members):
+        return analysis
+    analysis.comparison_members = _dedupe_strings(cleaned, limit=8)
+    return analysis
+
+
+def analysis_needs_reconcile(analysis: QueryAnalysis) -> bool:
+    """True when any remaining comparison member looks noisy after sanitizing."""
+    members = list(getattr(analysis, "comparison_members", None) or [])
+    return any(_member_is_noisy(m) for m in members)
+
+
+def reconcile_prompt(query: str, analysis: QueryAnalysis) -> str:
+    """Build the prompt asking an LLM to recover the real comparison subjects."""
+    members = list(getattr(analysis, "comparison_members", None) or [])
+    return (
+        "你是一个实体抽取校正器。下面是一个对比类问题，以及一个正则解析器从中提取的"
+        "「对比成员」列表（其中可能混入指令句、问句残段或被截断的长串等噪声）。\n"
+        "请只返回问题里真正要对比的对象（产品/技术/实体名），去掉一切指令、限定语、"
+        "问句词和说明性文字；保留原名的大小写与语言；无法识别为实体的条目直接丢弃。\n"
+        "仅输出 JSON，不要输出任何解释："
+        ' {"comparison_members": ["...", "..."]}\n\n'
+        f"问题：{query}\n"
+        f"解析器提取的成员：{json.dumps(members, ensure_ascii=False)}"
+    )
+
+
+def apply_reconcile(
+    analysis: QueryAnalysis, query: str, llm_text: str
+) -> QueryAnalysis:
+    """Apply an LLM reconciliation to parser-derived members/entities.
+
+    The model may *replace* the low-confidence ``comparison_members`` and
+    ``entities`` (parser guesses), but this function never touches verified
+    constraints (temporal / authority), ``claim_classes``, or search flags --
+    those remain under the deterministic safeguard. Invalid/empty model output
+    leaves the analysis untouched (the sanitizer already dropped clear noise).
+    """
+    payload = extract_json_object(llm_text or "")
+    if not isinstance(payload, dict):
+        return analysis
+    raw_members = payload.get("comparison_members") or payload.get("members") or []
+    if isinstance(raw_members, str):
+        raw_members = [raw_members]
+    cleaned: List[str] = []
+    for member in raw_members:
+        text = str(member).strip().strip(" \"'`，,、;；:：")
+        if text and len(text) >= 2 and not _member_is_unambiguous_noise(text):
+            cleaned.append(text)
+    if not cleaned:
+        return analysis
+    analysis.comparison_members = _dedupe_strings(cleaned, limit=8)
+    # Refresh the entity bag: keep reconciled members plus any existing entity
+    # that is not itself noisy (e.g. brand sub-tokens like "Tavily"/"Firecrawl").
+    kept_entities = [
+        entity
+        for entity in (getattr(analysis, "entities", None) or [])
+        if not _member_is_noisy(entity)
+    ]
+    analysis.entities = _dedupe_strings(list(cleaned) + kept_entities, limit=8)
+    analysis.analysis_source = "deterministic+reconciled_llm"
+    return analysis
+
+
+def prepare_analysis(
+    analysis: QueryAnalysis,
+    *,
+    query: str,
+    reconcile_enabled: bool = True,
+    llm_invoke: Optional[Any] = None,
+) -> QueryAnalysis:
+    """Sanitize parser noise and optionally reconcile members with an LLM.
+
+    ``llm_invoke`` is a callable taking the reconcile prompt and returning the
+    model's raw text (or None on failure). It is only contacted when the
+    sanitized analysis still looks noisy (``analysis_needs_reconcile``) and
+    reconciliation is enabled, so clean queries pay zero extra latency.
+    """
+    analysis = sanitize_comparison_members(analysis)
+    if reconcile_enabled and llm_invoke is not None and analysis_needs_reconcile(analysis):
+        try:
+            text = llm_invoke(reconcile_prompt(query, analysis))
+        except Exception:  # noqa: BLE001 - reconcile is best-effort
+            text = None
+        if text:
+            analysis = apply_reconcile(analysis, query, text)
+    return analysis
+
+
 @dataclass(frozen=True)
 class EvidencePolicy:
     name: str
@@ -772,6 +938,13 @@ class TerminationContext:
     budget_failure: Optional[str] = None
     judge_payload: Optional[Mapping[str, Any]] = None
     judge_error: Optional[str] = None
+    # Phase 1 architecture fix: how comparison-member completeness is enforced.
+    # "blocking" (default, backward compatible) makes every uncovered member a
+    # hard gap. "advisory" routes member-coverage gaps into ``coverage_gaps``
+    # (output) so grounding/authority -- not parser-derived member names --
+    # decide whether the loop may synthesize.
+    coverage_mode: str = "blocking"
+    coverage_gaps: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -878,24 +1051,39 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
         add_gap("authority", "authority_policy_not_met", "authority", "No retained evidence meets the authority policy.")
 
     covered_entities = {value.casefold() for value in evidence.covered_entities}
+    coverage_gaps: List[str] = []
+    advisory_coverage = context.coverage_mode == "advisory"
     if "comparison_coverage" in policies:
         for member in context.comparison_members:
             if member.casefold() not in covered_entities:
-                add_gap(
-                    f"comparison:{member}",
-                    "comparison_coverage_missing",
-                    "comparison_coverage",
-                    f"Evidence does not cover comparison member: {member}.",
-                )
+                gap = f"comparison:{member}"
+                if advisory_coverage:
+                    # Completeness of a parser-derived member is advisory: a
+                    # missing token in the evidence pool must not veto an
+                    # otherwise grounded answer. It is surfaced (for caveats /
+                    # further retrieval) but never blocks synthesis.
+                    coverage_gaps.append(gap)
+                else:
+                    add_gap(
+                        gap,
+                        "comparison_coverage_missing",
+                        "comparison_coverage",
+                        f"Evidence does not cover comparison member: {member}.",
+                    )
         if context.answer:
             for member in context.comparison_members:
                 if not _comparison_member_mentioned(context.answer, member):
-                    add_gap(
-                        f"answer_comparison:{member}",
-                        "answer_comparison_coverage_missing",
-                        "answer_comparison_coverage",
-                        f"Draft omits comparison member: {member}.",
-                    )
+                    gap = f"answer_comparison:{member}"
+                    if advisory_coverage:
+                        coverage_gaps.append(gap)
+                    else:
+                        add_gap(
+                            gap,
+                            "answer_comparison_coverage_missing",
+                            "answer_comparison_coverage",
+                            f"Draft omits comparison member: {member}.",
+                        )
+    context.coverage_gaps = coverage_gaps
 
     covered_official = {value.casefold() for value in evidence.covered_official_entities}
     for target in context.official_targets:

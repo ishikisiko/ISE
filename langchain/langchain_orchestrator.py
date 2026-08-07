@@ -30,6 +30,7 @@ from utils.query_orchestration import (
     QueryAnalysis,
     analyze_query,
     normalize_termination_config,
+    prepare_analysis,
 )
 
 
@@ -118,7 +119,12 @@ Always answer in the same language as the user's question."""
     @staticmethod
     def _normalize_orchestration_config(config: Dict[str, Any]) -> Dict[str, Any]:
         """Keep only the analysis/ledger feature boundary after M5."""
-        return {"enabled": bool(config.get("enabled", True))}
+        return {
+            "enabled": bool(config.get("enabled", True)),
+            # Phase 2 (M-RC1): LLM-reconcile parser-noisy comparison members.
+            # Noise-gated, so clean queries pay zero extra latency.
+            "reconcile_analysis": bool(config.get("reconcile_analysis", True)),
+        }
 
     def _initialize_orchestration(
         self,
@@ -140,6 +146,16 @@ Always answer in the same language as the user's question."""
             requested_sources=self.requested_search_sources,
             time_constraint=time_constraint,
         )
+        # Phase 2 (M-RC1): demote the deterministic parser to a first-class
+        # candidate. Drop unambiguous noise always, and let an LLM reconcile
+        # members the parser is unsure about (noise-gated, so clean queries add
+        # no latency). Verified constraints / search flags are never relaxed.
+        analysis = prepare_analysis(
+            analysis,
+            query=query,
+            reconcile_enabled=bool(self.orchestration_config.get("reconcile_analysis", True)),
+            llm_invoke=self._invoke_reconcile_llm,
+        )
         trace = QueryExecutionTrace(
             configured=self.configured_search_sources,
             requested=self.requested_search_sources,
@@ -148,6 +164,27 @@ Always answer in the same language as the user's question."""
         trace.record_analysis(analysis)
         self._current_analysis = analysis
         self._current_execution_trace = trace
+
+    def _invoke_reconcile_llm(self, prompt: str) -> Optional[str]:
+        """Best-effort LLM call to reconcile parser-noisy comparison members.
+
+        Uses the cheap termination-judge model (flash, reasoning disabled) when
+        available; any failure returns None so ``prepare_analysis`` keeps the
+        sanitized deterministic analysis. Reconcile is noise-gated upstream, so
+        this only runs for queries the parser flagged as uncertain.
+        """
+        llm = self.termination_judge_llm or self.llm
+        try:
+            response = llm.invoke(
+                [HumanMessage(content=prompt)],
+                reasoning="disabled",
+            )
+            text = getattr(response, "content", None)
+            if isinstance(text, str) and text.strip():
+                return text
+        except Exception:  # noqa: BLE001 - reconcile must never break a turn
+            return None
+        return None
 
 
     def _build_clarification_response(

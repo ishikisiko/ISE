@@ -948,6 +948,56 @@ class TestTerminationSemantics:
         assert result["loop_status"] == "exhausted"
         assert result["iterations"] == 3
 
+    def test_degraded_synthesis_answers_when_exhausted_with_evidence(self):
+        """Phase 1 (M-RC2): exhaust-with-evidence degrades to a grounded answer,
+        not an empty 'exhausted' stub. Contrast with the default-off path."""
+        tools = [FakeTools.make("web_search", ["苹果相比微软更强 [E1]", "微软同时领先 [E2]"])]
+        final_answer = (
+            "苹果相比微软更强，而微软同时领先，两者分别发展，"
+            "数据对比明显，细节各有侧重。" * 4
+        )
+        replies = [
+            _tool_call("web_search", {"query": "q1"}, "c1"),
+            _tool_call("web_search", {"query": "q2"}, "c2"),
+            _tool_call("web_search", {"query": "q3"}, "c3"),
+            final_answer,
+        ]
+
+        # Default flags (off): classic exhaust-and-empty behavior.
+        off = make_runner(list(replies), tools, max_iterations=3).run("苹果和微软的区别")
+        assert off["loop_status"] == "exhausted"
+        assert off["answer"] == "迭代次数用尽，未能获得完整答案。"
+
+        # Phase 1 flags on: degrade to a grounded synthesis instead.
+        on = make_runner(
+            list(replies),
+            tools,
+            max_iterations=3,
+            termination_config={"coverage_mode": "advisory", "degraded_synthesis": True},
+        ).run("苹果和微软的区别")
+        degraded_verdicts = [v for v in on["verdicts"] if v.get("reason") == "degraded_synthesis"]
+        assert degraded_verdicts, "expected a degraded-synthesis verdict"
+        assert degraded_verdicts[-1]["action"] == "synthesize"
+        assert "迭代次数用尽" not in on["answer"]
+        assert final_answer in on["answer"]
+
+    def test_degraded_synthesis_skipped_without_evidence(self):
+        """Phase 1: no degraded synthesis when there is no retained evidence."""
+        tools = [FakeTools.make("web_search", [RuntimeError("boom")])]
+        replies = [
+            _tool_call("web_search", {"query": "q1"}, "c1"),
+            _tool_call("web_search", {"query": "q2"}, "c2"),
+            "最终答案",
+        ]
+        result = make_runner(
+            replies,
+            tools,
+            max_iterations=3,
+            termination_config={"coverage_mode": "advisory", "degraded_synthesis": True},
+        ).run("苹果和微软的区别")
+        assert not any(v.get("reason") == "degraded_synthesis" for v in result["verdicts"])
+        assert result["loop_status"] in ("unrecoverable", "exhausted", "stagnated")
+
     def test_stagnated_on_repeated_fingerprint(self):
         tools = [FakeTools.make("web_search", ["相同结果"])]
         replies = [_tool_call("web_search", {"query": "same"}, "c1")] * 5
@@ -1256,6 +1306,17 @@ class TestShimMode:
 
         assert raw not in answer
         assert answer == "迭代次数用尽，未能获得完整答案。"
+
+    def test_final_answer_wrapper_is_unwrapped(self):
+        from orchestrators.react_loop_graph import _unwrap_final_answer
+
+        leaked = '{"action": "final", "answer": "要看清实际区别 [E1]"}'
+        assert _unwrap_final_answer(leaked) == "要看清实际区别 [E1]"
+        # Broken inner quotes (strict JSON fails) still recover the answer.
+        broken = '{"action": "final", "answer": "a"b"c [E2]"}'
+        assert _unwrap_final_answer(broken) == 'a"b"c [E2]'
+        # Plain text without a wrapper is left untouched (returns None).
+        assert _unwrap_final_answer("苹果相比微软更强 [E1]") is None
 
     def test_xml_function_markup_is_normalized_into_tool_call(self):
         tools = [

@@ -32,6 +32,7 @@
     "orchestration": {
         "_comment": "Deterministic query analysis plus official-domain resolution used by the sole agentic loop and evidence ledger.",
         "enabled": true,
+        "reconcile_analysis": true,
         "pricing_sources": {
             "_comment": "Known official billing pages for deterministic workload-price retrieval. Entries stay channel-specific and are never mixed in one calculation.",
             "glm": [
@@ -129,6 +130,8 @@
         "no_progress_threshold": 2,
         "tool_error_threshold": 2,
         "new_evidence_min_ratio": 0.1,
+        "coverage_mode": "advisory",
+        "degraded_synthesis": true,
         "tool_budgets": {
             "web_search": 3,
             "fetch_url": 3,
