@@ -39,6 +39,58 @@ from langchain.langchain_orchestrator import create_langchain_orchestrator, Lang
 _CONVERSATION_LOCKS: Dict[str, threading.Lock] = {}
 _CONVERSATION_LOCKS_GUARD = threading.Lock()
 
+
+class _CancellationRegistry:
+    """Bounded ``run_id -> threading.Event`` map for request-level cancel.
+
+    A streaming answer registers an event at start and removes it on completion.
+    The cancel endpoint sets the event for a run. Capacity-bounded with LRU
+    eviction so abandoned runs never leak (task 5.1).
+    """
+
+    def __init__(self, capacity: int = 256) -> None:
+        self._capacity = max(1, int(capacity))
+        self._events: "Dict[str, threading.Event]" = {}
+        self._order: List[str] = []
+        self._lock = threading.Lock()
+
+    def register(self, run_id: str) -> threading.Event:
+        event = threading.Event()
+        with self._lock:
+            if run_id in self._events:
+                self._order.remove(run_id)
+            self._events[run_id] = event
+            self._order.append(run_id)
+            while len(self._order) > self._capacity:
+                stale = self._order.pop(0)
+                self._events.pop(stale, None)
+        return event
+
+    def cancel(self, run_id: str) -> bool:
+        with self._lock:
+            event = self._events.get(run_id)
+        if event is None:
+            return False
+        event.set()
+        return True
+
+    def remove(self, run_id: str) -> None:
+        with self._lock:
+            if run_id in self._events:
+                self._order.remove(run_id)
+                self._events.pop(run_id, None)
+
+    def __contains__(self, run_id: object) -> bool:
+        with self._lock:
+            return run_id in self._events
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._events)
+
+
+_CANCEL_REGISTRY = _CancellationRegistry()
+
 # Adjust paths for the new structure
 base_dir = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=os.path.join(base_dir, "frontend"), static_url_path="")
@@ -168,6 +220,27 @@ def _coerce_positive_int(raw_value: Any, field: str) -> Optional[int]:
     if parsed <= 0:
         raise PayloadError(f"'{field}' must be a positive integer.")
     return parsed
+
+
+def _coerce_autonomy_mode(raw_value: Any) -> Optional[str]:
+    """Normalize a per-request ``autonomy`` override.
+
+    ``None``/empty means "no override". Any non-empty value must be a known
+    mode name; an unknown name is a client error (never silently coerced to a
+    default preset).
+    """
+    from orchestrators.autonomy_policy import VALID_MODES
+
+    if raw_value is None:
+        return None
+    token = str(raw_value).strip().lower()
+    if not token:
+        return None
+    if token not in VALID_MODES:
+        raise PayloadError(
+            f"'autonomy' must be one of {list(VALID_MODES)}, got {raw_value!r}."
+        )
+    return token
 
 
 def _conversation_lock(conversation_id: str) -> Optional[threading.Lock]:
@@ -696,12 +769,17 @@ def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         temperature = get_temperature_for_task(config, "direct_answer", provider, 0.3)
 
+    # Per-request autonomy override. Only an explicit, recognized mode name is
+    # accepted; an unrecognized value is a client error, never a silent default.
+    autonomy = _coerce_autonomy_mode(payload.get("autonomy"))
+
     return {
         "query": query,
         "allow_search": allow_search,
         "search_sources": search_sources,
         "force_search": force_search,
         "images": images,
+        "autonomy": autonomy,
         "model": payload.get("model") or payload.get("provider"),
         "total_limit": total_limit,
         "per_source_limit": per_source_limit,
@@ -717,20 +795,20 @@ def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _execute_answer(ctx: Dict[str, Any], tracer: Optional[WorkflowTracer] = None) -> Dict[str, Any]:
+def _execute_answer(ctx: Dict[str, Any], tracer: Optional[WorkflowTracer] = None, cancel_event: Optional[Any] = None) -> Dict[str, Any]:
     """Build the pipeline and run the answer flow for a prepared context."""
     conversation_id = ctx.get("conversation_id")
     lock = _conversation_lock(conversation_id) if conversation_id else None
     if lock is not None:
         lock.acquire()
     try:
-        return _execute_answer_unlocked(ctx, tracer)
+        return _execute_answer_unlocked(ctx, tracer, cancel_event=cancel_event)
     finally:
         if lock is not None:
             lock.release()
 
 
-def _execute_answer_unlocked(ctx: Dict[str, Any], tracer: Optional[WorkflowTracer] = None) -> Dict[str, Any]:
+def _execute_answer_unlocked(ctx: Dict[str, Any], tracer: Optional[WorkflowTracer] = None, *, cancel_event: Optional[Any] = None) -> Dict[str, Any]:
     """Build the pipeline and run the answer flow for a prepared context."""
     pipeline = build_pipeline(
         model_override=ctx["model"],
@@ -754,6 +832,8 @@ def _execute_answer_unlocked(ctx: Dict[str, Any], tracer: Optional[WorkflowTrace
         images=ctx["images"],
         conversation_id=ctx.get("conversation_id"),
         tracer=tracer,
+        autonomy_mode=ctx.get("autonomy"),
+        cancel_event=cancel_event,
     )
     print(f"[server] Pipeline returned result with keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
 
@@ -771,6 +851,18 @@ def _execute_answer_unlocked(ctx: Dict[str, Any], tracer: Optional[WorkflowTrace
         control["search_reference_limit"] = ctx["reference_limit"]
 
     return result
+
+
+@app.post("/api/answer/<run_id>/cancel")
+def cancel_answer(run_id: str) -> Any:
+    """Request-level cancellation of an in-flight streaming answer.
+
+    Sets the run's cancel event so the loop stops at the next node boundary.
+    Deliberately does NOT acquire the conversation lock (the target request
+    holds it). Cancelling an unknown / already-finished run is a safe no-op.
+    """
+    cancelled = _CANCEL_REGISTRY.cancel(str(run_id))
+    return jsonify({"run_id": run_id, "cancelled": cancelled}), (200 if cancelled else 200)
 
 
 @app.post("/api/answer")
@@ -874,10 +966,12 @@ def answer_stream() -> Any:
         tracer.on_event(persist_and_queue_step)
         holder: Dict[str, Any] = {}
         completed = False
+        run_id = uuid.uuid4().hex
+        cancel_event = _CANCEL_REGISTRY.register(run_id)
 
         def run() -> None:
             try:
-                holder["result"] = _execute_answer(ctx, tracer=tracer)
+                holder["result"] = _execute_answer(ctx, tracer=tracer, cancel_event=cancel_event)
             except Exception as exc:  # pragma: no cover - propagate runtime issues
                 error_msg = str(exc).encode("utf-8", errors="replace").decode("utf-8")
                 traceback_text = traceback.format_exc()
@@ -894,6 +988,8 @@ def answer_stream() -> Any:
                 events.put(None)
 
         try:
+            # Emit the run id first so the client can cancel this request.
+            yield f"event: run\ndata: {json.dumps({'run_id': run_id}, ensure_ascii=False)}\n\n".encode("utf-8")
             worker = threading.Thread(target=run, daemon=True)
             worker.start()
 
@@ -921,6 +1017,31 @@ def answer_stream() -> Any:
                     )
                     yield f"event: error\ndata: {json.dumps(error_payload, ensure_ascii=False)}\n\n".encode("utf-8")
                 else:
+                    # Task 7.3: a model-initiated clarification is a
+                    # non-terminal "waiting for input" state. Emit a
+                    # recognizable event carrying the clarifying question
+                    # before the result so the client can render it as
+                    # neither failure nor completion.
+                    control = result.get("control") if isinstance(result, dict) else None
+                    control = control if isinstance(control, dict) else {}
+                    if control.get("model_clarification"):
+                        clarify_payload = {
+                            "question": (
+                                control.get("clarification_question")
+                                or (result.get("answer") if isinstance(result, dict) else "")
+                                or "请补充更多信息以便继续。"
+                            ),
+                            "conversation_id": (
+                                result.get("control", {}).get("conversation_id")
+                                if isinstance(result, dict) else None
+                            ),
+                        }
+                        audit.record("model_clarification", payload=clarify_payload)
+                        yield (
+                            "event: clarify\ndata: "
+                            + json.dumps(clarify_payload, ensure_ascii=False)
+                            + "\n\n"
+                        ).encode("utf-8")
                     audit.record("response_ready", response_payload=result, status_code=200)
                     yield f"event: result\ndata: {json.dumps(result, ensure_ascii=False)}\n\n".encode("utf-8")
             audit.record("request_complete", status_code=200)
@@ -929,6 +1050,9 @@ def answer_stream() -> Any:
         finally:
             if not completed:
                 audit.record("stream_closed_before_complete")
+            # Always release the cancel entry so the registry cannot leak,
+            # whether the run completed, errored, or the client disconnected.
+            _CANCEL_REGISTRY.remove(run_id)
 
     return Response(
         generate(),

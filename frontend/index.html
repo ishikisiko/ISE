@@ -67,6 +67,12 @@
                                 <path d="M12 19V5M5 12l7-7 7 7"/>
                             </svg>
                         </button>
+                        <button type="button" id="cancel-btn" class="cancel-btn" title="取消本次执行" aria-label="取消本次执行" hidden>
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <rect x="6" y="6" width="12" height="12" rx="2"/>
+                            </svg>
+                            <span>取消</span>
+                        </button>
                     </div>
                 </div>
 
@@ -76,6 +82,13 @@
                             <circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
                         </svg>
                         <span>联网</span>
+                    </button>
+
+                    <button type="button" id="autonomy-pill" class="pill" aria-pressed="false" title="自主度：关闭=引导模式（默认，规则强校验）；开启=自主模式（放宽预算与规则，适合开放式任务）">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M12 2a10 10 0 1 0 10 10"/><circle cx="12" cy="12" r="3"/>
+                        </svg>
+                        <span>自主</span>
                     </button>
 
                     <div class="pill-select" title="模型选择">

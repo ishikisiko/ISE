@@ -91,6 +91,7 @@ Always answer in the same language as the user's question."""
         self._current_analysis: Optional[QueryAnalysis] = None
         self._current_ledger: Optional[EvidenceLedger] = None
         self._current_execution_trace: Optional[QueryExecutionTrace] = None
+        self._current_autonomy_policy: Optional[Any] = None
         self._loop_orchestrator: Optional[Any] = None
 
         skill_config = dict(self.config)
@@ -352,8 +353,19 @@ Always answer in the same language as the user's question."""
         tracer: Optional[Any] = None,
         audit_mode: Optional[str] = None,
         search_depth: Optional[str] = None,
+        autonomy_mode: Optional[str] = None,
+        cancel_event: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Answer through the sole act/observe/evaluate executor."""
+        from orchestrators.autonomy_policy import resolve_autonomy_policy
+
+        # Resolve the rule-strength policy once per request from the explicit
+        # request mode + config only (never from query content / analysis). The
+        # lower orchestrator and the loop receive the resolved object and pass
+        # it through untouched.
+        self._current_autonomy_policy = resolve_autonomy_policy(
+            self.config, autonomy_mode
+        )
         audit_settings = resolve_audit_settings(self.config)
         audit_override = (audit_mode or "").strip().lower()
         if audit_override == "off":
@@ -451,6 +463,11 @@ Always answer in the same language as the user's question."""
         if (
             self._current_analysis is not None
             and self._current_analysis.critical_ambiguity
+            # The deterministic pre-loop clarification short-circuit and the
+            # model-owned ask_user tool are mutually exclusive. When the model
+            # owns clarification, ambiguity is surfaced to the loop and the
+            # model decides whether to ask.
+            and not self._current_autonomy_policy.model_owns_clarification
         ):
             result = self._build_clarification_response(
                 query,
@@ -474,6 +491,7 @@ Always answer in the same language as the user's question."""
             force_search=force_search,
             timing_recorder=timing_recorder,
             tracer=tracer,
+            cancel_event=cancel_event,
         )
         control = result.setdefault("control", {})
         if applied_search_depth:
@@ -767,6 +785,7 @@ Always answer in the same language as the user's question."""
         force_search: bool,
         timing_recorder: TimingRecorder,
         tracer: Optional[Any] = None,
+        cancel_event: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Delegate every non-shortcut query to the sole loop executor."""
         orchestrator = self._get_loop_orchestrator()
@@ -785,6 +804,8 @@ Always answer in the same language as the user's question."""
             analysis=self._current_analysis,
             execution_trace=self._current_execution_trace,
             tracer=tracer,
+            autonomy_policy=getattr(self, "_current_autonomy_policy", None),
+            cancel_event=cancel_event,
         )
         timing_recorder.merge_payload(result.get("response_times"))
         self._ingest_loop_evidence(result, num_search_results=num_search_results)
