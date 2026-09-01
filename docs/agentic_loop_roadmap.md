@@ -324,11 +324,20 @@ trace/control 与单一配置均有自动化回归；plan/loop 实测与完整�
 
 | 方向 | 说明 |
 |---|---|
-| 会话与 loop 状态融合 | 已有 `conversation_store` + LangGraph checkpointer，多轮追问直接续跑 loop 轨迹而非重新开始 |
+| 可注入自主度（`autonomy.mode`） | 同一张图、同一个裁判，规则强度提为可注入策略（`guided`/`autonomous`）；开放式任务放开上界与模型主导，preflight 始终 binding，取消能力与预算放开同批落地。详见下方「2026-08 已落地：可注入自主度」 |
+| 会话与 loop 状态融合 | 已有 `conversation_store` + LangGraph checkpointer，多轮追问直接续跑 loop 轨迹而非重新开始；澄清往返与跨轮自主度切换已纳入 |
 | 从 audit 自动挖回归用例 | audit 已记录完整轨迹；失败案例可半自动转成 `evals/cases.jsonl` 条目，让回归集自增长 |
 | 并行工具调用 | 对比类问题天然可并行（「A 和 B 哪个便宜」应同时查两边） |
 | 子 agent | 深度调研类问题下放给独立预算的子 loop |
 | Skill 热加载 / 第三方 skill | 只有当 skill 契约稳定数月后才值得做 |
+
+#### 2026-08 已落地：可注入自主度（`autonomy.mode`）
+
+把 loop 中七处硬编码的规则强度（成功标准注入、critic 绑定、引用校验、judge、narration guard、强制合成、预算）提为可注入的 `AutonomyPolicy`，同一张 LangGraph 图与同一个 `evaluate_termination` 裁判在 `guided`（默认，行为与本能力前字节一致）与 `autonomous`（checklist 降为提示、critic/引用取 advisory、judge 关、narration guard 关、强制合成旁路关、预算放宽但有限、`ask_user` 归模型）两种自主度下运行。**单图不变**——不新增执行器、不新增裁判、不新增停止逻辑；advisory 下确定性规则照常计算并进 trace/audit，只是不驳回终答。请求级取消（`/api/answer/<run_id>/cancel`）与预算放开同批落地，避免出现无法中止的长 loop；模型自主澄清（`ask_user`）以非终态表达。
+
+**与「会话与 loop 状态融合」「子 agent」的关系**：本方向是会话融合的前置能力——澄清往返、跨轮自主度切换重置轨迹都建立在已有的 checkpoint 续跑之上；它也是子 agent 的预算范式来源（子 loop 复用同一套预算组与 advisory 语义），但本 change 不引入子 agent。**与并行工具调用的关系**：自主模式放宽了预算但仍是串行工具调用，并行检索是独立的后续方向。
+
+**关于 `autonomy.mode` 是长期能力开关而非迁移 flag**：`autonomy.mode` 选择的是同一执行器、同一裁判的**绑定强度**——`evaluate_termination` 在两个预设下都是唯一判定函数且都会被调用，系统中不会出现第二张图、第二套停止逻辑或第二个 orchestrator。这与已删除的 `engine.mode` 本质不同：`engine.mode` 曾用于在两套执行器（plan 与 loop）之间选择，M4-D4 明确「同一运行时不能保留两个裁判」，M5 已将其删除。`autonomy.mode` 表达的是用户可选的产品维度（自主度），不是新旧实现并存的过渡态，因此**不属于 I5 要求在 M5 后删除的运行时开关**，需长期保留。为防止后续架构审计将其误判为残留 flag，此处显式记录其长期存在的理由。详见 `openspec/changes/add-autonomy-policy/`。
 
 #### 2026-07 已落地：ReAct 上下文压缩（属于「会话与 loop 状态融合」）
 
