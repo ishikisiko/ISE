@@ -205,11 +205,12 @@ def test_example_placeholders_are_not_treated_as_credentials():
     assert config["providers"]["opencode-go"]["model"] == "deepseek-v4-flash"
     assert "domainClassifier" not in config
     assert "routingAndKeywords" not in config
-    assert config["termination"]["judge"] == {
-        "enabled": True,
-        "provider": "opencode-go",
-        "model": "deepseek-v4-flash",
-    }
+    judge_block = config["termination"]["judge"]
+    # The judge block may carry additional call params (temperature, max_tokens,
+    # reasoning); this assertion only pins the credential-relevant identity keys.
+    assert judge_block["enabled"] is True
+    assert judge_block["provider"] == "opencode-go"
+    assert judge_block["model"] == "deepseek-v4-flash"
     assert config["embeddings"] == {
         "provider": "openai_compatible",
         "model": "qwen3.7-text-embedding",

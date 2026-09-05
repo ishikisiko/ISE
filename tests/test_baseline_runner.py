@@ -31,6 +31,8 @@ def test_baseline_records_per_query_token_peak_and_compaction_metrics() -> None:
         "skill_tools_used": [],
         "compactions": 2,
         "peak_context_ratio": 0.74,
+        "advisory_gap_count": None,
+        "autonomy": None,
     }
 
     summary = build_answer_summary([{**stats, **loop}])

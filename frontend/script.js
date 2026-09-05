@@ -11,10 +11,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const composer = document.getElementById("composer");
     const queryInput = document.getElementById("query");
     const sendBtn = document.getElementById("send-btn");
+    const cancelBtn = document.getElementById("cancel-btn");
     const attachBtn = document.getElementById("attach-btn");
     const fileInput = document.getElementById("file-input");
     const chipRow = document.getElementById("chip-row");
     const searchPill = document.getElementById("search-pill");
+    const autonomyPill = document.getElementById("autonomy-pill");
     const modelSelect = document.getElementById("model");
     const settingsBtn = document.getElementById("settings-btn");
     const settingsPanel = document.getElementById("settings-panel");
@@ -89,6 +91,7 @@ document.addEventListener("DOMContentLoaded", () => {
         searchDepth: "auto",
         timing: ["total", "search", "llm", "tools"],
         model: "",
+        autonomy: "guided",
     };
 
     function loadSettings() {
@@ -107,6 +110,9 @@ document.addEventListener("DOMContentLoaded", () => {
             if (!merged.sources.length) merged.sources = [...DEFAULT_SETTINGS.sources];
             if (!["auto", "basic", "advanced", "fast", "ultra-fast"].includes(merged.searchDepth)) {
                 merged.searchDepth = DEFAULT_SETTINGS.searchDepth;
+            }
+            if (!["guided", "autonomous"].includes(merged.autonomy)) {
+                merged.autonomy = DEFAULT_SETTINGS.autonomy;
             }
             return merged;
         } catch {
@@ -130,6 +136,7 @@ document.addEventListener("DOMContentLoaded", () => {
         turnCount: 0,
         conversations: [],
         activeConversationId: "",
+        currentRunId: null,
     };
 
     // ------------------------------------------------------------------
@@ -991,6 +998,18 @@ document.addEventListener("DOMContentLoaded", () => {
         renderMeta(refs.turn, data);
     }
 
+    // 模型发起的澄清是一个非终态：问题作为等待输入的提示呈现，
+    // 不标记为失败或已完成的答案。用户的下一条输入会作为续跑答复发出。
+    function renderClarification(refs, question) {
+        refs.workflow.finalize();
+        const bubble = el("div", "clarify-card");
+        bubble.appendChild(el("span", "clarify-badge", "需要补充信息"));
+        const q = el("div", "clarify-question", String(question || "请补充更多信息以便继续。").trim());
+        bubble.appendChild(q);
+        bubble.appendChild(el("div", "clarify-hint", "模型正在等待你的答复，请直接在下方输入补充内容。"));
+        refs.workflow.el.after(bubble);
+    }
+
     // ------------------------------------------------------------------
     // 降级路径：真实轨迹回放与结果合成步骤
     // ------------------------------------------------------------------
@@ -1001,6 +1020,7 @@ document.addEventListener("DOMContentLoaded", () => {
         unrecoverable: { text: "不可恢复", tone: "err", status: "error" },
         evidence_insufficient: { text: "证据不足", tone: "warn", status: "error" },
         clarification_required: { text: "需要澄清", tone: "warn", status: "error" },
+        cancelled: { text: "已取消", tone: "warn", status: "error" },
     };
 
     const LOOP_REASON_LABELS = {
@@ -1129,6 +1149,18 @@ document.addEventListener("DOMContentLoaded", () => {
                             : ""),
                 }));
             }
+            // Echo the effective autonomy mode + its resolution source so the
+            // caller can confirm a per-request override was honoured.
+            if (control.autonomy && control.autonomy.mode) {
+                const srcLabel =
+                    ({ request: "请求", config: "配置", default: "默认" }[control.autonomy.source])
+                    || control.autonomy.source;
+                const modeLabel =
+                    control.autonomy.mode === "autonomous" ? "自主" : "引导";
+                reactStep.items = (reactStep.items || []).concat([
+                    { label: "自主度", value: `${modeLabel}（${srcLabel}）` },
+                ]);
+            }
             steps.push(reactStep);
         }
 
@@ -1184,6 +1216,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 const parsed = parseSSEFrame(frame);
                 if (!parsed) continue;
                 if (parsed.event === "step") handlers.onStep(parsed.data);
+                else if (parsed.event === "run") handlers.onRun && handlers.onRun(parsed.data);
+                else if (parsed.event === "clarify") handlers.onClarify && handlers.onClarify(parsed.data);
                 else if (parsed.event === "result") handlers.onResult(parsed.data);
                 else if (parsed.event === "error") handlers.onError(parsed.data);
             }
@@ -1246,6 +1280,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const codeBlocks = extractCodeBlocks(query);
         if (codeBlocks.length) payload.code_blocks = codeBlocks;
         if (settings.model) payload.model = settings.model;
+        if (settings.autonomy === "autonomous") payload.autonomy = "autonomous";
         if (settings.search) {
             if (settings.sources.length) payload.search_sources = [...settings.sources];
             if (settings.forceSearch) payload.force_search = true;
@@ -1271,6 +1306,8 @@ document.addEventListener("DOMContentLoaded", () => {
         sendBtn.disabled = isLoading;
         sendBtn.classList.toggle("is-loading", isLoading);
         queryInput.readOnly = isLoading;
+        if (cancelBtn) cancelBtn.hidden = !isLoading;
+        if (!isLoading) state.currentRunId = null;
     }
 
     async function handleSubmit(event) {
@@ -1296,7 +1333,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
         try {
             await streamAnswer(payload, {
+                onRun: (data) => {
+                    state.currentRunId = (data && data.run_id) || null;
+                },
                 onStep: (step) => refs.workflow.apply(step),
+                onClarify: (data) => {
+                    // 模型发起澄清：渲染为等待输入的非终态，不计为失败或完成。
+                    finished = true;
+                    renderClarification(refs, data && data.question);
+                    setStatus("等待你的补充…");
+                },
                 onResult: (data) => {
                     finished = true;
                     renderResult(refs, data);
@@ -1313,8 +1359,14 @@ document.addEventListener("DOMContentLoaded", () => {
                     const data = await legacyAnswer(payload);
                     for (const step of restoreSteps(data)) refs.workflow.apply(step);
                     finished = true;
-                    renderResult(refs, data);
-                    setStatus("回答已生成");
+                    const control = (data && data.control) || {};
+                    if (control.model_clarification) {
+                        renderClarification(refs, control.clarification_question);
+                        setStatus("等待你的补充…");
+                    } else {
+                        renderResult(refs, data);
+                        setStatus("回答已生成");
+                    }
                 } catch (legacyErr) {
                     failed = (legacyErr && legacyErr.message) || "请求失败";
                 }
@@ -1520,6 +1572,9 @@ document.addEventListener("DOMContentLoaded", () => {
     function applySettingsToControls() {
         searchPill.classList.toggle("is-on", settings.search);
         searchPill.setAttribute("aria-pressed", settings.search ? "true" : "false");
+        const isAutonomous = settings.autonomy === "autonomous";
+        autonomyPill.classList.toggle("is-on", isAutonomous);
+        autonomyPill.setAttribute("aria-pressed", isAutonomous ? "true" : "false");
         for (const checkbox of sourceCheckboxes) {
             checkbox.checked = settings.sources.includes(checkbox.value);
         }
@@ -1572,6 +1627,35 @@ document.addEventListener("DOMContentLoaded", () => {
         updateSearchDependentControls();
         saveSettings();
         setStatus(settings.search ? "联网搜索已启用" : "联网搜索已关闭");
+    });
+
+    if (cancelBtn) {
+        cancelBtn.addEventListener("click", async () => {
+            const runId = state.currentRunId;
+            if (!runId) return;
+            try {
+                await fetch(`/api/answer/${encodeURIComponent(runId)}/cancel`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                });
+                setStatus("正在取消…");
+            } catch {
+                /* best-effort: the loop stops at the next node boundary */
+            }
+        });
+    }
+
+    autonomyPill.addEventListener("click", () => {
+        settings.autonomy = settings.autonomy === "autonomous" ? "guided" : "autonomous";
+        const isAutonomous = settings.autonomy === "autonomous";
+        autonomyPill.classList.toggle("is-on", isAutonomous);
+        autonomyPill.setAttribute("aria-pressed", isAutonomous ? "true" : "false");
+        saveSettings();
+        setStatus(
+            isAutonomous
+                ? "自主模式：放宽预算与规则，适合开放式任务"
+                : "引导模式：规则强校验（默认）"
+        );
     });
 
     if (newConvBtn) {

@@ -198,3 +198,52 @@ token 均值约为 M4 loop 的 1.75 倍，3 条跑到第 5 轮，其中 1 条仍
 77.76s。该次 trace 只含 4 条实际工具调用（weather 失败、web、recovery、web），而不是按返回证据
 重复记账，并完整显示每个工具的 limit/used。provider 失败后仍可能触及 loop 上限，这是保留的
 运行质量风险，不应解释成 M5 已消除所有时延问题。
+
+---
+
+## 6. 自主度两模式对比（`autonomy.mode`：guided vs autonomous）
+
+可注入自主度（见 [roadmap](agentic_loop_roadmap.md) M6「2026-08 已落地」）让同一张图在两种
+规则强度下运行。本节是两模式定量对比的口径说明与结果登记处。
+
+### 6.1 口径与运行入口
+
+两模式分目录落盘，互不覆盖：`runtime/baseline/<milestone>/<autonomy>/`，每条记录携带生效自主度
+（`autonomy`）与其来源。`--compare` 在两个目录都携带 `run_meta.autonomy` 时自动切到模式感知的
+两模式摘要（`autonomy_comparison.json`），按 qid 对齐产出 delta。
+
+```bash
+# 事实型安全性验证（8.4）：在 final_answer_dataset 上各跑一模式
+python -m tests.baseline_runner --datasets answer --autonomy guided   --milestone autonomy
+python -m tests.baseline_runner --datasets answer --autonomy autonomous --milestone autonomy
+
+# 开放式价值验证（8.5）：在 open_task_dataset 上各跑一模式（人工评分）
+python -m tests.baseline_runner --datasets open --autonomy guided   --milestone autonomy
+python -m tests.baseline_runner --datasets open --autonomy autonomous --milestone autonomy
+
+# 两模式 diff（自动选模式感知摘要）
+python -m tests.baseline_runner --compare runtime/baseline/autonomy/guided runtime/baseline/autonomy/autonomous
+```
+
+### 6.2 记录的指标
+
+- **答案质量**：事实型用自动 fact-coverage（`final_answer_dataset`）；开放式用人工评分，rubric 为
+  各样本的 `scoring_dimensions` 列（如 `breadth_of_tradeoffs`、`citation_of_real_world_examples`）。
+- **成本侧**：P50/P95 时延、每问 token、LLM 调用数、外部 API 调用数。
+- **行为侧**：迭代数、压缩次数（`compactions`）、峰值上下文占比、**advisory 缺口计数**
+  （`autonomous` 下 critic/引用 advisory 仍记录但不绑定，该计数是“模型忽略了多少条 critic 提醒”
+  的代理指标，是将来是否收紧的唯一数据来源）。
+
+### 6.3 退出判据
+
+- 事实型子集：`autonomous` 的 fact-coverage 不劣于 `guided`（安全性）。
+- 开放式子集：有可复述的人工评分结论（价值证明）。
+- 成本倍数被明确记录并接受（预期 `autonomous` 每问 token / P95 时延约为 `guided` 的 3–4 倍）。
+- **若开放式子集未显示优势，停在此处并记录量化结论是合法结局**（roadmap §6「允许中途改判」）。
+
+### 6.4 结果
+
+> 待 `runtime/baseline/autonomy/{guided,autonomous}/` 跑分完成后回填。`autonomous` 的预算默认值
+> （`max_iterations`、各工具 `max_calls_per_query`、`context_compaction` 参数）将按本节成本/质量结果
+> 在 `orchestrators/autonomy_policy.py` 的 `AUTONOMOUS_PRESET` 与 `config.example.json` 中回填（任务 8.6）。
+> 初值为 `max_iterations=15`、per-tool 约为 guided 的 3–4 倍、压缩阈值 0.85 / 保留 4 轮。

@@ -1106,6 +1106,74 @@ class ReActRecallEvidenceTool(BaseTool):
         return {"limit": self.max_calls_per_query, "used": self._calls_in_run}
 
 
+class AskUserInput(BaseModel):
+    """Input schema for the model-initiated clarification tool."""
+
+    question: str = Field(description="The concise clarifying question to ask the user")
+
+
+class ReActAskUserTool(BaseTool):
+    """Local, non-retrieval tool for model-initiated clarification.
+
+    Performs no provider call, emits no evidence record, and never contributes
+    to evidence-increment accounting. It has its own small call budget. Calling
+    it signals that the run should pause and wait for the user's reply (a
+    non-terminal "waiting for input" state). Only exposed on the tool surface
+    when ``clarification_owner=model``.
+    """
+
+    name: str = "ask_user"
+    description: str = (
+        "Ask the user a single concise clarifying question when the request is "
+        "ambiguous and you cannot proceed without the answer. Use sparingly. "
+        "This does not search or fetch; it pauses the run for the user's reply."
+    )
+    args_schema: Type[BaseModel] = AskUserInput
+    return_direct: bool = False
+
+    max_calls_per_query: int = Field(default=2, exclude=True)
+    _calls_in_run: int = PrivateAttr(default=0)
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def __init__(self, *, max_calls_per_query: int = 2, **kwargs: Any) -> None:
+        super().__init__(
+            max_calls_per_query=max(1, int(max_calls_per_query)),
+            **kwargs,
+        )
+
+    def _run(
+        self,
+        question: str,
+        run_manager: Optional[CallbackManagerForToolRun] = None,
+    ) -> str:
+        if self._calls_in_run >= self.max_calls_per_query:
+            return json.dumps(
+                {
+                    "status": "rejected",
+                    "reason": "max_calls_per_query",
+                    "limit": self.max_calls_per_query,
+                },
+                ensure_ascii=False,
+            )
+        self._calls_in_run += 1
+        bounded = " ".join(str(question or "").split())
+        if len(bounded) > 500:
+            bounded = bounded[:497].rstrip() + "..."
+        # No evidence is produced; the loop detects this payload and pauses.
+        return json.dumps(
+            {"status": "waiting_for_user", "question": bounded},
+            ensure_ascii=False,
+        )
+
+    def reset_budget(self) -> None:
+        self._calls_in_run = 0
+
+    def get_budget_status(self) -> Dict[str, int]:
+        return {"limit": self.max_calls_per_query, "used": self._calls_in_run}
+
+
 def create_react_tools_from_config(
     config: Dict[str, Any],
     llm: Optional[BaseChatModel] = None,
@@ -1143,6 +1211,10 @@ def create_react_tools_from_config(
             max_calls_per_query=tool_budget("recall_evidence", 3)
         )
     )
+    # Model-initiated clarification tool. It is filtered out of the active tool
+    # surface unless the effective policy sets clarification_owner=model, so it
+    # is created unconditionally and included/excluded per request.
+    tools.append(ReActAskUserTool(max_calls_per_query=tool_budget("ask_user", 2)))
 
     reranker = None
     rerank_cfg = config.get("rerank") or {}

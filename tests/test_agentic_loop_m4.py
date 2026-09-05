@@ -129,8 +129,12 @@ def test_search_failure_is_a_hard_stop_that_judge_cannot_reverse() -> None:
 
 
 def test_sole_loop_execution_adapter_calls_the_shared_critic() -> None:
-    loop_source = inspect.getsource(ReactLoopGraphRunner._evaluate)
-    assert "evaluate_termination" in loop_source
+    # ``_evaluate`` is split into stages (facts -> critic -> decide -> verdict);
+    # the shared critic ``evaluate_termination`` must live in the critic stage
+    # that ``_evaluate`` invokes, keeping a single termination judge.
+    assert "_run_critic" in inspect.getsource(ReactLoopGraphRunner._evaluate)
+    critic_source = inspect.getsource(ReactLoopGraphRunner._run_critic)
+    assert "evaluate_termination" in critic_source
     loop_module = (ROOT / "orchestrators/react_loop_graph.py").read_text(encoding="utf-8")
     orchestrator_module = (
         ROOT / "orchestrators/react_agent_orchestrator.py"

@@ -401,6 +401,73 @@ class ConversationManager:
         last = self.get_last_turn(conversation_id)
         return bool(last and last.get("topic_reset"))
 
+    def last_turn_autonomy_mode(self, conversation_id: str) -> Optional[str]:
+        """Return the effective autonomy mode recorded on the last turn.
+
+        Used to detect a cross-turn mode switch (task 7.6): when the new
+        request resolves to a different mode, the old loop trajectory must not
+        be resumed. Returns ``None`` when no turn or no mode was recorded
+        (e.g. a non-loop turn such as small talk), which is treated as
+        "no switch".
+        """
+        last = self.get_last_turn(conversation_id)
+        if not last:
+            return None
+        result = last.get("result") or {}
+        if not isinstance(result, dict):
+            return None
+        control = result.get("control") or {}
+        autonomy = control.get("autonomy") if isinstance(control, dict) else None
+        mode = autonomy.get("mode") if isinstance(autonomy, dict) else None
+        return str(mode) if mode else None
+
+    def last_turn_was_model_clarification(self, conversation_id: str) -> bool:
+        """True when the last turn paused in a model-initiated clarification.
+
+        Used to drive clarification resume semantics (task 7.5): the next turn
+        resumes the paused loop without resetting iteration or tool budgets.
+        """
+        last = self.get_last_turn(conversation_id)
+        if not last:
+            return False
+        result = last.get("result") or {}
+        if not isinstance(result, dict):
+            return False
+        control = result.get("control")
+        control = control if isinstance(control, dict) else {}
+        return bool(control.get("model_clarification"))
+
+    def clear_loop_checkpoint(self, conversation_id: str) -> None:
+        """Drop only the LangGraph checkpoint (loop trajectory) for a thread.
+
+        Unlike :meth:`delete_checkpoint`, the recorded conversation turns are
+        preserved so the sidebar history remains intact. Used when a cross-turn
+        autonomy switch (task 7.6) requires the new mode to start fresh while
+        keeping the Q&A log.
+        """
+        if not self.enabled or not self._saver or not conversation_id:
+            return
+        cid = str(conversation_id)
+        config = {"configurable": {"thread_id": cid}}
+        with self._lock:
+            assert self._conn is not None
+            existing_tables = {
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            try:
+                if "checkpoints" in existing_tables:
+                    self._conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (cid,))
+                if "checkpoint_writes" in existing_tables:
+                    self._conn.execute(
+                        "DELETE FROM checkpoint_writes WHERE thread_id = ?", (cid,)
+                    )
+                self._conn.commit()
+            except Exception as exc:  # noqa: BLE001 - best-effort reset
+                print(f"[conversation] clear_loop_checkpoint failed: {exc}")
+
     # ------------------------------------------------------------------
     # LRU governance
     # ------------------------------------------------------------------

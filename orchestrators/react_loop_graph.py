@@ -61,6 +61,7 @@ LOOP_STATUSES = (
     "unrecoverable",
     "evidence_insufficient",
     "clarification_required",
+    "cancelled",
 )
 
 _FUNCTION_TAG = re.compile(
@@ -238,6 +239,7 @@ _VERDICT_REASON_LABELS = {
     "forced_synthesis": "检索结束，生成可交付结论",
     "context_compaction": "上下文超预算，先压缩历史",
     "pricing_source_recovery": "切换到已配置的官方价目页",
+    "model_self_wrap": "模型自主收尾",
 }
 
 
@@ -269,6 +271,8 @@ class LoopVerdict:
     rule_hits: List[Dict[str, str]] = field(default_factory=list)
     evidence_sufficiency: str = "unknown"
     coverage_gaps: List[str] = field(default_factory=list)
+    autonomy_mode: str = "guided"
+    advisory_gaps: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -287,7 +291,50 @@ class LoopVerdict:
             "rule_hits": list(self.rule_hits),
             "evidence_sufficiency": self.evidence_sufficiency,
             "coverage_gaps": list(self.coverage_gaps),
+            "autonomy_mode": self.autonomy_mode,
+            "advisory_gaps": list(self.advisory_gaps),
         }
+
+
+@dataclass
+class _EvaluationFacts:
+    """Normalized facts gathered for one evaluate pass."""
+
+    iteration: int
+    final_proposed: bool
+    invalid_tool_request: bool
+    invalid_final_response: bool
+    draft: str
+    constraints_met: List[str]
+    constraints_missing: List[str]
+    no_progress_streak: int
+    citation_failures: List[Dict[str, str]]
+
+
+@dataclass
+class _CriticResult:
+    """Outcome of the termination critic (and optional judge) for one pass."""
+
+    decision: Any
+    judge_error: Optional[str]
+    coverage_gaps: List[str]
+    pricing_requirements: Dict[str, Any]
+    pricing_ready: bool
+    pricing_source: Optional[Dict[str, str]]
+    citation_failures: List[Dict[str, str]] = field(default_factory=list)
+    citation_was_advisory: bool = False
+
+
+@dataclass
+class _ActionDecision:
+    """The four mutually exclusive routing booleans for an evaluate pass."""
+
+    pricing_recovery: bool
+    force_synthesis: bool
+    degraded_synthesis_force: bool
+    compact_next: bool
+    context_amount: int
+    context_ratio: float
 
 
 TOOL_CALLING_SYSTEM_PROMPT = """你是一个智能搜索助手。你可以使用工具来收集信息回答用户问题。
@@ -321,13 +368,54 @@ class ReactLoopGraphRunner:
         execution_trace: Optional[Any] = None,
         context_compaction_config: Optional[Dict[str, Any]] = None,
         ledger: Optional[Any] = None,
+        autonomy_policy: Optional[Any] = None,
+        cancel_event: Optional[Any] = None,
     ) -> None:
         self.llm = llm
         self.tools = list(tools or [])
         self.tools_by_name = {getattr(t, "name", ""): t for t in self.tools}
-        self.max_iterations = max(1, int(max_iterations or 5))
         self.eval_cfg = normalize_termination_config(termination_config)
-        self.max_synthesis_attempts = self.eval_cfg["max_synthesis_attempts"]
+        # The loop is policy-driven. When a policy is supplied (the server/CLI
+        # path resolves it from config), it is the single source of truth for
+        # budgets and rule strength. When none is supplied (direct construction,
+        # tests), synthesize a guided policy whose budgets mirror the constructor
+        # inputs so behaviour is unchanged from before this capability.
+        from orchestrators.autonomy_policy import (
+            BudgetGroup,
+            ContextCompactionBudget,
+            GUIDED_PRESET,
+        )
+        from dataclasses import replace as _dc_replace
+
+        validated_compaction = validate_context_compaction_config(context_compaction_config)
+        if autonomy_policy is not None:
+            self.autonomy_policy = autonomy_policy
+            self.context_compaction_config = self._apply_policy_compaction(
+                validated_compaction
+            )
+        else:
+            guided_compaction = ContextCompactionBudget(
+                threshold=validated_compaction["threshold"],
+                keep_recent_rounds=validated_compaction["keep_recent_rounds"],
+                max_compactions_per_run=validated_compaction["max_compactions_per_run"],
+                summary_max_tokens=validated_compaction["summary_max_tokens"],
+                evidence_pool_max_entries=validated_compaction["evidence_pool_max_entries"],
+            )
+            self.autonomy_policy = _dc_replace(
+                GUIDED_PRESET,
+                budgets=BudgetGroup(
+                    max_iterations=max(1, int(max_iterations or 5)),
+                    max_synthesis_attempts=self.eval_cfg["max_synthesis_attempts"],
+                    # Empty tool-budget map: keep each tool's own configured
+                    # ceiling (the default policy only applies limits it knows).
+                    tool_budgets={},
+                    context_compaction=guided_compaction,
+                ),
+            )
+            self.context_compaction_config = validated_compaction
+        # Budgets come from the resolved policy's budget group.
+        self.max_iterations = self.autonomy_policy.budgets.max_iterations
+        self.max_synthesis_attempts = self.autonomy_policy.budgets.max_synthesis_attempts
         # Per-scenario reasoning levels (DeepSeek v4 thinks at "high" by
         # default; easy queries run faster at "low"/"disabled", hard queries
         # keep "high" for answer quality). Resolved per-query from the analysis
@@ -345,14 +433,15 @@ class ReactLoopGraphRunner:
         # ConversationManager still owns history_window for transcript reads;
         # the loop must never use it to trim native tool-call messages.
         _ = history_window
-        self.context_compaction_config = validate_context_compaction_config(
-            context_compaction_config
-        )
         self.ledger = ledger
         # Keep a private recorder for direct callers so the final response can
         # expose the same bounded facts even when no SSE listener is attached.
         self.tracer = ensure_tracer(tracer) if tracer is not None else WorkflowTracer()
         self._trace_start_index = 0
+        # Optional request-level cancellation token (a threading.Event). When
+        # set, work-initiating nodes stop before starting new calls; in-flight
+        # calls finish naturally and register their results first.
+        self.cancel_event = cancel_event
         self.initial_checklist = self._derive_checklist()
         self.system_prompt = TOOL_CALLING_SYSTEM_PROMPT.format(
             success_criteria=self._format_success_criteria()
@@ -447,10 +536,39 @@ class ReactLoopGraphRunner:
         _, derived = check_constraint_coverage(self.query, "", "", self.time_constraint)
         return derived
 
+    def _apply_policy_compaction(
+        self, validated: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Fold the policy's tunable compaction knobs over the validated config.
+
+        The five tunable params (threshold, keep_recent_rounds,
+        max_compactions_per_run, summary_max_tokens, evidence_pool_max_entries)
+        are budget-group members and follow the effective autonomy mode.
+        Infrastructure knobs (context_window, per_model_window, calibration)
+        stay from the configured/orchestration source.
+        """
+        compaction = self.autonomy_policy.budgets.context_compaction
+        merged = dict(validated)
+        merged.update(compaction.to_config_dict())
+        # Preserve non-tunable infra knobs from the validated config.
+        for key in ("context_window", "per_model_window", "use_judge_llm"):
+            if key in validated:
+                merged[key] = validated[key]
+        return merged
+
     def _format_success_criteria(self) -> str:
         parts: List[str] = []
         if self.initial_checklist:
-            parts.append("本次回答必须满足：" + "、".join(self.initial_checklist))
+            if self.autonomy_policy.checklist_injection == "hint":
+                # Hint mode: the checklist is reference information only and is
+                # never framed as a termination condition. It is still derived
+                # and used for per-round coverage accounting.
+                parts.append(
+                    "以下维度仅供参考（非强制，未覆盖不阻止你直接作答）："
+                    + "、".join(self.initial_checklist)
+                )
+            else:
+                parts.append("本次回答必须满足：" + "、".join(self.initial_checklist))
         analysis_constraints = getattr(self.analysis, "constraints", None)
         if (
             isinstance(analysis_constraints, dict)
@@ -729,6 +847,19 @@ class ReactLoopGraphRunner:
             }
         return False
 
+    def _trace_planning_text(self, iteration: int, text: str) -> None:
+        """Record (bounded) that a tool-call round also carried planning prose."""
+        step_id = f"react_planning_{iteration}"
+        self.tracer.begin(step_id, "规划文本", detail="本轮同时包含计划文本与工具调用")
+        self.tracer.end(
+            step_id,
+            detail="计划文本已保留",
+            items=[
+                {"label": "文本", "value": self._safe_trace_text(text, limit=160)},
+            ],
+            status="done",
+        )
+
     def _trace_invalid_tool_request(self, iteration: int, reason: str) -> None:
         step_id = f"react_invalid_tool_{iteration}"
         self.tracer.begin(step_id, "工具调用格式", detail="检测到未识别的工具调用")
@@ -744,6 +875,11 @@ class ReactLoopGraphRunner:
 
     def _process_narration_reason(self, response: Any) -> Optional[str]:
         """Identify prose that promises a search instead of answering or calling a tool."""
+        # The narration guard is a rule-strength dimension. When it is off
+        # (autonomous preset) a text-only response is not rejected here: it
+        # flows to evaluate as a candidate final answer under the ordinary path.
+        if not self.autonomy_policy.narration_guard_on:
+            return None
         text = " ".join(self._message_text(response).split()).casefold()
         if not text:
             return None
@@ -1041,6 +1177,11 @@ class ReactLoopGraphRunner:
                 "peak_context_ratio": float,
                 "summary_source": Optional[str],
                 "token_budget_state": Dict[str, Any],
+                "injected_advisory_gap_keys": List[str],
+                "cancelled_iteration": Optional[int],
+                "pending_model_clarification": Optional[str],
+                "model_clarification": bool,
+                "clarification_question": Optional[str],
             },
         )
 
@@ -1062,6 +1203,7 @@ class ReactLoopGraphRunner:
                 "observe": "observe",
                 "evaluate": "evaluate",
                 "synthesize": "synthesize",
+                "end": END,
             },
         )
         builder.add_edge("observe", "evaluate")
@@ -1087,11 +1229,36 @@ class ReactLoopGraphRunner:
     # ------------------------------------------------------------------
     # Nodes
     # ------------------------------------------------------------------
+    def _budget_self_report(self, state: Dict[str, Any]) -> str:
+        """Build a bounded, constraint-accurate budget line for the act prompt.
+
+        Reports remaining iterations and each tool's remaining call quota so
+        the model can plan within the effective limits. Stays consistent with
+        the budgets the loop actually enforces.
+        """
+        remaining_iter = max(
+            0, self.max_iterations - int(state.get("iteration") or 0)
+        )
+        parts = [f"剩余迭代 {remaining_iter}/{self.max_iterations}"]
+        for name, status in self._tool_budget_statuses().items():
+            limit = int(status.get("limit") or 0)
+            used = int(status.get("used") or 0)
+            if limit > 0:
+                parts.append(f"{name} 剩余 {max(0, limit - used)}/{limit}")
+        return "\n预算（参考）：" + "；".join(parts[:6])
+
+    def _budgeted_system_prompt(self, state: Dict[str, Any]) -> str:
+        return self.system_prompt + self._budget_self_report(state)
+
     def _act(self, state: Dict[str, Any]) -> Dict[str, Any]:
         # A blocked compaction still returns through the graph's ``act`` edge,
         # but it must not make another provider call before forced synthesis.
         if state.get("force_synthesis"):
             return {"next_action": "synthesize"}
+        # Request-level cancellation: do not start a new model call. In-flight
+        # calls in the previous node already finished and registered results.
+        if self._is_cancelled():
+            return self._cancelled_update(state)
         iteration = int(state["iteration"]) + 1
         iteration_step_id = self._iteration_step_id(iteration)
         self.tracer.begin(iteration_step_id, f"第 {iteration} 轮", detail="模型正在决定下一步")
@@ -1099,10 +1266,10 @@ class ReactLoopGraphRunner:
         response: Any = None
         try:
             if self._use_native_tools:
-                messages = [SystemMessage(content=self.system_prompt)] + list(state["messages"])
+                messages = [SystemMessage(content=self._budgeted_system_prompt(state))] + list(state["messages"])
                 response = self._llm_with_tools.invoke(messages, reasoning=self._act_reasoning)
             else:
-                response = self._act_shim(list(state["messages"]))
+                response = self._act_shim(list(state["messages"]), self._budget_self_report(state))
         except Exception as exc:  # noqa: BLE001 - surfaced as a safe workflow failure
             self.tracer.error(
                 iteration_step_id,
@@ -1122,6 +1289,15 @@ class ReactLoopGraphRunner:
         tool_calls = getattr(response, "tool_calls", None) or []
         invalid_tool_request: Optional[str] = None
         invalid_final_response: Optional[str] = None
+        # Planning-text carrier (narration_guard=off): when a response carries
+        # both prose and structured tool calls, the prose is preserved in the
+        # message sequence (it stays on the AIMessage) and recorded as a bounded
+        # trace note. It is never a candidate final answer (final_proposed below
+        # is False because tool_calls is non-empty).
+        if tool_calls and not self.autonomy_policy.narration_guard_on:
+            planning_text = self._message_text(response)
+            if planning_text.strip():
+                self._trace_planning_text(iteration, planning_text)
         if not tool_calls:
             response, invalid_tool_request = self._normalize_function_markup(response)
             tool_calls = getattr(response, "tool_calls", None) or []
@@ -1152,9 +1328,9 @@ class ReactLoopGraphRunner:
             "token_budget_state": token_budget.to_state(),
         }
 
-    def _act_shim(self, history: List[Any]) -> AIMessage:
+    def _act_shim(self, history: List[Any], budget_report: str = "") -> AIMessage:
         """Tool-calling via JSON prompt for chat models without bind_tools."""
-        messages = [SystemMessage(content=self._shim_system_prompt())] + history
+        messages = [SystemMessage(content=self._shim_system_prompt() + budget_report)] + history
         response = self.llm.invoke(messages, reasoning=self._act_reasoning)
         text = response.content if hasattr(response, "content") else str(response)
         if not isinstance(text, str):
@@ -1192,6 +1368,7 @@ class ReactLoopGraphRunner:
         fingerprints: List[str] = []
         seen_fingerprints = set(state.get("seen_fingerprints") or [])
         duplicate_fingerprint_count = int(state.get("fingerprint_streak") or 0)
+        pending_model_clarification: Optional[str] = None
 
         for position, call in enumerate(tool_calls, start=1):
             record_start = len(new_records)
@@ -1222,9 +1399,19 @@ class ReactLoopGraphRunner:
                     content = result if isinstance(result, str) else str(result)
                     new_fetch_outcomes.extend(self._tool_fetch_outcomes(tool))
                     failed = self._is_textual_tool_error(content)
+                    is_clarification = tool_name == "ask_user"
+                    if is_clarification:
+                        # ask_user returns a waiting_for_user payload; it never
+                        # registers evidence and is not a retrieval success.
+                        payload = extract_json_object(content)
+                        if isinstance(payload, dict) and payload.get("status") == "waiting_for_user":
+                            pending_model_clarification = (
+                                str(payload.get("question") or "").strip()
+                                or "请补充更多信息以便继续。"
+                            )
                     if failed:
                         error_streak += 1
-                    else:
+                    elif not is_clarification:
                         error_streak = 0
                         had_success = True
                         new_observations.append(content)
@@ -1366,9 +1553,12 @@ class ReactLoopGraphRunner:
             "fingerprint_streak": duplicate_fingerprint_count,
             "last_round_new_evidence": new_evidence,
             "last_round_observations": new_observations,
+            "pending_model_clarification": pending_model_clarification,
         }
 
     def _compact(self, state: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:
+        if self._is_cancelled():
+            return self._cancelled_update(state)
         """Apply deterministic pointerization, then summarize only when needed."""
         messages = list(state.get("messages") or [])
         budget, before_budget, before_ratio = self._context_metrics(state)
@@ -1514,6 +1704,10 @@ class ReactLoopGraphRunner:
         }
 
     def _pricing_source_candidates(self) -> List[Dict[str, str]]:
+        # Configured pricing-page recovery is a deterministic forced-synthesis
+        # path; it is disabled when the policy turns forced synthesis off.
+        if not self.autonomy_policy.forced_synthesis_on:
+            return []
         requirements = self._pricing_requirements()
         tool = self.tools_by_name.get("fetch_url")
         getter = getattr(tool, "get_pricing_source_candidates", None)
@@ -1574,6 +1768,8 @@ class ReactLoopGraphRunner:
 
     def _pricing_fetch(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Call a configured official price page without spending an LLM turn."""
+        if self._is_cancelled():
+            return self._cancelled_update(state)
         candidate = self._next_pricing_source(state)
         if candidate is None:
             raise RuntimeError("No unattempted configured pricing source remains.")
@@ -1707,6 +1903,8 @@ class ReactLoopGraphRunner:
 
     def _synthesize(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Produce a tool-free deliverable after retrieval is ready or exhausted."""
+        if self._is_cancelled():
+            return self._cancelled_update(state)
         iteration = int(state.get("iteration") or 0) + 1
         attempt = int(state.get("synthesis_attempts") or 0) + 1
         step_id = self._iteration_step_id(iteration)
@@ -1825,6 +2023,27 @@ class ReactLoopGraphRunner:
             return []
 
     def _evaluate(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        # Split into four stages so the rule-strength policy can later plug into
+        # ``_decide_next_action`` without re-deriving facts or re-running the
+        # critic. Behaviour is byte-for-byte identical to the pre-split method
+        # (locked by ``tests/test_evaluate_characterization.py``).
+        if self._is_cancelled():
+            return self._cancelled_update(state)
+        pending_clarification = state.get("pending_model_clarification")
+        if pending_clarification:
+            return self._model_clarification_update(state, pending_clarification)
+        facts = self._collect_evaluation_facts(state)
+        critic = self._run_critic(state, facts)
+        action = self._decide_next_action(state, facts, critic)
+        return self._build_verdict(state, facts, critic, action)
+
+    # ------------------------------------------------------------------
+    # _evaluate stages
+    # ------------------------------------------------------------------
+    def _collect_evaluation_facts(
+        self, state: Dict[str, Any]
+    ) -> _EvaluationFacts:
+        """Normalize the inputs the critic consumes from loop state."""
         iteration = int(state["iteration"])
         self.tracer.begin(
             self._evaluation_step_id(iteration),
@@ -1855,36 +2074,63 @@ class ReactLoopGraphRunner:
         citation_failures: List[Dict[str, str]] = []
         if final_proposed and draft:
             citation_failures = self._check_draft_citations(state, draft)
-
-        context = self._termination_context(
-            state,
-            draft=draft,
+        return _EvaluationFacts(
+            iteration=iteration,
             final_proposed=final_proposed,
+            invalid_tool_request=invalid_tool_request,
+            invalid_final_response=invalid_final_response,
+            draft=draft,
             constraints_met=met,
             constraints_missing=missing,
-            citation_failures=citation_failures,
             no_progress_streak=no_progress_streak,
+            citation_failures=citation_failures,
+        )
+
+    def _run_critic(
+        self, state: Dict[str, Any], facts: _EvaluationFacts
+    ) -> _CriticResult:
+        """Run the shared termination critic (and optional judge)."""
+        # Advisory citation: the mechanical check still runs (so the gap is
+        # observable and recorded), but it must not drive the critic's binding
+        # decision. Pass an empty list to the context and surface the real
+        # failures as advisory gaps instead.
+        citation_advisory = self.autonomy_policy.advisory_citation
+        context_citation_failures = (
+            [] if citation_advisory else list(facts.citation_failures)
+        )
+        context = self._termination_context(
+            state,
+            draft=facts.draft,
+            final_proposed=facts.final_proposed,
+            constraints_met=facts.constraints_met,
+            constraints_missing=facts.constraints_missing,
+            citation_failures=context_citation_failures,
+            no_progress_streak=facts.no_progress_streak,
         )
         preliminary = evaluate_termination(context)
 
         judge_payload: Optional[Dict[str, Any]] = None
         judge_error = state.get("judge_error")
         should_judge = (
-            self.judge_llm is not None
-            and bool(draft.strip())
+            self.autonomy_policy.judge_enabled
+            and self.judge_llm is not None
+            and bool(facts.draft.strip())
             and not bool(self._pricing_requirements())
-            and not invalid_tool_request
-            and not invalid_final_response
+            and not facts.invalid_tool_request
+            and not facts.invalid_final_response
             and preliminary.action != TerminationAction.CLARIFY
             and (
-                final_proposed
+                facts.final_proposed
                 or preliminary.hard_stop
-                or (iteration > 0 and iteration % self.eval_cfg["judge_interval"] == 0)
+                or (
+                    facts.iteration > 0
+                    and facts.iteration % self.eval_cfg["judge_interval"] == 0
+                )
             )
         )
         if should_judge:
             judge_payload, judge_error = self._run_judge(
-                draft,
+                facts.draft,
                 preliminary.constraints_met,
                 preliminary.missing_constraints,
                 state,
@@ -1893,13 +2139,31 @@ class ReactLoopGraphRunner:
         context.judge_error = judge_error
         decision = evaluate_termination(context)
 
-        pricing_requirements = self._pricing_requirements()
-        pricing_ready = bool(self._pricing_fact_sets(state))
-        pricing_source = self._next_pricing_source(state)
+        return _CriticResult(
+            decision=decision,
+            judge_error=judge_error,
+            coverage_gaps=list(getattr(context, "coverage_gaps", None) or []),
+            pricing_requirements=self._pricing_requirements(),
+            pricing_ready=bool(self._pricing_fact_sets(state)),
+            pricing_source=self._next_pricing_source(state),
+            citation_failures=list(facts.citation_failures),
+            citation_was_advisory=citation_advisory,
+        )
+
+    def _decide_next_action(
+        self,
+        state: Dict[str, Any],
+        facts: _EvaluationFacts,
+        critic: _CriticResult,
+    ) -> _ActionDecision:
+        """Resolve the four mutually exclusive routing booleans."""
+        decision = critic.decision
+        forced_synthesis_allowed = self.autonomy_policy.forced_synthesis_on
         pricing_recovery = bool(
-            pricing_requirements
-            and not pricing_ready
-            and pricing_source
+            forced_synthesis_allowed
+            and critic.pricing_requirements
+            and not critic.pricing_ready
+            and critic.pricing_source
             and str(state.get("phase") or "loop") == "loop"
             and decision.action != TerminationAction.CLARIFY
         )
@@ -1914,12 +2178,13 @@ class ReactLoopGraphRunner:
         # the iteration cap rather than burning the remaining rounds to
         # exhaustion. This especially helps existence/inventory queries whose
         # checklist is empty and thus have no other deterministic stop signal.
-        constraints_satisfied = (not missing) and bool(
+        constraints_satisfied = (not facts.constraints_missing) and bool(
             state.get("had_successful_observation")
         )
         late_loop_no_answer = bool(
-            not pricing_recovery
-            and not final_proposed
+            forced_synthesis_allowed
+            and not pricing_recovery
+            and not facts.final_proposed
             and constraints_satisfied
             and str(state.get("phase") or "loop") == "loop"
             and int(state.get("iteration") or 0)
@@ -1927,13 +2192,18 @@ class ReactLoopGraphRunner:
             and int(state.get("synthesis_attempts") or 0)
             < self.max_synthesis_attempts
         )
-        force_synthesis = bool(state.get("force_synthesis")) or late_loop_no_answer or bool(
-            pricing_requirements
-            and not pricing_recovery
-            and str(state.get("phase") or "loop") == "loop"
-            and int(state.get("synthesis_attempts") or 0)
-            < self.max_synthesis_attempts
-            and (pricing_ready or terminal_without_answer)
+        force_synthesis = (
+            bool(state.get("force_synthesis") and forced_synthesis_allowed)
+            or late_loop_no_answer
+            or bool(
+                forced_synthesis_allowed
+                and critic.pricing_requirements
+                and not pricing_recovery
+                and str(state.get("phase") or "loop") == "loop"
+                and int(state.get("synthesis_attempts") or 0)
+                < self.max_synthesis_attempts
+                and (critic.pricing_ready or terminal_without_answer)
+            )
         )
 
         # Phase 1 architecture fix: when the critic reaches a terminal state
@@ -1942,10 +2212,10 @@ class ReactLoopGraphRunner:
         # degrade to a single grounded synthesis pass that produces a cited
         # answer (with caveats for any advisory coverage gaps). Pricing keeps
         # its own deterministic synthesis; this path is for general queries.
-        coverage_gaps = list(getattr(context, "coverage_gaps", None) or [])
         degraded_synthesis_force = bool(
-            self.eval_cfg.get("degraded_synthesis", True)
-            and not pricing_requirements
+            forced_synthesis_allowed
+            and self.eval_cfg.get("degraded_synthesis", True)
+            and not critic.pricing_requirements
             and not pricing_recovery
             and not force_synthesis
             and str(state.get("phase") or "loop") == "loop"
@@ -1974,36 +2244,247 @@ class ReactLoopGraphRunner:
             current_budget=context_amount,
         ):
             compact_next = False
-            force_synthesis = True
+            if forced_synthesis_allowed:
+                force_synthesis = True
 
+        return _ActionDecision(
+            pricing_recovery=pricing_recovery,
+            force_synthesis=force_synthesis,
+            degraded_synthesis_force=degraded_synthesis_force,
+            compact_next=compact_next,
+            context_amount=context_amount,
+            context_ratio=context_ratio,
+        )
+
+    # ------------------------------------------------------------------
+    # Request-level cancellation
+    # ------------------------------------------------------------------
+    def _is_cancelled(self) -> bool:
+        """True when the request-level cancel token has been set."""
+        return self.cancel_event is not None and bool(self.cancel_event.is_set())
+
+    def _cancelled_answer(self, state: Dict[str, Any]) -> str:
+        """Build the user-facing answer for a cancelled run (task 5.5).
+
+        With retained evidence: a partial result explicitly marked cancelled.
+        Without evidence: a plain cancellation notice (never fabricated).
+        """
+        draft = self._last_ai_text(state.get("messages") or [])
+        if self._has_retained_evidence(state) and draft.strip():
+            return (
+                "执行已被用户取消，以下为基于已获取证据的部分结果，可能不完整或不准确：\n"
+                + draft
+            )
+        if self._has_retained_evidence(state):
+            return "执行已被用户取消。已获取部分证据但未形成完整答案。"
+        return "执行已被用户取消。"
+
+    def _cancelled_update(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Terminal state update for a cancelled run (tasks 5.4/5.6).
+
+        Records an independent ``cancelled`` verdict + termination reason and
+        returns whatever partial answer the retained evidence supports. No new
+        tool/model call is initiated.
+        """
+        iteration = int(state.get("iteration") or 0)
+        verdict = LoopVerdict(
+            iteration=iteration,
+            new_evidence=bool(state.get("last_round_new_evidence")),
+            reason="cancelled",
+            action="cancelled",
+            should_continue=False,
+            hard_stop=True,
+            autonomy_mode=self.autonomy_policy.mode,
+        )
+        self.tracer.begin(
+            self._evaluation_step_id(iteration),
+            f"第 {iteration} 轮评估",
+            detail="请求已被用户取消",
+        )
+        self._trace_verdict(iteration, verdict)
+        return {
+            "termination_reason": "cancelled",
+            "final_answer": self._cancelled_answer(state),
+            "next_action": "end",
+            "verdicts": list(state.get("verdicts") or []) + [verdict.to_dict()],
+            "cancelled_iteration": iteration,
+        }
+
+    def _model_clarification_update(
+        self, state: Dict[str, Any], question: str
+    ) -> Dict[str, Any]:
+        """Terminal-ish update for a model-initiated clarification (task 7.2).
+
+        The run pauses in a "waiting for user input" state: the loop stops and
+        returns the clarifying question, but the conversation/loop state is
+        preserved so the next turn can resume. Distinct from other terminals
+        via ``loop_status=clarification_required`` + ``model_clarification``.
+        """
+        iteration = int(state.get("iteration") or 0)
+        verdict = LoopVerdict(
+            iteration=iteration,
+            reason="model_clarification",
+            action="clarify",
+            should_continue=False,
+            hard_stop=True,
+            autonomy_mode=self.autonomy_policy.mode,
+        )
+        self.tracer.begin(
+            self._evaluation_step_id(iteration),
+            f"第 {iteration} 轮评估",
+            detail="模型发起澄清，等待用户输入",
+        )
+        self._trace_verdict(iteration, verdict)
+        return {
+            "termination_reason": "clarification_required",
+            "final_answer": question,
+            "next_action": "end",
+            "model_clarification": True,
+            "clarification_question": question,
+            "verdicts": list(state.get("verdicts") or []) + [verdict.to_dict()],
+        }
+
+    def _collect_advisory_gaps(
+        self,
+        facts: _EvaluationFacts,
+        critic: _CriticResult,
+        decision: Any,
+    ) -> List[Dict[str, Any]]:
+        """Collect non-binding gaps for advisory rule strength.
+
+        These gaps are recorded on the verdict and (de-duplicated) injected as
+        context observations, but they never drive a rejection. Bounded so no
+        rule text, prompt, or hidden reasoning leaks into the trace.
+        """
+        gaps: List[Dict[str, Any]] = []
+        if self.autonomy_policy.advisory_citation:
+            for failure in critic.citation_failures:
+                gaps.append(
+                    {
+                        "kind": "citation",
+                        "rule": str(failure.get("type") or "citation"),
+                        "detail": self._safe_trace_text(
+                            failure.get("detail") or "", limit=160
+                        ),
+                        "injected": False,
+                    }
+                )
+        if self.autonomy_policy.advisory_critic and facts.final_proposed:
+            for constraint in decision.missing_constraints:
+                gaps.append(
+                    {
+                        "kind": "constraint",
+                        "rule": str(constraint),
+                        "injected": False,
+                    }
+                )
+        seen: set = set()
+        deduped: List[Dict[str, Any]] = []
+        for gap in gaps:
+            key = (gap.get("kind"), gap.get("rule"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(gap)
+        return deduped
+
+    def _advisory_observation(self, gap: Dict[str, Any]) -> HumanMessage:
+        """Build a bounded context observation for one advisory gap."""
+        kind = gap.get("kind")
+        rule = gap.get("rule")
+        if kind == "citation":
+            text = (
+                f"提示（仅供参考，非强制）：检测到引用缺口「{rule}」。"
+                "你可自行判断是否补充来源标注。"
+            )
+        else:
+            text = (
+                f"提示（仅供参考，非强制）：检测到约束缺口「{rule}」。"
+                "你可自行判断是否补充。"
+            )
+        return HumanMessage(content=self._safe_trace_text(text, limit=220))
+
+    def _inject_advisory_observations(
+        self, state: Dict[str, Any], verdict: LoopVerdict, update: Dict[str, Any]
+    ) -> None:
+        """Inject each advisory gap as a bounded observation at most once per run.
+
+        Dedup is keyed on the (kind, rule) pair and persisted in loop state
+        (``injected_advisory_gap_keys``) so it survives checkpoint resume. Only
+        continuing rounds inject: a terminal round just records the gaps.
+        """
+        next_action = update.get("next_action")
+        if next_action not in {"act", "compact", "pricing_fetch"}:
+            return
+        if not verdict.advisory_gaps:
+            return
+        injected_keys = set(state.get("injected_advisory_gap_keys") or [])
+        observations: List[HumanMessage] = []
+        for gap in verdict.advisory_gaps:
+            key = f"{gap.get('kind')}:{gap.get('rule')}"
+            if key in injected_keys:
+                continue
+            injected_keys.add(key)
+            gap["injected"] = True
+            observations.append(self._advisory_observation(gap))
+        if observations:
+            existing = list(update.get("messages") or [])
+            existing.extend(observations)
+            update["messages"] = existing
+        update["injected_advisory_gap_keys"] = sorted(injected_keys)
+
+    def _build_verdict(
+        self,
+        state: Dict[str, Any],
+        facts: _EvaluationFacts,
+        critic: _CriticResult,
+        action: _ActionDecision,
+    ) -> Dict[str, Any]:
+        """Assemble the LoopVerdict and the state update for this evaluate pass."""
+        decision = critic.decision
+        # Advisory rule strength: the critic / citation checks still run, but
+        # their gaps do not bind the model. A model-proposed final answer is
+        # accepted; the gaps are recorded for observability and (de-duplicated)
+        # injected as context observations elsewhere.
+        advisory_gaps = self._collect_advisory_gaps(facts, critic, decision)
+        advisory_accept_final = (
+            self.autonomy_policy.advisory_critic
+            and facts.final_proposed
+            and bool(facts.draft.strip())
+            and not action.pricing_recovery
+            and not action.force_synthesis
+            and not action.compact_next
+        )
         reason = decision.reason
-        if pricing_recovery:
+        if action.pricing_recovery:
             reason = "pricing_source_recovery"
-        elif degraded_synthesis_force:
+        elif action.degraded_synthesis_force:
             reason = "degraded_synthesis"
-        elif force_synthesis:
-            reason = "ready_to_synthesize" if pricing_ready else "forced_synthesis"
-        elif compact_next:
+        elif action.force_synthesis:
+            reason = "ready_to_synthesize" if critic.pricing_ready else "forced_synthesis"
+        elif action.compact_next:
             reason = "context_compaction"
-        elif invalid_tool_request:
+        elif advisory_accept_final:
+            reason = "model_self_wrap"
+        elif facts.invalid_tool_request:
             reason = "invalid_tool_request"
-        elif invalid_final_response:
+        elif facts.invalid_final_response:
             reason = "process_narration"
         elif decision.action == TerminationAction.RETURN:
             reason = "constraints_satisfied"
-        elif decision.action == TerminationAction.CONTINUE and final_proposed:
+        elif decision.action == TerminationAction.CONTINUE and facts.final_proposed:
             reason = "final_answer_rejected"
         elif decision.action == TerminationAction.RETURN_INSUFFICIENT:
             reason = decision.reason or "evidence_insufficient"
 
         verdict = LoopVerdict(
-            iteration=iteration,
+            iteration=facts.iteration,
             new_evidence=bool(state["last_round_new_evidence"]),
             constraints_met=list(decision.constraints_met),
             constraints_missing=list(decision.missing_constraints),
             should_continue=(
                 True
-                if pricing_recovery or force_synthesis
+                if action.pricing_recovery or action.force_synthesis
                 else decision.should_continue
             ),
             reason=reason,
@@ -2011,51 +2492,57 @@ class ReactLoopGraphRunner:
             judge_error=decision.judge_error,
             action=(
                 "pricing_fetch"
-                if pricing_recovery
+                if action.pricing_recovery
                 else "synthesize"
-                if force_synthesis
+                if action.force_synthesis
                 else "compact"
-                if compact_next
+                if action.compact_next
                 else decision.action.value
             ),
             deterministic_pass=decision.deterministic_pass,
             hard_stop=(
                 False
-                if pricing_recovery or force_synthesis
+                if action.pricing_recovery or action.force_synthesis
                 else decision.hard_stop
             ),
             failure_types=list(decision.failure_types),
             rule_hits=list(decision.rule_hits),
             evidence_sufficiency=decision.evidence_sufficiency,
-            coverage_gaps=list(coverage_gaps),
+            coverage_gaps=list(critic.coverage_gaps),
+            autonomy_mode=self.autonomy_policy.mode,
+            advisory_gaps=list(advisory_gaps),
         )
 
         update: Dict[str, Any] = {
             "constraints_met": list(decision.constraints_met),
             "constraints_missing": list(decision.missing_constraints),
-            "no_progress_streak": no_progress_streak,
-            "judge_error": judge_error,
-            "context_budget": context_amount,
-            "context_ratio": context_ratio,
-            "degraded_synthesis": bool(degraded_synthesis_force),
-            "degraded_caveats": list(coverage_gaps) if degraded_synthesis_force else [],
+            "no_progress_streak": facts.no_progress_streak,
+            "judge_error": critic.judge_error,
+            "context_budget": action.context_amount,
+            "context_ratio": action.context_ratio,
+            "degraded_synthesis": bool(action.degraded_synthesis_force),
+            "degraded_caveats": list(critic.coverage_gaps) if action.degraded_synthesis_force else [],
             "peak_context_ratio": max(
-                float(state.get("peak_context_ratio") or 0), context_ratio
+                float(state.get("peak_context_ratio") or 0), action.context_ratio
             ),
-            "force_synthesis": force_synthesis,
+            "force_synthesis": action.force_synthesis,
         }
 
         termination_reason: Optional[str] = None
         final_answer: Optional[str] = None
-        if pricing_recovery:
+        if action.pricing_recovery:
             update["next_action"] = "pricing_fetch"
-        elif force_synthesis:
+        elif action.force_synthesis:
             update["next_action"] = "synthesize"
-        elif compact_next:
+        elif action.compact_next:
             update["next_action"] = "compact"
+        elif advisory_accept_final:
+            # Advisory critic: the model self-wrapped. Accept its answer.
+            termination_reason = "succeeded"
+            final_answer = facts.draft
         elif decision.action == TerminationAction.RETURN:
             termination_reason = "succeeded"
-            final_answer = draft
+            final_answer = facts.draft
         elif decision.action in {
             TerminationAction.EXHAUSTED,
             TerminationAction.STAGNATED,
@@ -2072,8 +2559,8 @@ class ReactLoopGraphRunner:
                 if decision.reason == "authority_unverified"
                 else termination_reason
             )
-            final_answer = self._best_effort_answer(draft, answer_reason)
-        elif invalid_tool_request:
+            final_answer = self._best_effort_answer(facts.draft, answer_reason)
+        elif facts.invalid_tool_request:
             detail = str(state.get("invalid_tool_request") or "").strip()
             tool_names = "、".join(sorted(self.tools_by_name))
             update["messages"] = [
@@ -2086,7 +2573,7 @@ class ReactLoopGraphRunner:
                     )
                 )
             ]
-        elif invalid_final_response:
+        elif facts.invalid_final_response:
             update["messages"] = [
                 HumanMessage(
                     content=(
@@ -2096,21 +2583,24 @@ class ReactLoopGraphRunner:
                     )
                 )
             ]
-        elif final_proposed and decision.should_continue:
+        elif facts.final_proposed and decision.should_continue:
             update["messages"] = [
                 HumanMessage(content=self._rejection_message(state, decision))
             ]
 
         update["termination_reason"] = termination_reason
         update["final_answer"] = final_answer
-        if not pricing_recovery and not force_synthesis and not compact_next:
+        if not action.pricing_recovery and not action.force_synthesis and not action.compact_next:
             update["next_action"] = "end" if termination_reason else (
                 "synthesize"
                 if str(state.get("phase") or "loop") == "synthesis"
                 else "act"
             )
+        # Inject advisory gaps as (deduplicated) context observations for the
+        # model, then record the verdict so the injected flags are captured.
+        self._inject_advisory_observations(state, verdict, update)
         update["verdicts"] = list(state["verdicts"]) + [verdict.to_dict()]
-        self._trace_verdict(iteration, verdict)
+        self._trace_verdict(facts.iteration, verdict)
         return update
 
     def _rejection_message(self, state: Dict[str, Any], decision: Any) -> str:
@@ -2393,6 +2883,8 @@ class ReactLoopGraphRunner:
     # ------------------------------------------------------------------
     @staticmethod
     def _route_after_act(state: Dict[str, Any]) -> str:
+        if state.get("termination_reason"):
+            return "end"
         if state.get("force_synthesis"):
             return "synthesize"
         last = state["messages"][-1]
@@ -2658,6 +3150,11 @@ class ReactLoopGraphRunner:
             "peak_context_ratio": budget.ratio(initial_messages),
             "summary_source": None,
             "token_budget_state": budget.to_state(),
+            "injected_advisory_gap_keys": [],
+            "cancelled_iteration": None,
+            "pending_model_clarification": None,
+            "model_clarification": False,
+            "clarification_question": None,
         }
 
     def _build_followup_state_input(
@@ -2715,6 +3212,43 @@ class ReactLoopGraphRunner:
             "summary_source": None,
         }
 
+    def _build_clarification_resume_input(
+        self,
+        graph: Any,
+        config: Dict[str, Any],
+        user_input: str,
+    ) -> Dict[str, Any]:
+        """Resume a paused model-clarification loop without resetting budgets.
+
+        Only the per-turn ephemeral flags are cleared so the loop can advance
+        again; ``iteration``, the evidence pool, the verdict history and the
+        already-injected advisory-gap set are retained from the checkpoint
+        (task 7.5). The clarification round-trip therefore continues against
+        the same iteration ceiling and tool budgets rather than starting over.
+        """
+        try:
+            snapshot = graph.get_state(config)
+            values = getattr(snapshot, "values", None) or {}
+            self._restore_ledger_records(
+                list(values.get("evidence_records") or [])
+            )
+        except Exception:  # noqa: BLE001 - a missing checkpoint is harmless here
+            pass
+        return {
+            "messages": [HumanMessage(content=user_input)],
+            "pending_model_clarification": None,
+            "model_clarification": False,
+            "clarification_question": None,
+            "termination_reason": None,
+            "final_answer": None,
+            "final_proposed": False,
+            "invalid_tool_request": None,
+            "invalid_final_response": None,
+            "next_action": "act",
+            "phase": "loop",
+            "judge_error": None,
+        }
+
     @staticmethod
     def _checkpointed_verdict_count(graph: Any, config: Dict[str, Any]) -> int:
         """Return the number of verdicts already stored before a resumed turn."""
@@ -2750,6 +3284,32 @@ class ReactLoopGraphRunner:
         except Exception:  # noqa: BLE001 - do not lose a follow-up to maintenance
             return None
         return update
+
+    def _apply_policy_tool_budgets(self, *, reset_counters: bool = True) -> None:
+        """Apply the policy's per-tool call ceilings to the enabled tools.
+
+        Tools whose name is in the budget group take their ``max_calls_per_query``
+        from the effective policy; others keep their configured ceiling. The
+        run-time call counter is reset so a fresh policy value is honoured —
+        unless ``reset_counters`` is False, which is used when resuming a paused
+        model-clarification loop so per-tool budgets continue across the
+        clarification round-trip (task 7.5).
+        """
+        tool_budgets = self.autonomy_policy.budgets.tool_budgets
+        for tool in self.tools:
+            name = str(getattr(tool, "name", "") or "")
+            limit = tool_budgets.get(name)
+            if limit is None:
+                continue
+            if hasattr(tool, "max_calls_per_query"):
+                try:
+                    tool.max_calls_per_query = int(limit)
+                except Exception:  # noqa: BLE001 - budget is best-effort
+                    pass
+            if reset_counters:
+                reset = getattr(tool, "reset_budget", None)
+                if callable(reset):
+                    reset()
 
     def compact_conversation(self, conversation_id: str) -> Optional[Dict[str, Any]]:
         """Manually compact an existing checkpoint without creating a new thread."""
@@ -2814,16 +3374,44 @@ class ReactLoopGraphRunner:
             ) * 5 + 10
         }
         resume = False
+        resume_is_clarification = False
+        autonomy_reset = False
         if conversation_id and checkpointer and mgr is not None:
             config["configurable"] = {"thread_id": str(conversation_id)}
-            resume = mgr.has_checkpoint(conversation_id) and not mgr.last_turn_is_topic_reset(
+            has_ckpt = mgr.has_checkpoint(conversation_id)
+            last_topic_reset = mgr.last_turn_is_topic_reset(str(conversation_id))
+            last_clarification = mgr.last_turn_was_model_clarification(
                 str(conversation_id)
             )
+            last_autonomy = mgr.last_turn_autonomy_mode(str(conversation_id))
+            autonomy_changed = (
+                last_autonomy is not None
+                and last_autonomy != self.autonomy_policy.mode
+            )
+            # 7.6: a cross-turn mode switch means the prior trajectory was
+            # built under different rule strength (binding verdicts, injected
+            # gaps). Drop only the loop checkpoint and start fresh; the Q&A
+            # history is retained for the sidebar.
+            if has_ckpt and autonomy_changed:
+                mgr.clear_loop_checkpoint(str(conversation_id))
+                has_ckpt = False
+                autonomy_reset = True
+            resume = bool(has_ckpt and not last_topic_reset)
+            resume_is_clarification = bool(resume and last_clarification)
+
+        # Apply per-tool ceilings from the policy. On a clarification resume the
+        # call counters are preserved so the round-trip cannot bypass a per-tool
+        # ceiling (task 7.5); otherwise every turn starts from a clean budget.
+        self._apply_policy_tool_budgets(reset_counters=not resume_is_clarification)
 
         if resume:
             self._compact_checkpoint_if_needed(graph, config)
         prior_verdict_count = self._checkpointed_verdict_count(graph, config) if resume else 0
-        if resume:
+        if resume and resume_is_clarification:
+            state_input = self._build_clarification_resume_input(
+                graph, config, user_input
+            )
+        elif resume:
             state_input = self._build_followup_state_input(graph, config, user_input)
         else:
             state_input = self._build_initial_state(user_input)
@@ -2851,6 +3439,10 @@ class ReactLoopGraphRunner:
             "compactions": int(final_state.get("compactions") or 0),
             "peak_context_ratio": float(final_state.get("peak_context_ratio") or 0),
             "conversation_resumed": resume,
+            "cancelled_iteration": final_state.get("cancelled_iteration"),
+            "model_clarification": bool(final_state.get("model_clarification")),
+            "clarification_question": final_state.get("clarification_question"),
+            "autonomy_reset": bool(autonomy_reset),
         }
         trace_events, trace_truncated = self._trace_events()
         result["trace_events"] = trace_events

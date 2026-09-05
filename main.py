@@ -414,6 +414,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Per-query Tavily search depth override: basic, advanced, fast, or ultra-fast. Omit to use the configured default.",
     )
+    parser.add_argument(
+        "--autonomy",
+        choices=["guided", "autonomous"],
+        default=None,
+        help=(
+            "Autonomy mode for this run. 'guided' (default) keeps every rule "
+            "binding; 'autonomous' widens budgets and relaxes binding rules. "
+            "Omit to follow config autonomy.mode (default 'guided')."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -742,7 +752,7 @@ def main() -> None:
         # A CLI opt-out must suppress a config-enabled orchestrator hook.
         answer_kwargs["audit_mode"] = "off"
 
-    result = orchestrator.answer(args.query, **answer_kwargs)
+    result = orchestrator.answer(args.query, autonomy_mode=args.autonomy, **answer_kwargs)
     result.setdefault("conversation_id", conversation_id)
 
     if audit_active and audit_tracer is not None:

@@ -91,6 +91,8 @@ class ReactAgentOrchestrator:
         tracer: Optional[Any] = None,
         analysis: Optional[Any] = None,
         execution_trace: Optional[Any] = None,
+        autonomy_policy: Optional[Any] = None,
+        cancel_event: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Answer a query using ReAct agent.
 
@@ -112,9 +114,34 @@ class ReactAgentOrchestrator:
         Returns:
             Dictionary with answer, control metadata, and search_hits
         """
-        self._reset_tool_budgets()
         timing_recorder = TimingRecorder(enabled=self.show_timings)
         timing_recorder.start()
+
+        # The caller injects an already-resolved policy; we only pass it through.
+        # When none is supplied we fall back to the guided preset (source=default)
+        # so a directly-invoked orchestrator still produces equivalent behaviour.
+        from orchestrators.autonomy_policy import GUIDED_PRESET
+        if autonomy_policy is None:
+            autonomy_policy = GUIDED_PRESET
+        self._current_autonomy_policy = autonomy_policy
+
+        # Task 7.5: when the previous turn paused in a model-initiated
+        # clarification, tool call budgets must continue rather than reset so
+        # the round-trip cannot bypass the per-tool ceiling. Otherwise every
+        # turn starts from a clean budget (the normal behaviour).
+        is_clarification_resume = False
+        if conversation_id:
+            from orchestrators.conversation_store import get_conversation_manager
+
+            mgr = get_conversation_manager()
+            if (
+                mgr.enabled
+                and mgr.has_checkpoint(conversation_id)
+                and mgr.last_turn_was_model_clarification(conversation_id)
+            ):
+                is_clarification_resume = True
+        if not is_clarification_resume:
+            self._reset_tool_budgets()
 
         return self._answer_with_langgraph(
             query,
@@ -124,6 +151,8 @@ class ReactAgentOrchestrator:
             timing_recorder=timing_recorder,
             analysis=analysis,
             execution_trace=execution_trace,
+            autonomy_policy=autonomy_policy,
+            cancel_event=cancel_event,
         )
 
     def _answer_with_langgraph(
@@ -136,10 +165,16 @@ class ReactAgentOrchestrator:
         conversation_id: Optional[str] = None,
         analysis: Optional[Any] = None,
         execution_trace: Optional[Any] = None,
+        autonomy_policy: Optional[Any] = None,
+        cancel_event: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Run the explicit LangGraph loop and build a compatible response."""
+        from orchestrators.autonomy_policy import GUIDED_PRESET
         from orchestrators.react_loop_graph import ReactLoopGraphRunner
         from utils.workflow_trace import ensure_tracer
+
+        if autonomy_policy is None:
+            autonomy_policy = GUIDED_PRESET
 
         tracer = ensure_tracer(tracer)
         termination_config = self.config.get("termination") or {}
@@ -159,11 +194,16 @@ class ReactAgentOrchestrator:
 
         tracer.begin("react_loop", "ReAct 循环", detail="langgraph 引擎")
         try:
+            # The ask_user (model-initiated clarification) tool is only exposed
+            # when the policy assigns clarification to the model. Under the
+            # system owner it never appears in the model's tool surface.
+            model_owns_clarification = autonomy_policy.model_owns_clarification
             active_tools = [
                 tool
                 for tool in self.tools
-                if allow_search
-                or tool.name not in {"web_search", "search_recovery", "fetch_url"}
+                if (allow_search
+                    or tool.name not in {"web_search", "search_recovery", "fetch_url"})
+                and (model_owns_clarification or tool.name != "ask_user")
             ]
             orchestration_cfg = self.config.get("orchestration") or {}
             ledger_cfg = (
@@ -209,6 +249,8 @@ class ReactAgentOrchestrator:
                     else None
                 ),
                 ledger=ledger,
+                autonomy_policy=autonomy_policy,
+                cancel_event=cancel_event,
             )
             loop_result = runner.run(user_input, conversation_id=conversation_id)
             resumed = resumed or bool(loop_result.get("conversation_resumed"))
@@ -249,6 +291,9 @@ class ReactAgentOrchestrator:
             "ready_to_synthesize": "证据齐备，转入综合",
             "forced_synthesis": "检索结束，生成可交付结论",
             "pricing_source_recovery": "切换到已配置的官方价目页",
+            "model_self_wrap": "模型自主收尾",
+            "model_clarification": "模型发起澄清",
+            "cancelled": "请求已取消",
         }
         verdict_items = [
             {
@@ -267,6 +312,7 @@ class ReactAgentOrchestrator:
             "unrecoverable": {"text": "不可恢复", "tone": "err"},
             "evidence_insufficient": {"text": "证据不足", "tone": "warn"},
             "clarification_required": {"text": "需要澄清", "tone": "warn"},
+            "cancelled": {"text": "已取消", "tone": "warn"},
         }
         loop_status = loop_result.get("loop_status")
         badge = status_badges.get(loop_status)
@@ -371,6 +417,20 @@ class ReactAgentOrchestrator:
             "react_trace_truncated": bool(loop_result.get("trace_truncated")),
             "final_executor": "agentic_loop",
             "conversation_resumed": resumed,
+            "autonomy": {
+                "mode": autonomy_policy.mode,
+                "source": autonomy_policy.source,
+            },
+            "cancelled": loop_status == "cancelled",
+            "cancelled_iteration": loop_result.get("cancelled_iteration"),
+            "model_clarification": bool(loop_result.get("model_clarification")),
+            "clarification_question": loop_result.get("clarification_question"),
+            "autonomy_reset": bool(loop_result.get("autonomy_reset")),
+            "advisory_gap_count": sum(
+                len(verdict.get("advisory_gaps") or [])
+                for verdict in (loop_result.get("verdicts") or [])
+                if isinstance(verdict, dict)
+            ),
             "evidence_sources_active": response.get("evidence_sources_active") or [],
             "evidence_sources_used": response.get("evidence_sources_used") or [],
             "evidence_source_types_active": response.get("evidence_source_types_active") or [],

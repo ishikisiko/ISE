@@ -161,6 +161,33 @@
             ]
         }
     },
+    "autonomy": {
+        "_comment": "Rule-strength carrier for the agentic loop. 'guided' (default) reproduces pre-capability behaviour; 'autonomous' widens budgets and relaxes binding rules. preflight is always binding in both modes.",
+        "mode": "guided",
+        "profiles": {
+            "guided": {},
+            "autonomous": {
+                "budgets": {
+                    "max_iterations": 15,
+                    "max_synthesis_attempts": 3,
+                    "tool_budgets": {
+                        "web_search": 12,
+                        "fetch_url": 9,
+                        "search_recovery": 9,
+                        "local_docs": 6,
+                        "recall_evidence": 3
+                    },
+                    "context_compaction": {
+                        "threshold": 0.85,
+                        "keep_recent_rounds": 4,
+                        "max_compactions_per_run": 4,
+                        "summary_max_tokens": 1200,
+                        "evidence_pool_max_entries": 48
+                    }
+                }
+            }
+        }
+    },
     "embeddings": {
         "provider": "openai_compatible",
         "model": "qwen3.7-text-embedding",

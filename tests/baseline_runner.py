@@ -33,8 +33,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULT_ROUTE_DATASET = "dataset/route_intent_dataset.csv"
 DEFAULT_ANSWER_DATASET = "dataset/final_answer_dataset.csv"
+DEFAULT_OPEN_DATASET = "dataset/open_task_dataset.csv"
 DEFAULT_OUTPUT_ROOT = "runtime/baseline"
 DEFAULT_MILESTONE = "m5"
+AUTONOMY_MODES = ("guided", "autonomous")
 
 SKILL_TOOL_ROUTE_MAP = {
     "finance_market_data": "finance_api",
@@ -49,12 +51,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the sole agentic-loop baseline and record metrics.")
     parser.add_argument(
         "--datasets",
-        choices=["route", "answer", "both"],
+        choices=["route", "answer", "both", "open"],
         default="both",
-        help="Which dataset to run. Default: both.",
+        help="Which dataset to run. Default: both (route+answer). 'open' runs the open-task dataset.",
     )
     parser.add_argument("--route-dataset", default=DEFAULT_ROUTE_DATASET)
     parser.add_argument("--answer-dataset", default=DEFAULT_ANSWER_DATASET)
+    parser.add_argument(
+        "--open-dataset",
+        default=DEFAULT_OPEN_DATASET,
+        help="Open-ended/multi-step task dataset used to probe the autonomous mode.",
+    )
     parser.add_argument(
         "--output-root",
         default=DEFAULT_OUTPUT_ROOT,
@@ -113,6 +120,13 @@ def parse_args() -> argparse.Namespace:
         "--data-path",
         default="./uploads",
         help="Local-doc path forwarded to the orchestrator (kept empty by default).",
+    )
+    parser.add_argument(
+        "--autonomy",
+        choices=list(AUTONOMY_MODES),
+        default=None,
+        help="Effective autonomy mode for this run (task 8.2). Results land under "
+        "runtime/baseline/<milestone>/<autonomy>/ and each record carries the mode.",
     )
     return parser.parse_args()
 
@@ -278,6 +292,13 @@ def extract_external_api_calls(result: Dict[str, Any]) -> int:
     return 0
 
 
+def _effective_autonomy(control: Dict[str, Any]) -> Optional[str]:
+    """Return the effective autonomy mode recorded in control metadata."""
+    autonomy = control.get("autonomy") if isinstance(control.get("autonomy"), dict) else None
+    mode = autonomy.get("mode") if isinstance(autonomy, dict) else None
+    return str(mode) if mode else None
+
+
 def extract_loop_stats(result: Dict[str, Any]) -> Dict[str, Any]:
     """Pull agentic-loop telemetry from the result (zero when not a loop run).
 
@@ -293,6 +314,8 @@ def extract_loop_stats(result: Dict[str, Any]) -> Dict[str, Any]:
         "skill_tools_used": list(control.get("skill_tools_used") or []),
         "compactions": control.get("compactions"),
         "peak_context_ratio": control.get("peak_context_ratio"),
+        "advisory_gap_count": control.get("advisory_gap_count"),
+        "autonomy": _effective_autonomy(control),
     }
 
 
@@ -449,6 +472,7 @@ def run_answer_dataset(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 allow_search=True,
+                autonomy_policy=autonomy_policy,
             )
         except Exception as exc:  # noqa: BLE001 - baseline records per-query failures as data
             result = {"answer": "", "llm_error": str(exc)}
@@ -571,6 +595,82 @@ def build_answer_summary(details: List[Dict[str, Any]]) -> Dict[str, Any]:
                 for row in details
             ]
         ),
+    }
+
+
+def run_open_task_dataset(
+    orchestrator: Any,
+    rows: List[Dict[str, Any]],
+    *,
+    num_results: int,
+    max_tokens: int,
+    temperature: float,
+    autonomy_policy: Any = None,
+    on_progress: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Run the open-ended task dataset (task 8.1/8.5).
+
+    Quality on open-ended tasks is judged by manual scoring against the
+    rubric columns, so this runner records the full answer plus the automatic
+    cost-side metrics (latency, tokens, iterations, compactions, advisory gaps)
+    needed to quantify the cost multiple and to compare the two modes.
+    """
+    details: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        query = str(row.get("query") or "").strip()
+        if not query:
+            continue
+        print(f"[baseline/open] {index}/{len(rows)} {query}")
+        try:
+            result = orchestrator.answer(
+                query,
+                num_search_results=num_results,
+                per_source_search_results=num_results,
+                num_retrieved_docs=num_results,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                allow_search=True,
+                autonomy_policy=autonomy_policy,
+            )
+        except Exception as exc:  # noqa: BLE001 - baseline records per-query failures as data
+            result = {"answer": "", "llm_error": str(exc)}
+        control = result.get("control") or {}
+        details.append(
+            {
+                "qid": row.get("qid"),
+                "query": query,
+                "task_type": row.get("task_type"),
+                "scoring_dimensions": row.get("scoring_dimensions"),
+                "answer": result.get("answer") or "",
+                "latency_ms": extract_latency_ms(result),
+                "llm_error": result.get("llm_error"),
+                **extract_llm_stats(result),
+                **extract_loop_stats(result),
+                "external_api_calls": extract_external_api_calls(result),
+            }
+        )
+        if on_progress is not None:
+            on_progress(details)
+    return details
+
+
+def build_open_summary(details: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Cost-side summary for the open-task dataset.
+
+    Answer quality is scored manually against the rubric (task 8.5); this
+    summary captures the automatic cost/behaviour metrics that let the two
+    modes be compared on a level field.
+    """
+    return {
+        "rows": len(details),
+        "has_answer_rate": summarise_rate([bool(row.get("answer")) for row in details]),
+        "latency_ms": summarise([row.get("latency_ms") for row in details]),
+        "total_tokens_per_query": summarise([row.get("total_tokens") for row in details]),
+        "llm_calls_per_query": summarise([row.get("llm_call_count") for row in details]),
+        "loop_iterations_per_query": summarise([row.get("loop_iterations") for row in details]),
+        "compactions_per_query": summarise([row.get("compactions") for row in details]),
+        "advisory_gap_count_per_query": summarise([row.get("advisory_gap_count") for row in details]),
+        "autonomy": details[0].get("autonomy") if details else None,
     }
 
 
@@ -776,14 +876,23 @@ def run_baseline(args: argparse.Namespace) -> Dict[str, Any]:
     config = load_config(args.config)
     if args.provider:
         config["LLM_PROVIDER"] = args.provider
+    # Task 8.2: resolve the effective autonomy policy once and thread it
+    # through every query. The mode is also reflected in the output layout so
+    # two-mode runs do not clobber each other.
+    from orchestrators.autonomy_policy import resolve_autonomy_policy
+
+    autonomy_policy = resolve_autonomy_policy(config, args.autonomy)
+    autonomy_mode = autonomy_policy.mode
     orchestrator = build_orchestrator(config, data_path=args.data_path)
 
-    output_dir = os.path.join(args.output_root, args.milestone)
+    output_dir = os.path.join(args.output_root, args.milestone, autonomy_mode)
     os.makedirs(output_dir, exist_ok=True)
 
     cap = args.max_queries
     report: Dict[str, Any] = {
         "milestone": args.milestone,
+        "autonomy": autonomy_mode,
+        "autonomy_source": autonomy_policy.source,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "provider": config.get("LLM_PROVIDER"),
         "intent_label_filter": args.intent_label,
@@ -810,6 +919,7 @@ def run_baseline(args: argparse.Namespace) -> Dict[str, Any]:
             num_results=args.num_results,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
+            autonomy_policy=autonomy_policy,
         )
         write_jsonl(os.path.join(output_dir, "route_intent_details.jsonl"), details)
         route_summary = build_route_summary(details)
@@ -840,6 +950,7 @@ def run_baseline(args: argparse.Namespace) -> Dict[str, Any]:
             num_results=args.num_results,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
+            autonomy_policy=autonomy_policy,
             on_progress=persist_answer_progress,
         )
         write_jsonl(details_path, details)
@@ -853,16 +964,205 @@ def run_baseline(args: argparse.Namespace) -> Dict[str, Any]:
         }
         print(f"[baseline] answer fact_coverage: {answer_summary['fact_coverage']['mean']}")
 
+    if args.datasets in {"open"}:
+        rows = read_csv_rows(args.open_dataset)
+        if cap is not None:
+            rows = rows[:cap]
+        open_details_path = os.path.join(output_dir, "open_task_details.jsonl")
+        open_summary_path = os.path.join(output_dir, "open_task_summary.json")
+
+        def persist_open_progress(progress: List[Dict[str, Any]]) -> None:
+            write_jsonl(open_details_path, progress)
+            write_json(open_summary_path, build_open_summary(progress))
+
+        details = run_open_task_dataset(
+            orchestrator,
+            rows,
+            num_results=args.num_results,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            autonomy_policy=autonomy_policy,
+            on_progress=persist_open_progress,
+        )
+        write_jsonl(open_details_path, details)
+        open_summary = build_open_summary(details)
+        write_json(open_summary_path, open_summary)
+        report["datasets"]["open_task"] = {
+            "rows": len(details),
+            "summary_file": "open_task_summary.json",
+            "details_file": "open_task_details.jsonl",
+            "autonomy": autonomy_mode,
+        }
+        print(f"[baseline] open tasks: {len(details)} rows under {autonomy_mode}")
+
     write_json(os.path.join(output_dir, "run_meta.json"), report)
     write_json(os.path.join(output_dir, "summary.json"), report)
     print(f"[baseline] wrote artefacts to {output_dir}")
     return report
 
 
+def _read_run_autonomy(run_dir: str) -> Optional[str]:
+    """Return the autonomy mode recorded in a run directory, if any."""
+    meta_path = os.path.join(run_dir, "run_meta.json")
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+    except Exception:  # noqa: BLE001 - historical/plan runs carry no autonomy
+        return None
+    if isinstance(meta, dict):
+        mode = meta.get("autonomy")
+        return str(mode) if mode else None
+    return None
+
+
+def compare_autonomy_runs(left_dir: str, right_dir: str) -> Dict[str, Any]:
+    """Two-mode difference summary (task 8.3).
+
+    Aligns two autonomy run directories by ``qid`` and reports per-sample plus
+    aggregate deltas for answer quality, P50/P95 latency, tokens, tool/LLM
+    calls, advisory-gap count, iterations, and compactions. Answer quality on
+    the open-task dataset is manual, so only the automatic cost/behaviour
+    metrics are summarized there.
+    """
+    left_mode = _read_run_autonomy(left_dir) or "left"
+    right_mode = _read_run_autonomy(right_dir) or "right"
+
+    comparison: Dict[str, Any] = {
+        "left_dir": left_dir,
+        "right_dir": right_dir,
+        "left_autonomy": left_mode,
+        "right_autonomy": right_mode,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "datasets": {},
+    }
+
+    dataset_files = {
+        "route_intent": "route_intent_details.jsonl",
+        "final_answer": "final_answer_details.jsonl",
+        "open_task": "open_task_details.jsonl",
+    }
+    for name, filename in dataset_files.items():
+        left_rows = read_jsonl(os.path.join(left_dir, filename))
+        right_rows = read_jsonl(os.path.join(right_dir, filename))
+        if not left_rows and not right_rows:
+            continue
+        left_by_qid = {str(r.get("qid")): r for r in left_rows}
+        right_by_qid = {str(r.get("qid")): r for r in right_rows}
+        shared = sorted(set(left_by_qid) & set(right_by_qid))
+
+        per_query: List[Dict[str, Any]] = []
+        for qid in shared:
+            a = left_by_qid[qid]
+            b = right_by_qid[qid]
+            entry: Dict[str, Any] = {
+                "qid": qid,
+                "query": a.get("query") or b.get("query"),
+                f"latency_ms_{left_mode}": _num(a.get("latency_ms")),
+                f"latency_ms_{right_mode}": _num(b.get("latency_ms")),
+                f"total_tokens_{left_mode}": _num(a.get("total_tokens")),
+                f"total_tokens_{right_mode}": _num(b.get("total_tokens")),
+                f"llm_call_count_{left_mode}": _num(a.get("llm_call_count")),
+                f"llm_call_count_{right_mode}": _num(b.get("llm_call_count")),
+                f"loop_iterations_{left_mode}": _num(a.get("loop_iterations")),
+                f"loop_iterations_{right_mode}": _num(b.get("loop_iterations")),
+                f"compactions_{left_mode}": _num(a.get("compactions")),
+                f"compactions_{right_mode}": _num(b.get("compactions")),
+                f"advisory_gap_count_{left_mode}": _num(a.get("advisory_gap_count")),
+                f"advisory_gap_count_{right_mode}": _num(b.get("advisory_gap_count")),
+            }
+            if "fact_coverage" in a or "fact_coverage" in b:
+                entry[f"fact_coverage_{left_mode}"] = _num(a.get("fact_coverage"))
+                entry[f"fact_coverage_{right_mode}"] = _num(b.get("fact_coverage"))
+            if "route_correct" in a or "route_correct" in b:
+                entry[f"route_correct_{left_mode}"] = a.get("route_correct")
+                entry[f"route_correct_{right_mode}"] = b.get("route_correct")
+            per_query.append(entry)
+
+        dataset_report: Dict[str, Any] = {
+            "matched_queries": len(shared),
+            f"{left_mode}_rows": len(left_rows),
+            f"{right_mode}_rows": len(right_rows),
+            "latency_ms": _aggregate_metric(left_rows, right_rows, "latency_ms"),
+            "total_tokens": _aggregate_metric(left_rows, right_rows, "total_tokens"),
+            "llm_call_count": _aggregate_metric(left_rows, right_rows, "llm_call_count"),
+            "loop_iterations": {
+                left_mode: summarise([_num(r.get("loop_iterations")) for r in left_rows]),
+                right_mode: summarise([_num(r.get("loop_iterations")) for r in right_rows]),
+            },
+            "compactions": {
+                left_mode: summarise([_num(r.get("compactions")) for r in left_rows]),
+                right_mode: summarise([_num(r.get("compactions")) for r in right_rows]),
+            },
+            "advisory_gap_count": {
+                left_mode: summarise([_num(r.get("advisory_gap_count")) for r in left_rows]),
+                right_mode: summarise([_num(r.get("advisory_gap_count")) for r in right_rows]),
+            },
+            "per_query": per_query,
+        }
+        if left_rows and right_rows and "fact_coverage" in (left_rows[0] if left_rows else {}):
+            dataset_report["fact_coverage_mean"] = {
+                left_mode: summarise([_num(r.get("fact_coverage")) for r in left_rows])["mean"],
+                right_mode: summarise([_num(r.get("fact_coverage")) for r in right_rows])["mean"],
+            }
+        if left_rows and right_rows and "route_correct" in (left_rows[0] if left_rows else {}):
+            dataset_report["route_accuracy"] = {
+                left_mode: summarise_rate([r.get("route_correct") for r in left_rows])["rate"],
+                right_mode: summarise_rate([r.get("route_correct") for r in right_rows])["rate"],
+            }
+        comparison["datasets"][name] = dataset_report
+
+    out_path = os.path.join(right_dir, "autonomy_comparison.json")
+    write_json(out_path, comparison)
+    print(f"[compare] wrote {out_path}")
+    _print_autonomy_comparison(comparison)
+    return comparison
+
+
+def _print_autonomy_comparison(comparison: Dict[str, Any]) -> None:
+    left = comparison.get("left_autonomy")
+    right = comparison.get("right_autonomy")
+    for name, report in comparison.get("datasets", {}).items():
+        print(f"\n== {name} ({report.get('matched_queries', 0)} matched) {left} vs {right} ==")
+        fc = report.get("fact_coverage_mean") or {}
+        if fc:
+            print(f"  fact_coverage(mean): {left}={fc.get(left)}  {right}={fc.get(right)}")
+        lat = report.get("latency_ms") or {}
+        print(
+            "  latency_ms(mean): {a}={av}  {b}={bv}  delta={d}".format(
+                a=left, av=(lat.get("plan") or lat.get(left) or {}).get("mean"),
+                b=right, bv=(lat.get("loop") or lat.get(right) or {}).get("mean"),
+                d=lat.get("delta_mean"),
+            )
+        )
+        tok = report.get("total_tokens") or {}
+        print(
+            "  tokens(mean): {a}={av}  {b}={bv}  delta={d}".format(
+                a=left, av=(tok.get("plan") or tok.get(left) or {}).get("mean"),
+                b=right, bv=(tok.get("loop") or tok.get(right) or {}).get("mean"),
+                d=tok.get("delta_mean"),
+            )
+        )
+        for metric in ("loop_iterations", "compactions", "advisory_gap_count"):
+            block = report.get(metric) or {}
+            print(
+                "  {m}(mean): {a}={av}  {b}={bv}".format(
+                    m=metric, a=left,
+                    av=(block.get(left) or {}).get("mean"),
+                    b=right, bv=(block.get(right) or {}).get("mean"),
+                )
+            )
+
+
 def main() -> None:
     args = parse_args()
     if args.compare:
-        compare_runs(args.compare[0], args.compare[1])
+        left_auto = _read_run_autonomy(args.compare[0])
+        right_auto = _read_run_autonomy(args.compare[1])
+        if left_auto and right_auto:
+            # Two autonomy-mode runs: use the mode-aware two-mode summary.
+            compare_autonomy_runs(args.compare[0], args.compare[1])
+        else:
+            compare_runs(args.compare[0], args.compare[1])
         return
     run_baseline(args)
 
