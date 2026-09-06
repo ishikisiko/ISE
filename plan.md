@@ -1,8 +1,8 @@
 # ISE 开发评测任务清单
 
-首版主线已完成，后续均为可选任务。[操作说明](docs/development_benchmark_usage.md) · [C05 验证](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md) · [历史明细](docs/development_benchmark_task_archive.md) · [系统分析](docs/development_benchmark_system_analysis.md)。本清单及引用资料不进入被测任务包。
+首版主线已完成，后续均为可选任务。[操作说明](docs/development_benchmark_usage.md) · [C05 验证](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md) · [历史明细](docs/development_benchmark_task_archive.md) · [系统分析](docs/development_benchmark_system_analysis.md) · [后台执行器设计](docs/development_benchmark_background_executor.md)。本清单及引用资料不进入被测任务包。
 
-验证范围：pi 已通过真实 smoke 和一次 T01 全链路；Codex/Claude 未真实验证，正式隔离未达成，无正式排名或真人评分。
+验证范围：pi 已通过真实 smoke 和一次 T01 全链路；Codex/Claude 未真实验证，正式隔离未达成，无正式排名或真人评分。P3-C/P3-D 于 2026-09-07 实现并自测，真实 detach 全链路与真实纠错启动待授权（记录见 controller `docs/p3cd-summary.md`）。
 
 ## P0. 设计与决策
 
@@ -214,10 +214,23 @@
 
 ### P3-C. 一轮纠错与初版发布
 
-- [ ] P3-C01 区分需求澄清与实现纠错；确定只反馈问题现象、不提供隐藏测试或修改方案的统一协议。
-- [ ] P3-C02 从初次提交派生独立纠错 run，记录父提交、额外预算与修复结果，不覆盖首次分数。
-- [ ] P3-C03 验证反馈改变需求时升级任务版本，不只为单个模型添加新条件。
-- [ ] P3-C04 发布两题结果、版本清单、隔离级别、剩余限制与证据索引；私有答案和敏感日志不随报告公开。
+- [x] P3-C01 区分需求澄清与实现纠错；确定只反馈问题现象、不提供隐藏测试或修改方案的统一协议。（`correction-v1`：反馈机械生成并经泄漏检查，不接受自由文本）
+- [x] P3-C02 从初次提交派生独立纠错 run，记录父提交、额外预算与修复结果，不覆盖首次分数。（`correction derive/launch/status`，成功率单列；真实纠错启动待有 FAIL 父运行与授权）
+- [x] P3-C03 验证反馈改变需求时升级任务版本，不只为单个模型添加新条件。（改需求的澄清被拒绝；`batch gap` 暂停比较；同版本改裁判被 check-update 拒绝，测试锁定）
+- [x] P3-C04 发布两题结果、版本清单、隔离级别、剩余限制与证据索引；私有答案和敏感日志不随报告公开。（`devbench publish`；已对 p3b-m1 生成发布包：T01 PASS 100、T02 无结果、暂定、非正式排名）
+
+### P3-D. 脱离终端的后台执行器
+
+设计见 [后台执行器设计](docs/development_benchmark_background_executor.md)。启动仍在操作者终端同步完成并消费授权；只把收卷、验收、报告做成幂等并交给后台 worker。
+
+- [x] P3-D01 拆分 `execute_run` 为 `launch_run` 与 `finalize_run`；finalize 的输入只来自磁盘记录，不依赖 launch 进程内存。
+- [x] P3-D02 实现 `orchestration.json` 阶段记录与每步幂等判断（已有提交不重复收卷、已有验收不重评、已有报告只补 outcome），并用 flock 互斥。
+- [x] P3-D03 实现 `runtime/jobs/` 目录式文件队列与 `devbench worker --once|--loop`，并发固定为 1，不读取授权库与 provider 凭据。
+- [x] P3-D04 实现 `batch resume`，扫描已启动未完成的 run 重新入队或就地收尾；锁持有者存活的 run 跳过并列出。
+- [x] P3-D05 为 `accept_p3b.py --execute` 与 `batch execute` 增加 `--detach`；`run status` / `batch status` 并入编排进度。
+- [x] P3-D06 提供 systemd 用户服务与 linger 说明，unit 中显式挡住 `~/.pi`、`~/.codex`、`~/.claude`，记录凭据不可达检查。（本机用户级 systemd 不支持 mount namespace，隔离指令不生效，worker 以 `--require-credential-isolation` 拒绝启动；系统级专用用户方案待管理员操作）
+- [x] P3-D07 用假 CLI 夹具覆盖分拆等价、launcher 退出后收尾、重复 finalize 无副作用、grade 中途崩溃、锁互斥、stop 后收尾；更新操作说明。（14 项自测通过）
+- [ ] P3-D08 完成一次 `--detach` 的 T01 真实全链路（需用户授权与计费），确认报告字段与前台方式一致。
 
 ### P4. 扩展题库（T04、T03）
 

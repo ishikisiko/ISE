@@ -90,7 +90,17 @@ DB_TASK=T01
   --execute --out "$DB_ART/qualification/$DB_BATCH-result.json"
 ```
 
-框架会核验并消费绑定配置、任务和次数的授权，随后自动准备工作区、启动 CLI、监督到停止、冻结提交、独立验收、生成报告并登记结局。**保持这个终端运行，直到编排结束。**
+框架会核验并消费绑定配置、任务和次数的授权，随后自动准备工作区、启动 CLI、监督到停止、冻结提交、独立验收、生成报告并登记结局。默认在这个终端里同步完成，**保持终端运行到编排结束**。
+
+不想守着终端时加 `--detach`：启动后命令立即返回，收尾（监督到停止、收卷、验收、报告、结局登记）交给后台 worker。收尾是幂等的，任何进程都能接手：
+
+```bash
+DB_JOBS=/home/ubuntu/.local/share/ise-devbench/runtime/jobs
+"$DB_PY" -m devbench worker --jobs "$DB_JOBS" --once     # 处理完当前队列即退出；--loop 常驻
+"$DB_PY" -m devbench batch resume --batch "$DB_BATCH" --volumes "$DB_VOLUMES" --inline   # 没有 worker 时就地收尾
+```
+
+常驻 worker 的 systemd 托管与本机凭据隔离的实测结果见 [systemd 说明](/home/ubuntu/.local/share/ise-devbench/controller/management/systemd/README.md)。
 
 当前 pi 流程只注入所选 provider 的凭据；凭据与候选代码位于同一沙箱，可被候选代码读取，因此按 `local-practice` 使用。不要把整个登录文件或密钥拼进命令行。
 
@@ -104,10 +114,10 @@ DB_TASK=T01
 "$DB_PY" -m devbench run status --run "${DB_RUN:?请填写计划中的 run_id}"
 "$DB_PY" -m devbench agent status --run-dir "$DB_VOLUMES/$DB_RUN"
 "$DB_PY" -m devbench agent logs --run-dir "$DB_VOLUMES/$DB_RUN"
-"$DB_PY" -m devbench batch status --batch "$DB_BATCH"
+"$DB_PY" -m devbench batch status --batch "$DB_BATCH" --volumes "$DB_VOLUMES"
 ```
 
-`run status` 查看提交与验收记录，`agent status/logs` 查看被测进程与日志，`batch status` 查看整个批次的完成情况。日志中的自述不作为通过依据。
+`run status` 查看提交与验收记录，`agent status/logs` 查看被测进程与日志，`batch status` 查看整个批次的完成情况；带 `--volumes` 时两者都并入编排阶段（launched、supervised、submitted、graded、reported、finished）、尝试次数与当前持有者。日志中的自述不作为通过依据。
 
 需要停止时单独执行：
 
@@ -115,7 +125,7 @@ DB_TASK=T01
 "$DB_PY" -m devbench agent stop --run-dir "$DB_VOLUMES/$DB_RUN" --reason cancelled
 ```
 
-停止后，仍在运行的编排会继续收卷和验收；以 `run status` 中的提交、evaluation 和最终状态确认完成。如果管理进程也退出了，监督器停止作业不会自动补齐验收，按第 9 节恢复。
+停止后，仍在运行的编排（终端或 worker）会继续收卷和验收；以 `run status` 中的提交、evaluation 和最终状态确认完成。如果管理进程也退出了，用 `batch resume` 补齐（第 9 节）。
 
 ## 6. 查看报告，理解结果
 
@@ -170,6 +180,27 @@ DB_TASK=T01
 
 只有合格的自动 PASS 提交可以获得人工加分。管理 Agent 可以代录真人给出的分数、理由和证据，不自行给分或代签。随后重新生成报告即可查看评审投影。详细规则见 [人工评审说明](/home/ubuntu/.local/share/ise-devbench/controller/docs/p3a-summary.md)。
 
+## 7.1 可选：一轮纠错
+
+只对自动验收为 FAIL 的有效运行做一轮纠错。反馈由验收结果机械生成，只列未通过验收点的公开编号与公开摘要，不含隐藏用例、失败样例和修改方案，也不接受人工自由文本。派生运行的 ID 是原 run 加 `-c1`，使用独立的 `correction-v1` 预算，结果单列为"一轮纠错成功率"，首次成绩不覆盖。
+
+```bash
+"$DB_PY" -m devbench correction preview --run "$DB_RUN" --controller .
+"$DB_PY" -m devbench correction derive --run "$DB_RUN" --controller . --actor ubuntu \
+  --reason "标准化一轮纠错" --prep ../prep --volumes "$DB_VOLUMES" --batch "$DB_BATCH"
+"$DB_PY" -m devbench correction status --run "$DB_RUN" --controller .
+```
+
+启动派生运行用 `correction launch`，仍需该配置的真实 smoke 和本次运行的授权；完整参数见 controller 操作说明第 8 节。需求澄清与纠错分开登记：澄清只能复述公开契约；若澄清改变了验收要求，命令会拒绝，正确做法是用 `batch gap` 登记任务语义缺口（汇总变为暂定、比较暂停），升级任务版本后对全部配置统一重跑。
+
+## 7.2 可选：生成发布包
+
+```bash
+"$DB_PY" -m devbench publish --batch "$DB_BATCH" --out "$DB_ART/publications/$DB_BATCH" --controller .
+```
+
+生成结果、版本清单、隔离级别、剩余限制与证据索引（相对路径加摘要，不含内容）。私有答案、隐藏用例、失败样例文本、候选日志、绝对路径和凭据不进入发布包；泄漏检查未通过时不写出任何文件。发布包按数据如实标注暂定与排名就绪状态，不等于正式成绩发布。
+
 ## 8. 更换模型、CLI，或做多次比较
 
 快速开始的 `accept_p3b.py` 固定读取 `profiles/pi-opencode-go.json`，不是任意 CLI 的通用启动器。更换配置需要重新登记身份与验证：
@@ -198,12 +229,12 @@ pi 的 smoke 工具是 `tools/smoke_pi.py`，支持 `--provider`、`--model`、`
 | `No module named devbench` | 确认在私有 controller 目录执行，并使用 `env1` Python |
 | profile 没有通过真实 smoke | 核对配置摘要；变更配置后重新完成对应 smoke，不能只做版本探测 |
 | 启动前拒绝 | 查看 dry-run、profile、授权、镜像和安装摘要的具体错误，先修复设施条件 |
-| CLI 停止了却没有报告 | 确认管理编排是否仍活动；若已退出，先核对 run 状态，再按下方恢复说明收卷或验收 |
+| CLI 停止了却没有报告 | 确认管理编排或 worker 是否仍活动；若已退出，执行 `batch resume --batch ... --volumes ... --inline`，它按已有提交/验收/报告自动判断还差哪一步 |
 | 结果为 INVALID | 保留原记录并登记原因；只有符合规则的设施原因可派生补跑，不能覆盖原结果 |
 | 汇总始终暂定 | 检查是否有未运行任务、缺失 outcome 或未补齐的设施无效；单题练习本就不完整 |
 | 报告重生成提示执行记录缺失或摘要不符 | 检查 `--volumes` 和原始 `cli-outcome.json`；保留错误与旧报告，不填造费用或 token |
 
-中断恢复的 `submit` / `grade` 完整命令见 [controller 操作说明第 5 节](/home/ubuntu/.local/share/ise-devbench/controller/docs/usage.md)。先确认没有活动编排或写入进程；已有提交不重复收卷，已有验收只重生成报告。`submit` 和 `grade` 自己负责状态迁移，不额外手动 `run transition`；手动恢复后还需按实际 CLI 结局补齐批次 outcome。
+中断恢复优先用 `batch resume`；它拒绝接手锁持有者仍存活的运行。手工 `submit` / `grade` 只在 resume 也无法处理时使用，完整命令见 [controller 操作说明第 5 节](/home/ubuntu/.local/share/ise-devbench/controller/docs/usage.md)。已有提交不重复收卷，已有验收只重生成报告。`submit` 和 `grade` 自己负责状态迁移，不额外手动 `run transition`；手动恢复后还需按实际 CLI 结局补齐批次 outcome。
 
 框架维护者复核报告功能时可运行以下命令，它使用副本与合成评审记录，不调用模型或录入真实人工分：
 
@@ -211,4 +242,4 @@ pi 的 smoke 工具是 `tools/smoke_pi.py`，支持 `--provider`、`--model`、`
 "$DB_PY" tools/accept_c05.py
 ```
 
-更多背景与维护入口：[实施任务清单](../plan.md)、[系统设计](development_benchmark_system_analysis.md)、[C05 验证说明](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md)。
+更多背景与维护入口：[实施任务清单](../plan.md)、[系统设计](development_benchmark_system_analysis.md)、[后台执行器设计](development_benchmark_background_executor.md)、[C05 验证说明](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md)、[P3-C/D 实现记录](/home/ubuntu/.local/share/ise-devbench/controller/docs/p3cd-summary.md)。
