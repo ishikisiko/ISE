@@ -117,6 +117,9 @@ Global ceiling: `max_iterations = 8`.
 - [System_Architecture.md](System_Architecture.md) — full mermaid architecture diagrams
 - [docs/query_execution_paths.md](docs/query_execution_paths.md) — contract boundary & path map
 - [docs/agentic_loop_roadmap.md](docs/agentic_loop_roadmap.md) — loop evolution & target architecture
+- [docs/development_benchmark_usage.md](docs/development_benchmark_usage.md) - development benchmark quick start, execution, progress, reports, and optional review
+- [docs/development_benchmark_system_analysis.md](docs/development_benchmark_system_analysis.md) - coding-model benchmark design, isolation, grading, and candidate tasks (draft)
+- [plan.md](plan.md) - two-task benchmark delivery checklist; optional experiments, task expansion, and release work at the end
 
 ## Installation
 
