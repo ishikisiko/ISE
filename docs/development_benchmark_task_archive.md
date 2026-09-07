@@ -473,3 +473,15 @@ T05、T06 单列挑战成绩；加入主榜需要新 suite。连续开发链另�
 env1 全自测 403 通过。9 个 shell 块、16 条命令参数及 5 个只读入口校验通过。
 操作说明与完整证据见 [C05 总结](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md)。
 本次未调用真实 provider 或写入真人分；上方历史快照中的未完成勾选保留原样。
+
+2026-09-08，P3-E（三障碍解除）：凭据代理 + 按运行内部网络、launch 队列与 systemd launcher、系统级隔离 worker 均已实现并真实验证。
+pi/Claude Code/Codex 三 CLI 经代理 smoke 全过；worker 单元内读不到凭据；无凭据进程发起的 T01 全链路补跑 PASS 100（`practice-20260908-launcher-pi-oc-t01-r1-b1`，首次 r1 因重启 launcher 被打断，已按 harness_error 归因）。
+controller 自测 445 通过。逐项数据见 [P3-E 总结](/home/ubuntu/.local/share/ise-devbench/controller/docs/p3e-summary.md)，设计见 [三障碍解除设计](development_benchmark_isolation_launcher.md)。
+本次未开设 `isolated-formal` 批次，无正式排名或真人评分。
+
+2026-09-08，P3-E07 首个 `isolated-formal` 批次 `formal-20260908`：用户指定 pi+glm-5.3 对 Claude Code+opus-5，T01/T02 各 1 次，全部经凭据代理内部网络、launcher 启动、隔离 worker 收尾。
+T01 双 PASS 100；pi T02 FAIL 45；Claude T02 INVALID（裁判缺陷）。批次暂定、不进排名。
+暴露并修正批次收尾的裁判参数写死（P3-E08）；T02 裁判 stdout 协议缺陷（P3-E09）待用户决定修法与版本。记录见 [批次记录](/home/ubuntu/.local/share/ise-devbench/controller/docs/formal-20260908.md)。
+
+2026-09-08（续），T02-GRADER-02：经用户批准修订 T02 裁判（只解析 checker stdout 最后一行 JSON，契约不变）为 1.0.2，suite ise-v1 升 1.0.1 并加锁加标签；六树资格与基线一致；`formal-20260908` 登记批次修订并对两场 T02 统一重评（pi FAIL 45、Claude FAIL 60），不重跑模型。
+批次完整、正式排名就绪（重复 1、无真人评分、未发布）；P3-E07/E09 勾选。

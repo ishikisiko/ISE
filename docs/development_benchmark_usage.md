@@ -15,7 +15,7 @@ ISE-devbench 用固定的 ISE 开发任务，评估一个 CLI + 模型配置能�
 
 每次运行使用任务固定的起点、公开任务书和独立裁判。基础分满分 100，人工加分最多 10 分，两者分开记录。
 
-当前真实验证覆盖 **pi 0.85.0 + `opencode-go/muse-spark-1.3-contributor`** 的 smoke（最小真实调用验证）和一次 T01 全链路。下面的快速开始使用对应的 `pi-opencode-go` profile。T02 已有任务与验收准备，但尚无该配置的真实开发全链路结果；Codex/Claude 目前只有适配器离线验证。
+当前真实验证覆盖 **pi 0.85.0 + `opencode-go/muse-spark-1.3-contributor`** 的 smoke（最小真实调用验证）和两次 T01 全链路（前台一次、`--detach` 一次，均 PASS）。下面的快速开始使用对应的 `pi-opencode-go` profile。T02 已有任务与验收准备，但尚无该配置的真实开发全链路结果；Codex/Claude 目前只有适配器离线验证。
 
 当前运行级别为 `local-practice`，可生成诊断报告。正式隔离尚未达成，也没有正式排名或真人评分结果。CLI 与模型在使用时选择，更换配置的步骤见第 8 节。
 
@@ -105,6 +105,30 @@ DB_JOBS=/home/ubuntu/.local/share/ise-devbench/runtime/jobs
 当前 pi 流程只注入所选 provider 的凭据；凭据与候选代码位于同一沙箱，可被候选代码读取，因此按 `local-practice` 使用。不要把整个登录文件或密钥拼进命令行。
 
 正常完成后，命令返回结果索引路径。`$DB_ART/qualification/$DB_BATCH-result.json` 的 `steps.runs` 列出运行状态、判定、分数和结局；`executed: true` 只说明执行过，是否通过以独立验收的 verdict 为准。
+
+### 4.1 不在终端启动：写 launch 请求，由常驻 launcher 启动（P3-E）
+
+授权仍只能在操作者终端签发；之后任何不持有凭据的进程（脚本、未来的控制台）只需写一条 launch 请求，
+常驻的 `ise-devbench-launcher.service` 核验授权、取宿主凭据、启动；`ise-devbench-worker.service`
+（凭据不可达）收尾。全程不需要终端保持打开。
+
+```bash
+# 1) 终端签发授权（绑定 profile 摘要、任务、次数、时限，并记录批准出处）
+"$DB_PY" -m devbench auth grant --store "$DB_ART/authorizations.json" --id "$DB_BATCH-$DB_RUN" \
+  --profile pi-opencode-go --profile-digest "$DB_PROFILE_DIGEST" --task "$DB_TASK" --max-runs 1 \
+  --expires-in 14400 --approval-reference "${DB_APPROVAL:?}" --granted-by ubuntu
+# 2) 任意进程写 launch 请求（本进程不读凭据、不暂存 CLI）
+"$DB_PY" -m devbench batch execute --batch "$DB_BATCH" --run "$DB_RUN" \
+  --prep /home/ubuntu/.local/share/ise-devbench/prep --volumes "$DB_VOLUMES" \
+  --cli-kind pi --cli-source /home/ubuntu/.hermes/node --cli-version 0.85.0 \
+  --auth-store "$DB_ART/authorizations.json" --authorization "$DB_BATCH-$DB_RUN" \
+  --execute --enqueue-launch --network proxied --credential-mode proxied
+# 3) 进度：batch status --volumes（含 launch/finalize 队列与代理计数）
+```
+
+`--network proxied` 表示开发容器只在按运行的 docker 内部网络里，真实凭据留在宿主代理进程；
+`--credential-mode scoped` + `--network bridge` 是旧的直连方式（凭据副本进沙箱，只能标 local-practice）。
+正式隔离批次只接受 proxied。
 
 ## 5. 查看进度或停止
 
@@ -209,7 +233,7 @@ DB_JOBS=/home/ubuntu/.local/share/ise-devbench/runtime/jobs
 2. 做安装探测与 profile 检查，再为新摘要完成真实 smoke。安装探测的入口是 `agent probe --kind pi --executable <实际路径>`，只证明安装可探测。
 3. 用新配置登记、冻结批次并预登记全部运行，再按计划执行。不要修改旧批次内已冻结的配置。
 
-pi 的 smoke 工具是 `tools/smoke_pi.py`，支持 `--provider`、`--model`、`--cli-source`。它即使不传 `--execute` 也会读取本地 provider 凭据、暂存文件并更新 profile；只查看验证状态应使用 `smoke status/check`。Codex/Claude 还需要补齐对应的真实 smoke 与凭据启动验证。
+smoke 工具是 `tools/smoke_cli.py`，支持 `--cli {pi,codex,claude}`、`--model`、`--cli-version`、`--network {proxied,bridge}`。它即使不传 `--execute` 也会暂存 CLI 并写出 profile；只查看验证状态应使用 `smoke status/check`。三个 CLI 都已在 `proxied` 网络（内部网络 + 宿主凭据代理）下完成真实 smoke，profile 分别为 `pi-opencode-go`、`codex-chatgpt`、`claude-oauth`（见 [三障碍解除设计](development_benchmark_isolation_launcher.md)）。
 
 每配置每题重复 3 次的 pilot、多配置登记和补跑规则见 [批次操作说明](/home/ubuntu/.local/share/ise-devbench/controller/docs/p3b-summary.md)。通用 `batch execute` 当前提供 `--secrets-env`，没有文件凭据参数；pi 快捷入口通过内部接口注入凭据，不能直接把它的命令改成其他 CLI 名称使用。
 

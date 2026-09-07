@@ -1,6 +1,6 @@
 # ISE Benchmark 脱离终端的后台执行器设计
 
-> 状态：已实现（2026-09-07，controller `devbench/orchestration.py`、`jobs.py`、`batch_exec.py`），自测通过；带真实模型的 detach 全链路待用户授权后执行。本机用户级 systemd 不支持 mount namespace，unit 中的凭据不可达指令在本机不生效，见 controller `management/systemd/README.md`。
+> 状态：已实现（2026-09-07，controller `devbench/orchestration.py`、`jobs.py`、`batch_exec.py`），自测通过；带真实模型的 `--detach` T01 全链路已于 2026-09-07 验证（批次 `practice-20260907-232558`，见第 5 节）。本机用户级 systemd 不支持 mount namespace，unit 中的凭据不可达指令在本机不生效，worker 的凭据隔离仍未达成，见 controller `management/systemd/README.md`。
 > 日期：2026-09-07。设计版本：`background-executor-v1`，对应 CLI 调度设计 `cli-orchestration-v1`。
 > 上位文档：[CLI 调度设计](development_benchmark_cli_orchestration.md)、[系统分析](development_benchmark_system_analysis.md)、[操作说明](development_benchmark_usage.md)、[实施计划](../plan.md)。
 > 出题方私有资料，不进入被测工作区。
@@ -138,11 +138,26 @@ worker 入口 `python -m devbench worker --jobs runtime/jobs --once|--loop`：
 
 验收标准：以上用例通过；用真实 pi profile 做一次 `--detach` 的 T01 全链路，中途关闭终端，报告仍在 `artifacts/runs/<run_id>/evaluations/` 下生成，且与前台方式的报告字段一致。
 
+### 真实全链路结果（2026-09-07）
+
+批次 `practice-20260907-232558`，运行 `practice-20260907-232558-pi-oc-t01-r1`（T01 1.0.1，pi 0.85.0 +
+opencode-go/muse-spark-1.3-contributor，local-practice）。发起命令在 launch 后立即返回并退出；收尾由
+`setsid` 起的独立 session worker（PPID 1）完成，`orchestration.json` 的 history 记为
+launched(launch_run) → supervised/submitted/graded/reported/finished(worker)，attempt 1。
+
+结果 PASS、基础分 100（功能 60 / 边界 25 / 回归 15），开发 547 秒，费用 0.00659033，token 207475。
+与前台方式的 `p3b-m1-pi-oc-t01-r1-b1-b2-b3` 报告比对：顶层字段集完全相同，`costs`、`token_usage`、
+`timing`、`items` 子字段集相同，verdict / base_score / group_scores / schema_version / review_status
+取值一致；费用与 token 非空，说明 worker 从执行记录恢复成功。收尾后再跑 `batch resume --inline`
+返回 finished 且 actions 为空，submission 与 evaluation 仍各一份，attempt 不变。
+
+未覆盖：worker 未经 systemd 托管，第 7 项凭据不可达检查在本机仍无法验证（原因见上）。
+
 ## 6. 对操作台与看板的影响
 
-做完本设计后，"发起运行"操作台的五个障碍中，编排绑定终端和多入口并发两条解除。剩余三条（授权闸、凭据进入沙箱、只有 pi 真实验证）与本设计无关，需分别由正式隔离和更多 CLI 的真实 smoke 解决。
+做完本设计后，"发起运行"操作台的五个障碍中，编排绑定终端和多入口并发两条解除。剩余三条（授权闸、凭据进入沙箱、只有 pi 真实验证）于 2026-09-08 由 [三障碍解除设计](development_benchmark_isolation_launcher.md) 解决：授权只在终端签发、由常驻 launcher 消费，控制台只写不含凭据的 launch 请求；开发容器改走按运行的内部网络与宿主凭据代理，真实凭据不进沙箱；pi、Codex、Claude 三个 CLI 均完成经代理的真实 smoke。
 
-只读看板可以直接读 `orchestration.json` 与 `runtime/jobs/` 展示进度，不需要额外接口。
+只读看板可以直接读 `orchestration.json`、`runtime/jobs/`（含 `launch` 请求）与 `volumes/<run>/proxy/summary.json` 展示进度，不需要额外接口。
 
 ## 7. 实施清单
 

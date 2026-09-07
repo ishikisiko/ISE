@@ -1,8 +1,8 @@
 # ISE 开发评测任务清单
 
-首版主线已完成，后续均为可选任务。[操作说明](docs/development_benchmark_usage.md) · [C05 验证](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md) · [历史明细](docs/development_benchmark_task_archive.md) · [系统分析](docs/development_benchmark_system_analysis.md) · [后台执行器设计](docs/development_benchmark_background_executor.md)。本清单及引用资料不进入被测任务包。
+首版主线已完成，后续均为可选任务。[操作说明](docs/development_benchmark_usage.md) · [C05 验证](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md) · [历史明细](docs/development_benchmark_task_archive.md) · [系统分析](docs/development_benchmark_system_analysis.md) · [后台执行器设计](docs/development_benchmark_background_executor.md) · [三障碍解除设计](docs/development_benchmark_isolation_launcher.md)。本清单及引用资料不进入被测任务包。
 
-验证范围：pi 已通过真实 smoke 和一次 T01 全链路；Codex/Claude 未真实验证，正式隔离未达成，无正式排名或真人评分。P3-C/P3-D 于 2026-09-07 实现并自测，真实 detach 全链路与真实纠错启动待授权（记录见 controller `docs/p3cd-summary.md`）。
+验证范围：pi、Codex、Claude 三个 CLI 均已通过经凭据代理的真实 smoke；pi 已有 T01 全链路（前台、`--detach`、无凭据进程发起 + launcher/隔离 worker 各一次）。正式隔离的机制已具备并于 2026-09-08 用首个 `isolated-formal` 批次 `formal-20260908`（glm-5.3 对 opus-5）真实跑完：T01 双 PASS，T02 暴露两处裁判链路缺陷并均已修（T02 裁判修订为 1.0.2、suite 1.0.1），批次完整、正式排名就绪但重复 1、无真人评分、未发布。P3-C/P3-D 于 2026-09-07 实现并验证；P3-E 三障碍解除于 2026-09-08 实现并真实验证（记录见 controller `docs/p3e-summary.md`，设计见 [三障碍解除设计](docs/development_benchmark_isolation_launcher.md)）。真实纠错启动仍待有 FAIL 父运行与授权。
 
 ## P0. 设计与决策
 
@@ -230,7 +230,19 @@
 - [x] P3-D05 为 `accept_p3b.py --execute` 与 `batch execute` 增加 `--detach`；`run status` / `batch status` 并入编排进度。
 - [x] P3-D06 提供 systemd 用户服务与 linger 说明，unit 中显式挡住 `~/.pi`、`~/.codex`、`~/.claude`，记录凭据不可达检查。（本机用户级 systemd 不支持 mount namespace，隔离指令不生效，worker 以 `--require-credential-isolation` 拒绝启动；系统级专用用户方案待管理员操作）
 - [x] P3-D07 用假 CLI 夹具覆盖分拆等价、launcher 退出后收尾、重复 finalize 无副作用、grade 中途崩溃、锁互斥、stop 后收尾；更新操作说明。（14 项自测通过）
-- [ ] P3-D08 完成一次 `--detach` 的 T01 真实全链路（需用户授权与计费），确认报告字段与前台方式一致。
+- [x] P3-D08 完成一次 `--detach` 的 T01 真实全链路（需用户授权与计费），确认报告字段与前台方式一致。（2026-09-07 批次 `practice-20260907-232558`：launch 后发起进程即退出，收尾全部由独立 session 的 worker 完成，PASS 100、费用与 token 已恢复，报告字段集与前台 `p3b-m1` 一致；worker 未用 systemd 托管，凭据隔离仍未验证）
+
+### P3-E. 三障碍解除：凭据代理、启动队列与三 CLI 验证（2026-09-08）
+
+- [x] P3-E01 按 profile 的 `auth_profile_ref` 解析宿主登录（`host-pi-auth:<provider>`、`host-codex-auth`、`host-claude-auth`），scoped 副本不带 refresh token，proxied 只把真实凭据交给代理；描述信息不含凭据值。
+- [x] P3-E02 宿主侧凭据代理 + 按运行的 docker 内部网络：容器只拿一次性令牌与代理地址，无外网无 DNS；代理换头原样转发、请求台账、收尾撤销并拆网络；`select_network` 让正式隔离禁止 bridge 与凭据进沙箱，`isolated-formal` 默认 proxied。（pi/Claude/Codex 三种接法均真实验证；记录不含令牌）
+- [x] P3-E03 `launch` 任务种类与常驻 launcher：授权只在终端签发（记录批准出处），任何无凭据进程只写 launch 请求，launcher 核验授权后取凭据启动并入队 finalize；`batch execute --enqueue-launch/--credentials-from-host/--network/--credential-mode`。（批次 `practice-20260908-launcher`：无凭据进程发起 → systemd launcher 启动 → 隔离 worker 收尾，见 p3e-summary 2.3）
+- [x] P3-E04 系统级 systemd 单元：worker 在 mount namespace 内读不到凭据（`isolated: true` 实测；普通终端同命令被拒），launcher `KillMode=process`（重启不再连带杀掉进行中的运行——首次链路验证正是被此杀死，已按 harness_error 归因并补跑）。
+- [x] P3-E05 三 CLI 经代理的真实 smoke 全部通过：pi 0.85.0（opencode-go）、Claude Code 2.1.263（订阅 OAuth，原生二进制入口）、Codex 0.153.4（ChatGPT 登录，自定义 provider 关闭 WebSocket，容器内 danger-full-access 并如实记录）；`tools/smoke_cli.py` 取代 `smoke_pi.py`；受支持版本更新。
+- [x] P3-E06 设计与记录：ISE `docs/development_benchmark_isolation_launcher.md`、controller `docs/p3e-summary.md`、systemd README、操作说明与 CHANGELOG；controller 自测 445 通过。
+- [x] P3-E07 开设首个 `isolated-formal` 批次并真实运行。（2026-09-08 `formal-20260908`：pi+glm-5.3 对 Claude Code+opus-5，T01/T02 各 1 次，全部经代理网络由 launcher 启动、隔离 worker 收尾。T01 双 PASS 100；T02 经 P3-E09 裁判修订后统一重评：pi FAIL 45、Claude FAIL 60。批次完整、正式排名就绪（重复 1、无真人评分、agent-native 工具面不同，见 controller `docs/formal-20260908.md`）；未发布）
+- [x] P3-E08 批次收尾按任务规格搭建裁判输入（controller `grading_specs.py`）：此前把 T01 的裁判参数套给所有任务，T02 首次走批次链路即缺参 INVALID；裁判无产出的 INVALID 生成 INVALID 报告并登记 harness_error；`batch resume --inline --regrade` 显式统一重评。已修并对两场 T02 重评。
+- [x] P3-E09 T02 裁判 stdout 协议缺陷：`run_checks.py` 把 checker 整个 stdout 当 JSON，候选代码在被测路径打印诊断即整场无验收报告（Claude 提交实测复现，base 代码本身就有同风格打印）。用户批准后修为只解析最后一行 JSON：T02 1.0.2（契约不变，六树资格与基线一致）、suite ise-v1 1.0.1 加锁加标签、`grader_digest` 改为可复算算法（controller `tools/grader_digest.py`）、批次修订台账（`batch revise`）、两场 T02 用新裁判统一重评，不重跑模型。遗留：人工评审 rubric manual-v1 只列 T02 1.0.1，新运行评审前需发新 rubric 版本。
 
 ### P4. 扩展题库（T04、T03）
 
