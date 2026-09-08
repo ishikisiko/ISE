@@ -2,7 +2,7 @@
 
 > 状态：调研与设计完成；管理 skill、启动器和适配器尚未实现，也未启动被测模型。
 > 日期：2026-09-05。设计版本：`cli-orchestration-v1`，对应 P0 决策 `p0-v2`。
-> 上位文档：[系统分析](development_benchmark_system_analysis.md)、[P0 决策](development_benchmark_p0_decisions.md)、[实施计划](../plan.md)。
+> 上位文档：[系统分析](system_analysis.md)、[P0 决策](p0_decisions.md)、[实施计划](../../plan.md)。
 > 出题方私有资料，不进入被测工作区。
 
 ## 1. 结论与范围修订

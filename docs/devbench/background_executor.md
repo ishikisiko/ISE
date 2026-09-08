@@ -2,7 +2,7 @@
 
 > 状态：已实现（2026-09-07，controller `devbench/orchestration.py`、`jobs.py`、`batch_exec.py`），自测通过；带真实模型的 `--detach` T01 全链路已于 2026-09-07 验证（批次 `practice-20260907-232558`，见第 5 节）。本机用户级 systemd 不支持 mount namespace，unit 中的凭据不可达指令在本机不生效，worker 的凭据隔离仍未达成，见 controller `management/systemd/README.md`。
 > 日期：2026-09-07。设计版本：`background-executor-v1`，对应 CLI 调度设计 `cli-orchestration-v1`。
-> 上位文档：[CLI 调度设计](development_benchmark_cli_orchestration.md)、[系统分析](development_benchmark_system_analysis.md)、[操作说明](development_benchmark_usage.md)、[实施计划](../plan.md)。
+> 上位文档：[CLI 调度设计](cli_orchestration.md)、[系统分析](system_analysis.md)、[操作说明](usage.md)、[实施计划](../../plan.md)。
 > 出题方私有资料，不进入被测工作区。
 
 ## 1. 结论与范围
@@ -155,13 +155,13 @@ launched(launch_run) → supervised/submitted/graded/reported/finished(worker)�
 
 ## 6. 对操作台与看板的影响
 
-做完本设计后，"发起运行"操作台的五个障碍中，编排绑定终端和多入口并发两条解除。剩余三条（授权闸、凭据进入沙箱、只有 pi 真实验证）于 2026-09-08 由 [三障碍解除设计](development_benchmark_isolation_launcher.md) 解决：授权只在终端签发、由常驻 launcher 消费，控制台只写不含凭据的 launch 请求；开发容器改走按运行的内部网络与宿主凭据代理，真实凭据不进沙箱；pi、Codex、Claude 三个 CLI 均完成经代理的真实 smoke。
+做完本设计后，"发起运行"操作台的五个障碍中，编排绑定终端和多入口并发两条解除。剩余三条（授权闸、凭据进入沙箱、只有 pi 真实验证）于 2026-09-08 由 [三障碍解除设计](isolation_launcher.md) 解决：授权只在终端签发、由常驻 launcher 消费，控制台只写不含凭据的 launch 请求；开发容器改走按运行的内部网络与宿主凭据代理，真实凭据不进沙箱；pi、Codex、Claude 三个 CLI 均完成经代理的真实 smoke。
 
 只读看板可以直接读 `orchestration.json`、`runtime/jobs/`（含 `launch` 请求）与 `volumes/<run>/proxy/summary.json` 展示进度，不需要额外接口。
 
 ## 7. 实施清单
 
-对应 [实施计划](../plan.md) 的 P3-D 条目：
+对应 [实施计划](../../plan.md) 的 P3-D 条目：
 
 | 条目 | 内容 | 主要改动文件 |
 |---|---|---|
@@ -171,4 +171,4 @@ launched(launch_run) → supervised/submitted/graded/reported/finished(worker)�
 | P3-D04 | `batch resume` | `devbench/batch.py`、`devbench/cli.py` |
 | P3-D05 | `--detach` 入口与 status 输出并入编排进度 | `tools/accept_p3b.py`、`devbench/cli.py` |
 | P3-D06 | systemd 用户服务与凭据不可达检查 | `management/systemd/`、controller `docs/` |
-| P3-D07 | 测试与一次真实 detach 全链路验证，更新操作说明 | `tests/`、`docs/development_benchmark_usage.md` |
+| P3-D07 | 测试与一次真实 detach 全链路验证，更新操作说明 | `tests/`、`docs/devbench/usage.md` |

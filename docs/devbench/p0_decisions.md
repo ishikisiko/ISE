@@ -2,7 +2,7 @@
 
 > 状态：P0 设计决策完成，尚未部署执行框架或完成题目准入。
 > 日期：2026-09-05。决策版本：`p0-v2`；保留首轮规则，补充管理 Agent 调用被测 CLI 的设计。
-> 依据：[系统分析](development_benchmark_system_analysis.md)、[实施计划](../plan.md)。
+> 依据：[系统分析](system_analysis.md)、[实施计划](../../plan.md)。
 > 出题方私有资料：不得进入被测 Agent 的任务包。
 
 ## 1. 本次确定的边界
@@ -10,7 +10,7 @@
 用户需要的流程是 **指定任务与 CLI/模型 -> 管理 Agent 启动考场和被测 CLI -> 自动收卷 -> 脚本验收 -> 可选个人加分**。
 框架负责试卷、CLI 进程调度、提交与裁判，不负责选择模型、重写 CLI 推理循环或评价模型自己的回答。
 手动领取任务、自行启动 CLI 仍作为备用入口。具体调研、命令和适配契约见
-[管理 Agent 与 CLI 调度设计](development_benchmark_cli_orchestration.md)。
+[管理 Agent 与 CLI 调度设计](cli_orchestration.md)。
 
 本次用户明确：
 
@@ -113,7 +113,7 @@ python -m devbench report --run trial-001
 ```
 
 授权引用须由控制器核验，本次尚未批准真实模型运行。管理 Agent 不得把自己的会话、参考答案或临时解题建议传入启动 prompt。
-监督器独立于管理会话持久运行，避免管理 Agent 断线后丢失截止时间；详见 [调度生命周期](development_benchmark_cli_orchestration.md#lifecycle)。
+监督器独立于管理会话持久运行，避免管理 Agent 断线后丢失截止时间；详见 [调度生命周期](cli_orchestration.md#lifecycle)。
 
 备用的 `manual-external` 流程保留：
 

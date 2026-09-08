@@ -6,12 +6,20 @@ ISE-devbench 用固定的 ISE 开发任务，评估一个 CLI + 模型配置能�
 
 ## 1. 当前能测什么
 
-截至 2026-09-06，任务集为 `ise-v1@1.0.0`：
+截至 2026-09-08，旧两题默认入口为 `suites/ise-v1.yaml`（`ise-v1@1.0.1`）；
+新增四题入口为 `suites/ise-v1-expanded.yaml`（`ise-v1@1.1.0`），需在 CLI 显式选择：
 
 | 任务 | 版本 | 开发内容 |
 |---|---|---|
 | T01 | 1.0.1 | 修复产品型号、版本数字导致的引用误判 |
-| T02 | 1.0.1 | 增加会话 JSON 导出接口与界面下载 |
+| T02 | 1.0.2 | 增加会话 JSON 导出接口与界面下载 |
+| T04 | 1.0.0 | 请求级检索工具限制：跨入口、执行阻断与隔离 |
+| T03 | 1.0.0 | 文献元数据检索 Skill：registry、协议、证据流与预算 |
+
+四题版在 `batch register` 或单题 `prepare` 时加 `--suite suites/ise-v1-expanded.yaml`。
+批次保存并校验所选 suite 的快照，之后的启动和发布跟随该快照。操作台默认和下文旧快捷入口仍为两题；
+不要只把任务 ID 改成 T03/T04 而遗漏 suite 参数。新题仅完成合成行为资格验收，没有真实开发模型成绩或真人评分。
+详见[扩题交付报告](expansion_20260908.md)。
 
 每次运行使用任务固定的起点、公开任务书和独立裁判。基础分满分 100，人工加分最多 10 分，两者分开记录。
 
@@ -44,12 +52,12 @@ DB_VOLUMES=/home/ubuntu/.local/share/ise-devbench/runtime/volumes
 也可以让管理 Agent 操作。例如，先给它下面的指令；执行阶段的真实授权记录由它按框架要求登记：
 
 ```text
-按 docs/development_benchmark_usage.md，使用私有 controller，选择 T01 和
+按 docs/devbench/usage.md，使用私有 controller，选择 T01 和
 pi-opencode-go profile，新建 local-practice 单次练习计划。先核对任务、
 profile 与真实 smoke 状态，返回批次 ID、run_id、配置和预算，暂不启动模型。
 ```
 
-确认具体计划后，可以继续指示“执行该计划中的 T01 一次，完成收卷、独立验收并返回报告”。管理 Agent 调用 controller；被测 CLI 只收到冻结的公开任务资料。本使用文档属于管理资料，现有 `docs/development_benchmark_*.md` 投影规则会将它排除在被测任务包之外。
+确认具体计划后，可以继续指示“执行该计划中的 T01 一次，完成收卷、独立验收并返回报告”。管理 Agent 调用 controller；被测 CLI 只收到冻结的公开任务资料。本使用文档属于管理资料，现有 `docs/devbench/**` 投影规则（历史起点为 `docs/development_benchmark_*.md`）会将它排除在被测任务包之外。
 
 ## 3. 检查配置，生成计划
 
@@ -129,6 +137,35 @@ DB_JOBS=/home/ubuntu/.local/share/ise-devbench/runtime/jobs
 `--network proxied` 表示开发容器只在按运行的 docker 内部网络里，真实凭据留在宿主代理进程；
 `--credential-mode scoped` + `--network bridge` 是旧的直连方式（凭据副本进沙箱，只能标 local-practice）。
 正式隔离批次只接受 proxied。
+
+### 4.2 从操作台操作（P3-F，console-v1）
+
+操作台是 controller 里的网页前端（`python -m devbench console`），无凭据进程、只绑 `127.0.0.1:8765`，
+远程用 `ssh -L 8765:127.0.0.1:8765 <主机>`。它把本文的命令变成页面动作，每条写命令连同等价终端命令
+记到 `runtime/console/commands.jsonl`；终端始终是完整的备用路径。
+
+```bash
+cd /home/ubuntu/.local/share/ise-devbench/controller
+"$DB_PY" -m devbench console                          # 终端调试；页面顶栏会标"凭据可读，未隔离"
+bash management/systemd/system/install.sh             # 正式：系统级单元 ise-devbench-console.service（凭据不可达、不进 docker 组、只允许回环）
+```
+
+页面与动作：
+
+| 页面 | 能做什么 | 对应命令 |
+|---|---|---|
+| 总览 | 服务存活、队列与失败任务（可重新入队收尾）、进行中运行、批次、配置就绪（未验证 smoke 的 profile 标红并给终端命令） | `batch resume` |
+| 发起 | 登记（选 suite 与任务子集；按 profile 组合参测配置，每个参数带说明；「组合新 profile」面板按 CLI / 版本 / 模型 / effort 下拉生成预填的 smoke 终端命令并轮询 profiles/，操作台不写 profile）→ 冻结（approver/approval-reference 人填）→ 预登记 → 逐 run 授权状态（缺失时给预填的 `auth grant` 终端命令并轮询）→ 九项前置检查 → 写入 launch 请求 | `batch register --tasks/freeze/preregister`、`tools/smoke_cli.py --effort`（终端）、`batch execute --execute --enqueue-launch --requested-by console:<operator>` |
+| 运行 | 时间线、监督与网络、日志证物盒（按字节范围只读）、停止、重新入队、结果、验收点、费用/token/时间（缺失 `null`）、evaluations、证据、提交清单、报告重生成 | `agent stop`、`batch resume`、`report` |
+| 批次 | 口径与状态、计划矩阵、榜单、验收点热力表（共同失败用例红框并引导 `batch gap`）、成本对比、台账、登记表单、统一重评、发布 | `aggregate --leaderboards`、`batch outcome/backfill/intervention/claim/gap/revise`、`batch resume --regrade`、`publish` |
+| 评审 | 评审包（`summary.html` 在 sandbox iframe）、人填评分表 → 录入（`recording_source=human_direct`）、争议 | `review prepare/record/dispute` |
+| 纠错 | 预览、反馈、派生、授权提示、经队列启动、状态 | `correction preview/feedback/derive/launch --enqueue-launch/status` |
+| 比较发布 | 选批次比较（不同口径默认拒绝；确认后只出暂定、不含名次）、发布包预览 | `compare`、`publish` |
+| 维护 | smoke 记录、profile/suite/任务/rubric 版本与锁、清理预览、延长保留、审计日志 | `smoke status`、`retention cleanup`（不带 `--execute`）、`retention extend` |
+
+**页面没有入口的动作**（仍只在操作者终端）：`auth grant`、`smoke` 的执行、`batch execute --credentials-from-host/--secrets-env/--detach`、`batch resume --inline`、`retention cleanup --execute`。
+候选 stdout/stderr、evidence 文本与清单在页面里只作文本显示，带"候选产物，不可信"横幅，不识别链接、不渲染 HTML。
+实现记录见 controller `docs/p3f-summary.md`，视觉方案见 controller `docs/console-design.md`。
 
 ## 5. 查看进度或停止
 
@@ -233,7 +270,7 @@ DB_JOBS=/home/ubuntu/.local/share/ise-devbench/runtime/jobs
 2. 做安装探测与 profile 检查，再为新摘要完成真实 smoke。安装探测的入口是 `agent probe --kind pi --executable <实际路径>`，只证明安装可探测。
 3. 用新配置登记、冻结批次并预登记全部运行，再按计划执行。不要修改旧批次内已冻结的配置。
 
-smoke 工具是 `tools/smoke_cli.py`，支持 `--cli {pi,codex,claude}`、`--model`、`--cli-version`、`--network {proxied,bridge}`。它即使不传 `--execute` 也会暂存 CLI 并写出 profile；只查看验证状态应使用 `smoke status/check`。三个 CLI 都已在 `proxied` 网络（内部网络 + 宿主凭据代理）下完成真实 smoke，profile 分别为 `pi-opencode-go`、`codex-chatgpt`、`claude-oauth`（见 [三障碍解除设计](development_benchmark_isolation_launcher.md)）。
+smoke 工具是 `tools/smoke_cli.py`，支持 `--cli {pi,codex,claude}`、`--model`、`--cli-version`、`--network {proxied,bridge}`。它即使不传 `--execute` 也会暂存 CLI 并写出 profile；只查看验证状态应使用 `smoke status/check`。三个 CLI 都已在 `proxied` 网络（内部网络 + 宿主凭据代理）下完成真实 smoke，profile 分别为 `pi-opencode-go`、`codex-chatgpt`、`claude-oauth`（见 [三障碍解除设计](isolation_launcher.md)）。
 
 每配置每题重复 3 次的 pilot、多配置登记和补跑规则见 [批次操作说明](/home/ubuntu/.local/share/ise-devbench/controller/docs/p3b-summary.md)。通用 `batch execute` 当前提供 `--secrets-env`，没有文件凭据参数；pi 快捷入口通过内部接口注入凭据，不能直接把它的命令改成其他 CLI 名称使用。
 
@@ -266,4 +303,4 @@ smoke 工具是 `tools/smoke_cli.py`，支持 `--cli {pi,codex,claude}`、`--mod
 "$DB_PY" tools/accept_c05.py
 ```
 
-更多背景与维护入口：[实施任务清单](../plan.md)、[系统设计](development_benchmark_system_analysis.md)、[后台执行器设计](development_benchmark_background_executor.md)、[C05 验证说明](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md)、[P3-C/D 实现记录](/home/ubuntu/.local/share/ise-devbench/controller/docs/p3cd-summary.md)。
+更多背景与维护入口：[实施任务清单](../../plan.md)、[系统设计](system_analysis.md)、[后台执行器设计](background_executor.md)、[C05 验证说明](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md)、[P3-C/D 实现记录](/home/ubuntu/.local/share/ise-devbench/controller/docs/p3cd-summary.md)。

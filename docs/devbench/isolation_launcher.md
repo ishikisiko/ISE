@@ -2,7 +2,7 @@
 
 > 状态：已实现并真实验证（2026-09-08，controller `devbench/credproxy.py`、`manage/credentials.py`、`launcher.py`、`jobs.py`、`tools/smoke_cli.py`、`management/systemd/system/`）。验证结果见第 6 节，未达成事项见第 7 节。
 > 日期：2026-09-08。设计版本：`isolation-launcher-v1`，对应 `background-executor-v1` 与 `cli-orchestration-v1`。
-> 上位文档：[后台执行器设计](development_benchmark_background_executor.md)、[CLI 调度设计](development_benchmark_cli_orchestration.md)、[系统分析](development_benchmark_system_analysis.md)、[操作说明](development_benchmark_usage.md)、[实施计划](../plan.md)。
+> 上位文档：[后台执行器设计](background_executor.md)、[CLI 调度设计](cli_orchestration.md)、[系统分析](system_analysis.md)、[操作说明](usage.md)、[实施计划](../../plan.md)。
 > 出题方私有资料，不进入被测工作区。
 
 ## 1. 要解决的三条障碍

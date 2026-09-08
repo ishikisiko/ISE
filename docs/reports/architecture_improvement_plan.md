@@ -1,6 +1,6 @@
 # 架构改进方案：把"门控"建立在可验证的信号上
 
-> 关联文档：`docs/failure-analysis-tavily-firecrawl-brightdata-comparison.md`（症状级分析）
+> 关联文档：`docs/reports/failure_analysis_tavily_firecrawl_brightdata.md`（症状级分析）
 >
 > 本文档是对该故障分析的**架构级**改进方案，取代其中 §7 的 P0/P1 表面修补。
 >

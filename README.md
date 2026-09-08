@@ -115,10 +115,11 @@ Global ceiling: `max_iterations = 8`.
 ### Deeper references
 
 - [System_Architecture.md](System_Architecture.md) — full mermaid architecture diagrams
+- [docs/README.md](docs/README.md) — index of all docs (top-level references, guides, devbench design, reports)
 - [docs/query_execution_paths.md](docs/query_execution_paths.md) — contract boundary & path map
 - [docs/agentic_loop_roadmap.md](docs/agentic_loop_roadmap.md) — loop evolution & target architecture
-- [docs/development_benchmark_usage.md](docs/development_benchmark_usage.md) - development benchmark quick start, execution, progress, reports, and optional review
-- [docs/development_benchmark_system_analysis.md](docs/development_benchmark_system_analysis.md) - coding-model benchmark design, isolation, grading, and candidate tasks (draft)
+- [docs/devbench/usage.md](docs/devbench/usage.md) - development benchmark quick start, execution, progress, reports, and optional review
+- [docs/devbench/system_analysis.md](docs/devbench/system_analysis.md) - coding-model benchmark design, isolation, grading, and candidate tasks (draft)
 - [plan.md](plan.md) - two-task benchmark delivery checklist; optional experiments, task expansion, and release work at the end
 
 ## Installation
@@ -236,14 +237,14 @@ stateless single-turn behaviour).
 ## Observability
 
 Durable server logs and audit trails are configurable via the `audit` and
-`server_logging` blocks — see **[docs/server_logging.md](docs/server_logging.md)**
+`server_logging` blocks — see **[docs/guides/server_logging.md](docs/guides/server_logging.md)**
 for the schema and the `runtime/` file layout.
 
 ## Evaluation
 
 Retrieval-quality metrics (Hit@k, MRR, answer groundedness, …) are computed
 via `tests/search_quality_pipeline.py` — see
-**[docs/search_quality_evaluation.md](docs/search_quality_evaluation.md)** for
+**[docs/guides/search_quality_evaluation.md](docs/guides/search_quality_evaluation.md)** for
 the collect → annotate → evaluate workflow and regression scripts.
 
 ## Testing

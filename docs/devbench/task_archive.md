@@ -1,11 +1,11 @@
 # ISE 开发评测任务历史明细
 
-> 2026-09-06 保存的旧版完整清单，仅用于追溯任务 ID、验收证据与范围调整。当前待办和优先级以 [plan.md](../plan.md) 为准；下文的“当前”“必做”等表述均属于保存时的旧版计划。
+> 2026-09-06 保存的旧版完整清单，仅用于追溯任务 ID、验收证据与范围调整。当前待办和优先级以 [plan.md](../../plan.md) 为准；下文的“当前”“必做”等表述均属于保存时的旧版计划。
 
 > 当前状态：T01/T02 两题、执行评分闭环、人工评审与批次比较机制已交付（P0–P3-B）；主线剩余 P3-C05：使用说明与报告复核。纠错实验、扩题、实际 pilot 和正式成绩发布统一放在文末可选部分。
 > 验证范围：pi 0.85.0 已完成真实 smoke 与一次 T01 全链路；Codex/Claude 未真实验证，`isolated-formal` 未达成，尚无 pilot 排名或真人评分。
 > 创建日期：2026-09-05；范围精简：2026-09-06（PLAN-SLIM-01）。
-> 设计依据：[系统分析](development_benchmark_system_analysis.md) · [P0 决策](development_benchmark_p0_decisions.md) · [CLI 调度设计](development_benchmark_cli_orchestration.md)。
+> 设计依据：[系统分析](system_analysis.md) · [P0 决策](p0_decisions.md) · [CLI 调度设计](cli_orchestration.md)。
 > 本计划含起点、参考提交和裁判资料，必须从被测 Agent 的公开任务包中排除。
 
 ## 首版范围与使用规则
@@ -72,8 +72,8 @@ P0 已完成的是设计决策，不是实际部署。P0-07/P0-08 按用户本�
 
 ## P1. 两题准备与准入
 
-依据：[参考实现与准入](development_benchmark_system_analysis.md#task-qualification)、
-[候选任务](development_benchmark_system_analysis.md#candidate-tasks)。
+依据：[参考实现与准入](system_analysis.md#task-qualification)、
+[候选任务](system_analysis.md#candidate-tasks)。
 
 ### P1-A. 公共准备
 
@@ -146,10 +146,10 @@ P0 已完成的是设计决策，不是实际部署。P0-07/P0-08 按用户本�
 
 ## P2. 最小执行与评分闭环
 
-依据：[信任边界](development_benchmark_system_analysis.md#trust-boundaries)、
-[分支设计](development_benchmark_system_analysis.md#branch-design)、
-[自动验收](development_benchmark_system_analysis.md#verification)、
-[运行接口](development_benchmark_system_analysis.md#run-protocol)。
+依据：[信任边界](system_analysis.md#trust-boundaries)、
+[分支设计](system_analysis.md#branch-design)、
+[自动验收](system_analysis.md#verification)、
+[运行接口](system_analysis.md#run-protocol)。
 
 ### P2-A. 数据契约与控制底座
 
@@ -229,8 +229,8 @@ P0 已完成的是设计决策，不是实际部署。P0-07/P0-08 按用户本�
 
 ### P2-H. 管理 Agent、CLI 适配器与作业监督
 
-依据：[CLI 适配契约](development_benchmark_cli_orchestration.md#adapter-contract)、
-[生命周期](development_benchmark_cli_orchestration.md#lifecycle)。本节先完成离线实现，真实模型 smoke 见 P3-B11。
+依据：[CLI 适配契约](cli_orchestration.md#adapter-contract)、
+[生命周期](cli_orchestration.md#lifecycle)。本节先完成离线实现，真实模型 smoke 见 P3-B11。
 
 - [x] P2-H01 实现 profile/launch manifest schema，记录 CLI 版本/安装摘要、模型设置、公开 prompt、认证引用与授权；未冻结配置拒绝正式启动。证据：P2FGH-01，`profile check` 拒 draft/UNSET/未支持版本，示例 `profiles/pi-local.yaml`。
 - [x] P2-H02 实现离线 `agent probe`，核对安装、帮助参数和支持版本；不读取/打印 auth，不把探测成功当成模型可用。证据：P2FGH-01，三假 CLI 探测 + 恒标注。
@@ -256,7 +256,7 @@ P2 离线验收完成后仍须如实标注各 CLI 的 live smoke 状态，未验
 
 ## P3. 人工评审与批次比较机制
 
-依据：[评分口径](development_benchmark_system_analysis.md#scoring)、系统分析第 4、11、12 章。
+依据：[评分口径](system_analysis.md#scoring)、系统分析第 4、11、12 章。
 
 ### P3-A. 人工评审
 
@@ -476,7 +476,7 @@ env1 全自测 403 通过。9 个 shell 块、16 条命令参数及 5 个只读�
 
 2026-09-08，P3-E（三障碍解除）：凭据代理 + 按运行内部网络、launch 队列与 systemd launcher、系统级隔离 worker 均已实现并真实验证。
 pi/Claude Code/Codex 三 CLI 经代理 smoke 全过；worker 单元内读不到凭据；无凭据进程发起的 T01 全链路补跑 PASS 100（`practice-20260908-launcher-pi-oc-t01-r1-b1`，首次 r1 因重启 launcher 被打断，已按 harness_error 归因）。
-controller 自测 445 通过。逐项数据见 [P3-E 总结](/home/ubuntu/.local/share/ise-devbench/controller/docs/p3e-summary.md)，设计见 [三障碍解除设计](development_benchmark_isolation_launcher.md)。
+controller 自测 445 通过。逐项数据见 [P3-E 总结](/home/ubuntu/.local/share/ise-devbench/controller/docs/p3e-summary.md)，设计见 [三障碍解除设计](isolation_launcher.md)。
 本次未开设 `isolated-formal` 批次，无正式排名或真人评分。
 
 2026-09-08，P3-E07 首个 `isolated-formal` 批次 `formal-20260908`：用户指定 pi+glm-5.3 对 Claude Code+opus-5，T01/T02 各 1 次，全部经凭据代理内部网络、launcher 启动、隔离 worker 收尾。
@@ -485,3 +485,11 @@ T01 双 PASS 100；pi T02 FAIL 45；Claude T02 INVALID（裁判缺陷）。批�
 
 2026-09-08（续），T02-GRADER-02：经用户批准修订 T02 裁判（只解析 checker stdout 最后一行 JSON，契约不变）为 1.0.2，suite ise-v1 升 1.0.1 并加锁加标签；六树资格与基线一致；`formal-20260908` 登记批次修订并对两场 T02 统一重评（pi FAIL 45、Claude FAIL 60），不重跑模型。
 批次完整、正式排名就绪（重复 1、无真人评分、未发布）；P3-E07/E09 勾选。
+
+2026-09-08，P3-F 操作台 console-v1：controller `devbench/console/`（Flask + 原生 ES2015，无外部资源），无凭据进程、只绑回环、token 与 Origin/Host 校验、静态命令白名单与审计；
+总览、发起向导、运行详情、批次分析（矩阵/榜单/验收点热力表/成本/台账/表单/发布）、评审、纠错、比较发布、维护八页；视觉按 `frontend-design` skill 两段式（controller `docs/console-design.md`），图形按 `dataviz`。
+后端补缺 `regrade` 任务种类、`correction launch --enqueue-launch`、`console.json`、`ise-devbench-console.service`。自测 28 项，controller 全量 489。
+未做：P3-F11 真实验证（需授权与计费）与单元的 `sudo` 安装。记录见 controller `docs/p3f-summary.md`。
+
+2026-09-08，P4 T04/T03 扩题：先交付 [ISE 两轮真实自主度报告](../reports/autonomy_evaluation_20260908/report.md)，再完成题目适用性分析、公开契约、历史净化起点、参考/替代实现、四类错误对照与独立行为裁判。两题各 7 树 × 3 次干净容器资格全部符合预登记结果，共 42 次；参考与替代均 PASS 100，base/错误对照均 FAIL。控制器回归 493 通过。
+新四题文件 `suites/ise-v1-expanded.yaml` 为 `ise-v1@1.1.0`，T04/T03 1.0.0，旧两题 entry、清单/锁/标签与成绩不覆盖；新增 suite 选择与批次快照传递、公开任务附件摘要校验。实际无模型领题/容器可见性检查通过，12 条合成计划没有启动模型。Q1 为同一执行者的独立行为裁判/替代性复核，不是第二评审者签字或真人分；网页默认仍为旧两题，四题版经 CLI 选择。详见[任务二交付](expansion_20260908.md)。

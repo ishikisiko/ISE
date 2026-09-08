@@ -5,10 +5,10 @@
 > 本轮核对的 ISE HEAD：`2a1445cda0c50ec36829daa8f10909cf5d4253d6`。
 > 本文包含候选题起点、历史参考提交和裁判策略，属于出题方资料，不能直接放进被测 Agent 的任务工作区。
 
-线性任务清单、原任务 ID 与当前勾选状态见 [plan.md](../plan.md)，详细说明与验收记录见[任务历史明细](development_benchmark_task_archive.md)。本分析记录设计依据，历史记录不作为新增待办。
-2026-09-06 范围精简：首版交付 T01/T02 的按需执行、独立评分与报告工具；实际 pilot、真人加分、纠错实验、扩题和成绩发布均按需启动，任务集中在[计划末尾可选部分](../plan.md#optional-work)。已实现的评审与批次机制保留，验证与正式排名门槛不因范围精简而降低。
-P0 的部署、自由 CLI 接入、预算与轻量评审决定见 [P0 决策记录](development_benchmark_p0_decisions.md)。
-默认管理入口、Codex/pi/Claude 调研和启动器契约见 [管理 Agent 与 CLI 调度设计](development_benchmark_cli_orchestration.md)。
+线性任务清单、原任务 ID 与当前勾选状态见 [plan.md](../../plan.md)，详细说明与验收记录见[任务历史明细](task_archive.md)。本分析记录设计依据，历史记录不作为新增待办。
+2026-09-06 范围精简：首版交付 T01/T02 的按需执行、独立评分与报告工具；实际 pilot、真人加分、纠错实验、扩题和成绩发布均按需启动，任务集中在[计划末尾可选部分](../../plan.md#optional-work)。已实现的评审与批次机制保留，验证与正式排名门槛不因范围精简而降低。
+P0 的部署、自由 CLI 接入、预算与轻量评审决定见 [P0 决策记录](p0_decisions.md)。
+默认管理入口、Codex/pi/Claude 调研和启动器契约见 [管理 Agent 与 CLI 调度设计](cli_orchestration.md)。
 
 ## 阅读导航
 
@@ -108,18 +108,18 @@ ISE 内部模型调用、搜索响应、时间、数据库初态等应由确定�
 
 | 资产 | 位置 | 在开发 Benchmark 中的用途 |
 |---|---|---|
-| 项目运行入口 | [main.py](../main.py)、[server.py](../server.py) | 真实入口与跨入口一致性验收 |
-| 单一 Agentic Loop | [react_loop_graph.py](../orchestrators/react_loop_graph.py) | 状态、工具执行、预算、取消与压缩任务 |
-| Skill 契约与注册器 | [contracts.py](../skills/contracts.py)、[registry.py](../skills/registry.py) | 架构扩展题的既有约束 |
-| 会话存储 | [conversation_store.py](../orchestrators/conversation_store.py) | 历史、导出、恢复和隔离验证 |
-| 引用与证据 | [citation_check.py](../evidence/citation_check.py)、[ledger.py](../evidence/ledger.py) | 局部诊断及证据不变量 |
-| 脚本化模型 | [test_context_compaction.py](../tests/test_context_compaction.py) | 固定应用内部模型行为的已有示例 |
-| 自动化测试 | [tests/](../tests/) | 回归资产与夹具来源，不能未经检查直接成为裁判 |
-| 环境定义 | [environment.yml](../environment.yml)、[requirements-lock.txt](../requirements-lock.txt) | 构建冻结的 `env1` 运行镜像 |
+| 项目运行入口 | [main.py](../../main.py)、[server.py](../../server.py) | 真实入口与跨入口一致性验收 |
+| 单一 Agentic Loop | [react_loop_graph.py](../../orchestrators/react_loop_graph.py) | 状态、工具执行、预算、取消与压缩任务 |
+| Skill 契约与注册器 | [contracts.py](../../skills/contracts.py)、[registry.py](../../skills/registry.py) | 架构扩展题的既有约束 |
+| 会话存储 | [conversation_store.py](../../orchestrators/conversation_store.py) | 历史、导出、恢复和隔离验证 |
+| 引用与证据 | [citation_check.py](../../evidence/citation_check.py)、[ledger.py](../../evidence/ledger.py) | 局部诊断及证据不变量 |
+| 脚本化模型 | [test_context_compaction.py](../../tests/test_context_compaction.py) | 固定应用内部模型行为的已有示例 |
+| 自动化测试 | [tests/](../../tests) | 回归资产与夹具来源，不能未经检查直接成为裁判 |
+| 环境定义 | [environment.yml](../../environment.yml)、[requirements-lock.txt](../../requirements-lock.txt) | 构建冻结的 `env1` 运行镜像 |
 | 历史规格与提交 | `openspec/`、Git 历史 | 出题方梳理行为及制作参考实现 |
 
-现有 [baseline_runner.py](../tests/baseline_runner.py) 和
-[搜索质量评测](search_quality_evaluation.md) 针对运行中的 ISE。新的 `devbench` 不应混用这些结果作为开发分数，
+现有 [baseline_runner.py](../../tests/baseline_runner.py) 和
+[搜索质量评测](../guides/search_quality_evaluation.md) 针对运行中的 ISE。新的 `devbench` 不应混用这些结果作为开发分数，
 最多复用通用的结果记录思路。
 
 ### 3.2 不可直接继承的假设
@@ -270,7 +270,7 @@ ISE 保持正常开发，本文及公开方法说明可以放在 ISE 文档目�
 
 上述分支均未创建。“同一个 Unix 用户下换个目录”不能满足私有区域不可访问的要求。
 P0 已选定同机私有存储加受限容器的首版方案，路径、可信主体及分支归属见
-[部署决策](development_benchmark_p0_decisions.md#storage)，实际部署仍属于 P1/P2。
+[部署决策](p0_decisions.md#storage)，实际部署仍属于 P1/P2。
 
 不在可供 Agent clone 的远端同时发布 base 与 reference。删除 reference 分支也不等于删除其对象、reflog、
 stash、其他标签或归档中的答案。
@@ -580,7 +580,7 @@ reliability_score = 100 * mean(task_reliability over the frozen task set)
 辅助指标的唯一实现。被补跑替代的设施无效运行移出分母并保留原记录；缺结果、未补齐的设施无效或
 有效次数少于预登记次数，任一出现即 `provisional` 且不给正式排名。小样本解释是封闭词表
 （`insufficient_repeats`/`overlapping_results`/`provisional_inputs`/`screening_signal`），
-不产生显著性、能力强弱或通用 LLM 排名的表述。详见[任务历史明细 P3-B](development_benchmark_task_archive.md) 与私有
+不产生显著性、能力强弱或通用 LLM 排名的表述。详见[任务历史明细 P3-B](task_archive.md) 与私有
 `controller/docs/p3b-summary.md`。
 
 ## 11. 人工评审与加分
@@ -626,7 +626,7 @@ PASS 后用户可直接跳过，或填写三个分项、短理由和已有证据
 
 P1 的题目资格复核由项目维护者负责最终验收，不能由同一参考作者自行签署；个人加分由用户或其指定者按需完成。
 报告内容须转义并禁用候选注入的脚本/外链；候选应用预览保持隔离。
-具体角色、操作与保留政策见 [轻量评审决策](development_benchmark_p0_decisions.md#review)。
+具体角色、操作与保留政策见 [轻量评审决策](p0_decisions.md#review)。
 
 <a id="run-protocol"></a>
 
@@ -634,7 +634,7 @@ P1 的题目资格复核由项目维护者负责最终验收，不能由同一�
 争议复核与保留策略。实际录入采用 review schema v2，绑定评估内容与 rubric 摘要、
 真实评分人和代录来源；首版 rubric `manual-v1` 覆盖 T01/T02 1.0.1。
 报告生成不再把未评分运行标为 REVIEWED，重评后旧分要求重新确认。
-验收与空表不代表真人评分完成；详见[任务历史明细 P3-A](development_benchmark_task_archive.md) 及私有 `controller/docs/p3a-summary.md`。
+验收与空表不代表真人评分完成；详见[任务历史明细 P3-A](task_archive.md) 及私有 `controller/docs/p3a-summary.md`。
 
 ## 12. 运行状态、产物与命令接口
 
@@ -652,7 +652,7 @@ PREPARED -> RUNNING -> SUBMITTED -> GRADING -> GRADED
 本地练习中不能停止外部 CLI 的情况如实记录，不声称开发配额已经被强制执行。
 `managed-cli` 的监督器独立持久运行；管理会话结束不取消计时。启动前不兼容/未授权记为 LAUNCH_REJECTED，
 启动后故障保留运行记录并按统一规则归因；CLI 退出码或“完成”事件不能直接生成 PASS。
-具体进程、事件、恢复与停止协议见 [CLI 生命周期](development_benchmark_cli_orchestration.md#lifecycle)。
+具体进程、事件、恢复与停止协议见 [CLI 生命周期](cli_orchestration.md#lifecycle)。
 状态迁移和时间戳由控制区记录，不能接受候选工作区写入的“完成”文件作为唯一证据。
 报告是对已保存事实的投影，重复生成不能修改原始 run、submission、evaluation 或 review。
 
@@ -1019,7 +1019,7 @@ Benchmark 代码也需要测试，不能只测试候选 ISE。
 
 ## 16. 推进顺序与退出条件
 
-首版主线以两题工具交付为止；实际开展模型评测是使用行为，不是工具交付的前置条件。下表保留阶段设计；P3-C05 使用说明与报告复核已于 2026-09-06 完成，首版主线关闭，详见 [plan.md](../plan.md#core-closeout) 与[验收记录](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md)。原任务 ID 和历史证据见[任务历史明细](development_benchmark_task_archive.md)。
+首版主线以两题工具交付为止；实际开展模型评测是使用行为，不是工具交付的前置条件。下表保留阶段设计；P3-C05 使用说明与报告复核已于 2026-09-06 完成，首版主线关闭，详见 [plan.md](../../plan.md#core-closeout) 与[验收记录](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md)。原任务 ID 和历史证据见[任务历史明细](task_archive.md)。
 
 | 阶段 | 工作 | 退出条件 |
 |---|---|---|
@@ -1029,7 +1029,7 @@ Benchmark 代码也需要测试，不能只测试候选 ISE。
 | P3-A/B 评审与比较机制 | review schema、个人分录入、批次预登记、aggregate/compare | 加分可审计；不同轨道、版本和缺失结果不会混排；不要求实际组织 pilot 或填入真人分 |
 | P3 收尾（P3-C05） | 使用说明与报告复核 | 现有命令组成可复跑的操作链；报告重生成不改原始提交、验收与评审记录 |
 
-下列工作统一进入[可选事项](../plan.md#optional-work)，无须按阶段编号全部实施：
+下列工作统一进入[可选事项](../../plan.md#optional-work)，无须按阶段编号全部实施：
 
 | 可选工作 | 何时启动 | 选用后的约束 |
 |---|---|---|
@@ -1064,7 +1064,7 @@ Benchmark 代码也需要测试，不能只测试候选 ISE。
 | 固定 mock 导致只会应付单一脚本 | 多场景与隐藏变体，公开协议而不公开全部答案 | 不替代真实系统质量实测 |
 | 分数高但用户仍不省心 | 同列可靠性、回归、救场、验证真实性与成本 | 实际合作体验还需日常使用验证 |
 
-P0 已确定位置、责任、首版预算、计分和评审政策，详见 [决策记录](development_benchmark_p0_decisions.md)。
+P0 已确定位置、责任、首版预算、计分和评审政策，详见 [决策记录](p0_decisions.md)。
 选择正式发布成绩时须核对以下实施验证，具体完成状态见计划中的最新证据；这些门槛不因发布工作移至可选部分而取消：
 
 1. 按决定部署私有区域并实际验证容器、网络、权限、资源和秘密边界。
@@ -1080,16 +1080,16 @@ P0 已确定位置、责任、首版预算、计分和评审政策，详见 [决
 设计阶段核对了仓库文件、已有测试结构和历史提交身份，P0 补充了本机能力检查；
 没有执行参考资格验证、创建基准分支或运行被测模型。
 管理调度设计另核对了三者官方文档、本地 `--help`/`--version`，详情与来源见
-[CLI 调研记录](development_benchmark_cli_orchestration.md#cli-evidence)，没有把资料核对计为真实执行通过。
+[CLI 调研记录](cli_orchestration.md#cli-evidence)，没有把资料核对计为真实执行通过。
 本文的基础分权重、接口、目录和候选任务详细契约均为设计，不是已经存在的程序能力。
 
 项目内依据：
 
-- [项目规则](../AGENTS.md)、[环境定义](../environment.yml)、[精确依赖快照](../requirements-lock.txt)。
-- [Agentic Loop 路线与不变量](agentic_loop_roadmap.md)、[当前架构](architecture.md)。
-- [引用检查测试](../tests/test_citation_check.py)、[会话恢复测试](../tests/test_conversation_resume.py)。
-- [取消测试](../tests/test_loop_cancellation.py)、[压缩测试](../tests/test_context_compaction.py)。
-- [Skill 注册器](../skills/registry.py)、[自主度配置测试](../tests/test_autonomy_policy.py)。
+- [项目规则](../../AGENTS.md)、[环境定义](../../environment.yml)、[精确依赖快照](../../requirements-lock.txt)。
+- [Agentic Loop 路线与不变量](../agentic_loop_roadmap.md)、[当前架构](../architecture.md)。
+- [引用检查测试](../../tests/test_citation_check.py)、[会话恢复测试](../../tests/test_conversation_resume.py)。
+- [取消测试](../../tests/test_loop_cancellation.py)、[压缩测试](../../tests/test_context_compaction.py)。
+- [Skill 注册器](../../skills/registry.py)、[自主度配置测试](../../tests/test_autonomy_policy.py)。
 
 外部方法参考，不是本系统的硬依赖或可直接借用的模型分数：
 
