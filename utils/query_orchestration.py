@@ -128,7 +128,7 @@ DEFAULT_TERMINATION_CONFIG: Dict[str, Any] = {
     "no_progress_threshold": 2,
     "tool_error_threshold": 2,
     "new_evidence_min_ratio": 0.1,
-    # Phase 1 architecture fix (see docs/architecture-improvement-plan.md):
+    # Phase 1 architecture fix (see docs/reports/architecture_improvement_plan.md):
     # comparison-member *completeness* can be advisory rather than a hard
     # blocking gate, and the loop must degrade to a grounded synthesis when it
     # exhausts with real evidence instead of returning an empty answer.
@@ -174,6 +174,17 @@ TEMPORAL_ENTITY_TRAILING_RE = re.compile(
     re.IGNORECASE,
 )
 ENTITY_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
+
+# Cues that mark a query as being *about a brand/product* (pricing, docs, an
+# official site ...). Only then may a plain lowercase token be treated as a
+# brand typed in lowercase; see ``_extract_brand_candidates``.
+_BRAND_CONTEXT_CUE_RE = re.compile(
+    r"(?:\b(?:pricing|price|prices|cost|costs|docs?|documentation|api|sdk|"
+    r"official|download|login|signup|changelog|release|releases|version|"
+    r"versions|homepage|website)\b"
+    r"|官网|官方|价格|定价|收费|文档|下载|登录|注册|发布|版本|主页)",
+    re.IGNORECASE,
+)
 
 # Generic tokens that carry no entity signal. Used to keep brand names (e.g.
 # "OpenAI", "GLM") in the fallback search query after stripping intent cues.
@@ -403,25 +414,42 @@ def _extract_brand_candidates(query: str) -> List[str]:
     comparison members or version-bearing model tokens, so non-comparison
     queries about a brand ("anthropic claude pricing") came back entity-less
     and official-domain recognition had nothing to bind to. These candidates
-    feed the official-domain resolver, which verifies them independently, so
-    recall is preferred here and false positives are cheap: they simply fail
-    to verify and the tier stays ``unknown``.
+    feed the official-domain resolver, which verifies them independently.
+    False positives are *not* free, though: every candidate that reaches the
+    resolver spends discovery searches, so plain words are only admitted when
+    the query itself signals a brand context.
     """
     candidates: List[str] = []
-    for token in ENTITY_TOKEN_RE.findall(query):
+    brand_context = bool(_BRAND_CONTEXT_CUE_RE.search(query))
+    for match in ENTITY_TOKEN_RE.finditer(query):
+        token = match.group(0)
         if len(token) < 2:
             continue
         lowered = token.casefold()
         if lowered in _QUERY_SUBJECT_STOPWORDS:
             continue
         has_digit = any(ch.isdigit() for ch in token)
-        capitalized = token[0].isupper()
-        # Accept proper-noun capitalization, versioned model tokens, or a long
-        # lowercase alphabetic run (brand typed lowercase). Short lowercase
-        # tokens are too ambiguous (e.g. "an", "or") and are skipped.
-        if has_digit or capitalized or (len(lowered) >= 4 and token.isalpha()):
+        mixed_case = token[0].isupper() and any(ch.isupper() for ch in token[1:])
+        # Sentence-initial capitalization is grammar, not a proper noun:
+        # "Explain how ..." / "Compare ...". Mixed-case tokens (OpenAI, CRDTs)
+        # keep their signal regardless of position.
+        capitalized = token[0].isupper() and (
+            mixed_case or not _sentence_initial(query, match.start())
+        )
+        # A lowercase alphabetic run is only accepted as a brand typed in
+        # lowercase when the query carries a brand-context cue (pricing, docs,
+        # api, 官网 ...). Without it, ordinary words such as "speed" or
+        # "including" would each trigger a paid official-domain discovery.
+        lowercase_brand = brand_context and len(lowered) >= 4 and token.isalpha()
+        if has_digit or capitalized or lowercase_brand:
             candidates.append(token)
     return _dedupe_strings(candidates, limit=8)
+
+
+def _sentence_initial(query: str, position: int) -> bool:
+    """Whether the token at ``position`` opens the query or a sentence."""
+    head = query[:position].rstrip()
+    return not head or head[-1] in ".!?。！？"
 
 
 def _extract_comparison_members(query: str) -> List[str]:

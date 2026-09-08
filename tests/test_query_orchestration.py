@@ -531,3 +531,36 @@ def test_clean_comparison_query_is_not_reconciled() -> None:
         llm_invoke=lambda p: calls.append(p) or '{"comparison_members": ["x"]}',
     )
     assert calls == []  # clean query never contacts the LLM
+
+
+# --- Brand candidates (official-domain discovery input) ---------------------
+
+
+def _entities(query: str) -> list:
+    return list(analyze_query(query, allow_search=True).entities)
+
+
+def test_plain_question_words_are_not_brand_candidates() -> None:
+    """Every entity triggers a paid official-domain discovery, so ordinary
+    words must not be promoted just because they are long and lowercase."""
+    entities = _entities("What is the speed of Earth's rotation at the equator?")
+    assert "speed" not in entities
+    assert "rotation" not in entities
+    assert "equator" not in entities
+
+
+def test_sentence_initial_capital_is_not_a_brand() -> None:
+    entities = _entities("Explain how CRDTs and operational transform fit in.")
+    assert "Explain" not in entities
+    assert "CRDTs" in entities
+
+
+def test_lowercase_brand_is_kept_with_brand_context_cue() -> None:
+    entities = _entities("anthropic claude pricing")
+    assert "anthropic" in entities and "claude" in entities
+
+
+def test_lowercase_words_without_cue_are_dropped_but_proper_nouns_stay() -> None:
+    entities = _entities("Compare managed Kubernetes on Azure for a regulated fintech")
+    assert "Kubernetes" in entities and "Azure" in entities
+    assert "managed" not in entities and "regulated" not in entities and "fintech" not in entities

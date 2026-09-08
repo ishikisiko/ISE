@@ -291,6 +291,13 @@ class ResolverConfig:
     negative_ttl_hours: int = 24
     max_discovery_searches: int = 2
     max_verification_fetches: int = 2
+    # Search voting fans every discovery query out to every provider it is
+    # handed, so the provider count multiplies the per-entity cost. Composite
+    # clients (priority / combined wrappers) are flattened first; then an
+    # optional allow-list of provider ``source_id`` values is applied and the
+    # result is capped. The default keeps only the first (primary) provider.
+    max_discovery_providers: int = 1
+    discovery_providers: tuple = ()
     structured_sources: tuple = ("wikidata", "pypi", "npm", "github")
     never_official: frozenset = _DEFAULT_NEVER_OFFICIAL
     hosting_platforms: frozenset = _DEFAULT_HOSTING_PLATFORMS
@@ -345,6 +352,15 @@ def _coerce_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return v if v > 0 else default
+
+
+def _coerce_count(value: Any, default: int) -> int:
+    """Like :func:`_coerce_int` but zero is a legal value (meaning "off")."""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return v if v >= 0 else default
 
 
 def _coerce_pins(value: Any) -> Dict[str, List[str]]:
@@ -413,6 +429,7 @@ def resolver_config_from_mapping(
         negative_ttl_hours=_coerce_int(block.get("negative_ttl_hours"), 24),
         max_discovery_searches=_coerce_int(block.get("max_discovery_searches"), 2),
         max_verification_fetches=_coerce_int(block.get("max_verification_fetches"), 2),
+        max_discovery_providers=_coerce_count(block.get("max_discovery_providers"), 1),
         aggregator_min_stems=_coerce_int(block.get("aggregator_min_stems"), 5),
         aggregator_observation_window_days=_coerce_int(
             block.get("aggregator_observation_window_days"), 30
@@ -425,6 +442,13 @@ def resolver_config_from_mapping(
     sources = block.get("structured_sources")
     if isinstance(sources, Iterable):
         cfg.structured_sources = tuple(str(s) for s in sources if str(s))
+    providers = block.get("discovery_providers")
+    if isinstance(providers, str):
+        providers = [providers]
+    if isinstance(providers, Iterable):
+        cfg.discovery_providers = tuple(
+            str(p).strip().casefold() for p in providers if str(p).strip()
+        )
     cfg.never_official = _coerce_host_table(
         block.get("never_official"), _DEFAULT_NEVER_OFFICIAL
     )
@@ -755,6 +779,103 @@ class _Cache:
             return False
 
 
+def flatten_search_clients(clients: Any) -> List[Any]:
+    """Expand composite search clients into their leaf providers.
+
+    Priority / combined wrappers expose their members as ``clients``. Voting
+    must see leaves, never wrappers: a combined wrapper counts as one
+    "provider" while silently fanning each query out to every member.
+    """
+    leaves: List[Any] = []
+    seen: set = set()
+
+    def visit(client: Any) -> None:
+        if client is None or id(client) in seen:
+            return
+        seen.add(id(client))
+        members = getattr(client, "clients", None)
+        if isinstance(members, (list, tuple)) and members:
+            for member in members:
+                visit(member)
+            return
+        leaves.append(client)
+
+    if isinstance(clients, (list, tuple)):
+        for client in clients:
+            visit(client)
+    elif clients is not None:
+        visit(clients)
+    return leaves
+
+
+def select_discovery_clients(
+    clients: Any,
+    *,
+    max_providers: int = 1,
+    allowed_sources: Sequence[str] = (),
+) -> List[Any]:
+    """Pick the leaf providers search voting may consult.
+
+    ``allowed_sources`` (provider ``source_id`` values) selects by name and
+    preserves the allow-list order; otherwise positional order wins. The
+    result is capped at ``max_providers`` (``<= 0`` disables voting).
+    """
+    leaves = flatten_search_clients(clients)
+    if allowed_sources:
+        wanted = [str(v).strip().casefold() for v in allowed_sources if str(v).strip()]
+        by_source: Dict[str, Any] = {}
+        for client in leaves:
+            source = str(getattr(client, "source_id", "") or "").casefold()
+            by_source.setdefault(source, client)
+        leaves = [by_source[name] for name in wanted if name in by_source]
+    cap = int(max_providers)
+    if cap <= 0:
+        return []
+    return leaves[:cap]
+
+
+_MAX_RESOLVABLE_WORDS = 5
+_MAX_RESOLVABLE_CHARS = 60
+# Brackets / quotes never belong to a name; fullwidth punctuation is always
+# sentence structure; ASCII punctuation is sentence structure only when it
+# closes a token (``fit in.``, ``costs, and``) -- inside a token it is part of
+# a name or version (``Next.js``, ``kimik2.7code``, ``glm-4.5``).
+_BRACKET_RE = re.compile(r"[()\[\]{}<>《》「」【】\"“”]")
+_FULLWIDTH_PUNCT_RE = re.compile(r"[，。；：！？、]")
+_TOKEN_CLOSING_PUNCT_RE = re.compile(r"[.,;:!?](?=\s|$)")
+
+
+def looks_resolvable_label(value: Any) -> bool:
+    """Whether a label is name-shaped enough to justify network discovery.
+
+    Entity extraction favors recall, so sentence fragments and phrases leak
+    through. Each discovery costs real search-provider quota, so anything that
+    cannot plausibly name a product, project, or organisation is refused
+    before the first request: over-long phrases, bracketed text, and
+    fragments carrying sentence punctuation. A trailing dot is tolerated only
+    for abbreviation-style names such as "Acme Inc.".
+    """
+    label = str(value or "").strip()
+    if not label:
+        return False
+    if len(label) > _MAX_RESOLVABLE_CHARS:
+        return False
+    words = label.split()
+    if len(words) > _MAX_RESOLVABLE_WORDS:
+        return False
+    if _BRACKET_RE.search(label) or _FULLWIDTH_PUNCT_RE.search(label):
+        return False
+    body = label
+    if body.endswith("."):
+        last = words[-1]
+        if not (len(last) <= 5 and last[0].isupper()):
+            return False
+        body = body[:-1]
+    if _TOKEN_CLOSING_PUNCT_RE.search(body):
+        return False
+    return True
+
+
 class OfficialDomainResolver:
     """Discover -> verify -> cache official domains for entity stems.
 
@@ -772,7 +893,11 @@ class OfficialDomainResolver:
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.config = config
-        self._search_clients = [c for c in (search_clients or []) if c is not None]
+        self._search_clients = select_discovery_clients(
+            search_clients,
+            max_providers=config.max_discovery_providers,
+            allowed_sources=config.discovery_providers,
+        )
         # Build a zero-config DirectFetchClient only if a fetch client is needed
         # and none was supplied. Imported lazily to avoid an import cycle.
         self._fetch_client = fetch_client
@@ -872,6 +997,11 @@ class OfficialDomainResolver:
             return resolution
 
         if not self.config.enabled:
+            return Resolution(stem=stem, confidence=NONE, verified_at=now)
+
+        # Refuse fragments before any cache or network work: they are not
+        # names, and each discovery spends search quota on every provider.
+        if not looks_resolvable_label(entity):
             return Resolution(stem=stem, confidence=NONE, verified_at=now)
 
         cached = self._cache.get(stem)

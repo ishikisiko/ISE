@@ -119,12 +119,12 @@ class ReActSearchTool(BaseTool):
         orchestration = self.app_config.get("orchestration") or {}
         if not isinstance(orchestration, dict):
             orchestration = {}
-        clients = list(
-            getattr(search_client, "clients", None) or [search_client]
-        )
+        # The resolver flattens composite clients itself and keeps only the
+        # configured discovery providers (primary only by default), so the
+        # wrapper is handed over as-is rather than pre-expanded.
         resolver = build_official_domain_resolver(
             orchestration,
-            search_clients=clients,
+            search_clients=[search_client],
         )
         self._web_source = WebEvidenceSource(
             search_client,

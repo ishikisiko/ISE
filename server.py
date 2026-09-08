@@ -417,6 +417,9 @@ def build_pipeline(
     tavily_cfg = config.get("tavilySearch") or {}
     if configured_value(tavily_cfg.get("api_key")):
         configured_sources.append("tavily")
+    anysearch_cfg = config.get("anySearch") or {}
+    if configured_value(anysearch_cfg.get("api_key")):
+        configured_sources.append("anysearch")
     parallel_cfg = config.get("parallelSearch") or {}
     if configured_value(parallel_cfg.get("api_key")):
         configured_sources.append("parallel")
@@ -699,6 +702,7 @@ def _prepare_answer_context(payload: Dict[str, Any]) -> Dict[str, Any]:
             "brave",
             "firecrawl",
             "tavily",
+            "anysearch",
             "parallel",
             "brightdata",
             "google",

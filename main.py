@@ -10,7 +10,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from llm.api import LLMClient, resolve_model_api_style
 from search.search import (
+    AnySearchClient,
     CombinedSearchClient,
+    build_priority_chain,
     BraveSearchClient,
     BrightDataSERPClient,
     FirecrawlSearchClient,
@@ -86,6 +88,7 @@ def build_search_client(
         "brave",
         "firecrawl",
         "tavily",
+        "anysearch",
         "parallel",
         "brightdata",
         "google",
@@ -139,6 +142,7 @@ def build_search_client(
         "brave": False,
         "firecrawl": False,
         "tavily": False,
+        "anysearch": False,
         "parallel": False,
         "brightdata": False,
         "google": False,
@@ -212,6 +216,27 @@ def build_search_client(
                 print(f"[search] Tavily disabled: {exc}")
     elif requested_lookup is not None and "tavily" in requested_lookup:
         missing_requested.append("tavily")
+
+    anysearch_cfg = config_or_key.get("anySearch") or {}
+    anysearch_key = configured_value(anysearch_cfg.get("api_key"))
+    if anysearch_key:
+        configured_flags["anysearch"] = True
+        if wants("anysearch"):
+            try:
+                fallback_clients.append(
+                    AnySearchClient(
+                        api_key=anysearch_key,
+                        base_url=(
+                            anysearch_cfg.get("base_url")
+                            or "https://api.anysearch.com/v1/search"
+                        ),
+                        timeout=int(anysearch_cfg.get("timeout", 30)),
+                    )
+                )
+            except Exception as exc:
+                print(f"[search] AnySearch disabled: {exc}")
+    elif requested_lookup is not None and "anysearch" in requested_lookup:
+        missing_requested.append("anysearch")
 
     parallel_cfg = config_or_key.get("parallelSearch") or {}
     parallel_key = configured_value(parallel_cfg.get("api_key"))
@@ -297,34 +322,28 @@ def build_search_client(
         missing_requested.append("google")
 
     configured = [source for source, flag in configured_flags.items() if flag]
-    ordered_clients: List[SearchClient] = []
-    metadata_clients: List[SearchClient] = []
-    if brave_client is not None:
-        ordered_clients.append(brave_client)
-        metadata_clients.append(brave_client)
-
-    if fallback_clients:
-        metadata_clients.extend(fallback_clients)
-        if requested_lookup is None and brave_client is not None and len(fallback_clients) > 1:
-            ordered_clients.append(CombinedSearchClient(fallback_clients))
-        elif requested_lookup is not None and "brave" in requested_lookup and len(fallback_clients) > 1:
-            ordered_clients.append(CombinedSearchClient(fallback_clients))
-        else:
-            ordered_clients.extend(fallback_clients)
-
-    if not ordered_clients:
+    metadata_clients: List[SearchClient] = (
+        [brave_client] if brave_client is not None else []
+    ) + list(fallback_clients)
+    if not metadata_clients:
         return None
 
-    if len(ordered_clients) == 1:
-        client = ordered_clients[0]
-    elif brave_client is not None:
-        client = PrioritySearchClient(ordered_clients)
-    else:
-        client = CombinedSearchClient(ordered_clients)
+    # ``searchFallback.primary`` (default Brave) leads; the rest form
+    # sequential tiers (``searchFallback.batch_sizes`` / ``order``) so one
+    # primary miss never fans out to every paid provider at once. Without a
+    # usable primary (e.g. an explicit source subset) the legacy concurrent
+    # combined client is kept.
+    client = build_priority_chain(config_or_key, metadata_clients)
+    if client is None:
+        client = (
+            metadata_clients[0]
+            if len(metadata_clients) == 1
+            else CombinedSearchClient(metadata_clients)
+        )
 
     return apply_metadata(
         client,
-        active=metadata_clients or ordered_clients,
+        active=metadata_clients,
         configured=configured,
         requested=requested_order,
         missing=missing_requested,
@@ -633,6 +652,9 @@ def main() -> None:
     tavily_cfg_cli = config.get("tavilySearch") or {}
     if configured_value(tavily_cfg_cli.get("api_key")):
         configured_sources.append("tavily")
+    anysearch_cfg_cli = config.get("anySearch") or {}
+    if configured_value(anysearch_cfg_cli.get("api_key")):
+        configured_sources.append("anysearch")
     parallel_cfg_cli = config.get("parallelSearch") or {}
     if configured_value(parallel_cfg_cli.get("api_key")):
         configured_sources.append("parallel")

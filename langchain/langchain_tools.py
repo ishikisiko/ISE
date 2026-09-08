@@ -15,7 +15,9 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from search.search import (
+    AnySearchClient,
     CombinedSearchClient,
+    build_priority_chain,
     BraveSearchClient,
     BrightDataSERPClient,
     FirecrawlSearchClient,
@@ -226,6 +228,23 @@ def create_search_tool_from_config(config: Dict[str, Any]) -> Optional[WebSearch
         except Exception as exc:
             print(f"[search tool] Tavily disabled: {exc}")
 
+    anysearch_cfg = config.get("anySearch") or {}
+    anysearch_key = configured_value(anysearch_cfg.get("api_key"))
+    if anysearch_key:
+        try:
+            fallback_clients.append(
+                AnySearchClient(
+                    api_key=anysearch_key,
+                    base_url=(
+                        anysearch_cfg.get("base_url")
+                        or "https://api.anysearch.com/v1/search"
+                    ),
+                    timeout=int(anysearch_cfg.get("timeout", 30)),
+                )
+            )
+        except Exception as exc:
+            print(f"[search tool] AnySearch disabled: {exc}")
+
     parallel_cfg = config.get("parallelSearch") or {}
     parallel_key = configured_value(parallel_cfg.get("api_key"))
     if parallel_key:
@@ -284,21 +303,18 @@ def create_search_tool_from_config(config: Dict[str, Any]) -> Optional[WebSearch
     
     if brave_client is not None:
         clients.append(brave_client)
-        if fallback_clients:
-            if len(fallback_clients) > 1:
-                clients.append(CombinedSearchClient(fallback_clients))
-            else:
-                clients.extend(fallback_clients)
-    else:
-        clients.extend(fallback_clients)
+    clients.extend(fallback_clients)
 
     if not clients:
         return None
-    
+
+    # Configured primary (default Brave) followed by sequential fallback
+    # tiers; see ``search.search.build_priority_chain``.
+    chain = build_priority_chain(config, clients)
+    if chain is not None:
+        return WebSearchTool(search_client=chain)
     if len(clients) == 1:
         return WebSearchTool(search_client=clients[0])
-    if brave_client is not None:
-        return WebSearchTool(search_client=PrioritySearchClient(clients))
     return CombinedSearchTool(clients=clients)
 
 

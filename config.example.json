@@ -41,13 +41,15 @@
             ]
         },
         "official_domain_resolution": {
-            "_comment": "Discover -> verify -> cache resolver for entity official domains. The ruling currency is structurally verifiable relations (registry homepage + homepage->repo backlink closure, Wikidata P856 + support, trusted-domain redirects into the candidate, certificate SAN coverage, facade consistency, CT-log domain age); cross-provider search voting is only a weak signal and can never rule official alone. What is cached is the relation graph, not the verdict, so ruling rules can be re-applied offline. Pinned stems (pins) win with top priority; pin_shadow_audit re-verifies pins in the background and surfaces disagreements without ever overriding the pin. Set enabled false to fall back to pins-only (legacy static-map behavior).",
+            "_comment": "Discover -> verify -> cache resolver for entity official domains. The ruling currency is structurally verifiable relations (registry homepage + homepage->repo backlink closure, Wikidata P856 + support, trusted-domain redirects into the candidate, certificate SAN coverage, facade consistency, CT-log domain age); cross-provider search voting is only a weak signal and can never rule official alone. What is cached is the relation graph, not the verdict, so ruling rules can be re-applied offline. Pinned stems (pins) win with top priority; pin_shadow_audit re-verifies pins in the background and surfaces disagreements without ever overriding the pin. Set enabled false to fall back to pins-only (legacy static-map behavior). Search voting consults at most max_discovery_providers leaf providers (composite priority/combined clients are flattened first), optionally restricted to the discovery_providers source ids; every extra provider multiplies the per-entity search spend.",
             "enabled": true,
             "min_signals": 2,
             "cache_path": "./runtime/official_domains.sqlite",
             "cache_ttl_days": 30,
             "negative_ttl_hours": 24,
             "max_discovery_searches": 2,
+            "max_discovery_providers": 1,
+            "discovery_providers": ["anysearch", "brave"],
             "max_verification_fetches": 2,
             "structured_sources": ["wikidata", "pypi", "npm", "github"],
             "min_domain_age_days": 180,
@@ -223,6 +225,11 @@
         "timeout": 30,
         "search_depth": null
     },
+    "anySearch": {
+        "api_key": "YOUR_ANYSEARCH_API_KEY_HERE",
+        "base_url": "https://api.anysearch.com/v1/search",
+        "timeout": 30
+    },
     "tavilySearch": {
         "api_key": "YOUR_TAVILY_API_KEY_HERE",
         "base_url": "https://api.tavily.com/search",
@@ -266,6 +273,12 @@
         "lr": "lang_zh-CN|lang_zh-TW|lang_en",
         "safe": "medium",
         "timeout": 15
+    },
+    "searchFallback": {
+        "_comment": "primary names the provider that leads the chain (default brave; falls back to brave when the named one is not configured). Fallback tiers behind it: providers (code order firecrawl, tavily, anysearch, parallel, brightdata, google unless order overrides it) are split into sequential tiers of batch_sizes; a tier runs its members concurrently and is only consulted when Brave and every earlier tier failed or returned nothing.",
+        "primary": "anysearch",
+        "batch_sizes": [1, 2, 3],
+        "order": ["brave", "tavily", "firecrawl", "parallel", "brightdata", "google"]
     },
     "rerank": {
         "enabled": false,

@@ -40,7 +40,7 @@ flowchart TB
 
     subgraph INFRA["能力层"]
         LLM["llm/api.py LLMClient<br/>langchain/langchain_llm.py 适配<br/>anthropic-compatible · openrouter<br/>minimax · glm/zai"]
-        SRCH["search/search.py<br/>Brave · BrightData · Tavily<br/>Firecrawl · Parallel · Google<br/>Combined/Priority/Fallback"]
+        SRCH["search/search.py<br/>Brave · BrightData · Tavily<br/>Firecrawl · Parallel · Google · AnySearch<br/>Combined/Priority/Fallback"]
         FETCH["search/reference_fetch.py<br/>search/rerank.py Qwen3Reranker"]
         RAG["rag/ + langchain_rag.py<br/>langchain_support.py 向量库<br/>langchain_rerank.py"]
     end

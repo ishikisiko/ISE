@@ -93,6 +93,9 @@ def _cfg(**overrides: Any) -> Any:
         # Hermetic by default: no real network probes, no background audits.
         "graph_probes_enabled": False,
         "pin_shadow_audit": False,
+        # Voting tests hand several providers over explicitly; production
+        # defaults to the primary provider only (see the provider cap tests).
+        "max_discovery_providers": 8,
     }
     base.update(overrides)
     tmp = tempfile.mkdtemp()
@@ -462,6 +465,136 @@ def test_budget_bounds_discovery_and_early_exits() -> None:
     r.resolve("acme")
     # Two agreeing providers in round 1 -> early exit, exactly one round each.
     assert p1.calls == 1 and p2.calls == 1
+
+
+# --- Provider selection (search spend) --------------------------------------
+
+
+class _Composite:
+    """Mimics PrioritySearchClient / CombinedSearchClient: exposes ``clients``."""
+
+    def __init__(self, source_id: str, clients: List[Any]) -> None:
+        self.source_id = source_id
+        self.clients = clients
+
+    def search(self, query: str, num_results: int = 5, **kwargs: Any) -> List[SearchHit]:
+        raise AssertionError("wrapper must never be queried directly")
+
+
+def _hit(url: str = "https://acme.com/") -> List[SearchHit]:
+    return [SearchHit(title="Acme", url=url, snippet="")]
+
+
+def test_default_provider_cap_keeps_only_primary_provider() -> None:
+    """Production default: one provider. Cross-provider voting was fanning
+    every discovery query out to six paid providers."""
+    brave = _Prov("brave", _hit())
+    firecrawl = _Prov("firecrawl", _hit())
+    tavily = _Prov("tavily", _hit())
+    r = OfficialDomainResolver(
+        _cfg(max_discovery_providers=1),
+        search_clients=[brave, firecrawl, tavily],
+        fetch_client=_NoFetch(),
+    )
+    r.resolve("acme")
+    assert brave.calls > 0
+    assert firecrawl.calls == 0 and tavily.calls == 0
+
+
+def test_composite_clients_are_flattened_before_capping() -> None:
+    """A priority wrapper over [brave, combined(firecrawl, tavily, ...)] must
+    not count the combined wrapper as a single provider."""
+    brave = _Prov("brave", _hit())
+    firecrawl = _Prov("firecrawl", _hit())
+    tavily = _Prov("tavily", _hit())
+    google = _Prov("google", _hit())
+    combined = _Composite("combined", [firecrawl, tavily, google])
+    priority = _Composite("priority", [brave, combined])
+    r = OfficialDomainResolver(
+        _cfg(max_discovery_providers=1),
+        search_clients=[priority],
+        fetch_client=_NoFetch(),
+    )
+    r.resolve("acme")
+    assert brave.calls > 0
+    assert firecrawl.calls == 0 and tavily.calls == 0 and google.calls == 0
+
+
+def test_discovery_providers_allow_list_selects_by_source_id() -> None:
+    brave = _Prov("brave", _hit())
+    firecrawl = _Prov("firecrawl", _hit())
+    google = _Prov("google", _hit())
+    cfg = resolver_config_from_mapping(
+        {
+            "enabled": True,
+            "structured_sources": (),
+            "graph_probes_enabled": False,
+            "pin_shadow_audit": False,
+            "cache_path": os.path.join(tempfile.mkdtemp(), "cache.sqlite"),
+            "max_discovery_providers": 2,
+            "discovery_providers": ["google", "brave"],
+        }
+    )
+    assert cfg.discovery_providers == ("google", "brave")
+    r = OfficialDomainResolver(cfg, search_clients=[brave, firecrawl, google], fetch_client=_NoFetch())
+    res = r.resolve("acme")
+    assert firecrawl.calls == 0
+    assert google.calls > 0 and brave.calls > 0
+    assert {s.source for s in res.signals} == {"google", "brave"}
+
+
+def test_provider_cap_zero_disables_search_voting() -> None:
+    brave = _Prov("brave", _hit())
+    r = OfficialDomainResolver(
+        _cfg(max_discovery_providers=0), search_clients=[brave], fetch_client=_NoFetch()
+    )
+    assert r.resolve("acme").confidence == "none"
+    assert brave.calls == 0
+
+
+def test_config_defaults_to_single_discovery_provider() -> None:
+    cfg = resolver_config_from_mapping({"enabled": True})
+    assert cfg.max_discovery_providers == 1
+    assert cfg.discovery_providers == ()
+
+
+# --- Label gating (fragments never reach the network) -----------------------
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "recommend where to draw the boundary.",
+        "eventual consistency for a collaborative document editor",
+        "managed Kubernetes for a regulated fintech. What are the hidden costs",
+        "operational transform fit in.",
+        "the major serverless container options (e.g. AWS Fargate",
+    ],
+)
+def test_fragment_labels_skip_discovery(label: str) -> None:
+    brave = _Prov("brave", _hit())
+    r = OfficialDomainResolver(_cfg(), search_clients=[brave], fetch_client=_NoFetch())
+    res = r.resolve(label)
+    assert res.confidence == "none"
+    assert brave.calls == 0
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Stripe", "Azure Container Apps", "Acme Inc.", "MongoDB", "Next.js", "glm-4.5"],
+)
+def test_name_shaped_labels_still_discover(label: str) -> None:
+    brave = _Prov("brave", _hit())
+    r = OfficialDomainResolver(_cfg(), search_clients=[brave], fetch_client=_NoFetch())
+    r.resolve(label)
+    assert brave.calls > 0
+
+
+def test_pins_bypass_label_gate() -> None:
+    """A pinned stem never needs discovery, so the gate must not hide it."""
+    cfg = _cfg(pins={"acme": ["acme.com"]})
+    r = OfficialDomainResolver(cfg, search_clients=[], fetch_client=_NoFetch())
+    assert r.resolve("acme").is_official
 
 
 # --- Subdomain helper ------------------------------------------------------

@@ -324,12 +324,11 @@ class SearchRAGChain:
         # honors configured ``pins`` (folded from the legacy ``official_domains``
         # map) with top priority and only performs network discovery for stems
         # that are not pinned, when ``official_domain_resolution.enabled`` is on.
-        discovery_clients = list(
-            getattr(search_client, "clients", None) or [search_client]
-        )
+        # The resolver flattens composite clients and keeps only the
+        # configured discovery providers (primary only by default).
         self._official_resolver = build_official_domain_resolver(
             orchestration if isinstance(orchestration, dict) else {},
-            search_clients=discovery_clients,
+            search_clients=[search_client],
         )
         self.web_source = WebEvidenceSource(
             search_client,

@@ -129,11 +129,23 @@ The system SHALL persist resolutions in a SQLite store keyed by entity stem, rec
 - **AND** the surrounding query SHALL NOT fail
 
 ### Requirement: Discovery SHALL be bounded by configurable budgets
-The system SHALL bound first-sight cost by `max_discovery_searches` (default 2) and `max_verification_fetches` (default 2). The resolver SHALL short-circuit the moment enough independent signals exist to reach a decision.
+The system SHALL bound first-sight cost by `max_discovery_searches` (default 2), `max_discovery_providers` (default 1) and `max_verification_fetches` (default 2). The resolver SHALL short-circuit the moment enough independent signals exist to reach a decision.
+
+Search voting SHALL consult leaf providers only: composite search clients (priority or combined wrappers exposing `clients`) SHALL be flattened before selection, so a wrapper can never count as one provider while fanning a query out to all of its members. When `discovery_providers` lists provider source ids, only those providers SHALL be consulted, in the listed order; otherwise positional order applies. The result SHALL be capped at `max_discovery_providers`.
+
+The resolver SHALL refuse discovery for labels that are not name-shaped (more than 5 words, longer than 60 characters, or carrying sentence punctuation) and return `none` without any network request.
 
 #### Scenario: Budget caps discovery
 - **WHEN** an entity has no pin and no cache
 - **THEN** the resolver SHALL issue at most `max_discovery_searches` search requests and at most `max_verification_fetches` fetches before deciding
+
+#### Scenario: Composite client is flattened and capped
+- **WHEN** the resolver is handed a priority client wrapping a primary provider and a combined wrapper of five fallback providers, with default settings
+- **THEN** search voting SHALL consult only the primary provider, and the fallback providers SHALL receive no discovery query
+
+#### Scenario: Fragment labels do not reach the network
+- **WHEN** an entity label is a sentence fragment such as "recommend where to draw the boundary."
+- **THEN** the resolver SHALL return `none` without issuing any search request
 
 #### Scenario: Early termination on sufficient signals
 - **WHEN** enough independent signals to decide are collected before budgets are exhausted

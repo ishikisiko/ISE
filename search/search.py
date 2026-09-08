@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import requests
@@ -78,6 +78,10 @@ class SearchClient:
 
     source_id: str = "generic"
     display_name: str = "Search"
+    # Whether the provider honours the ``site:`` query operator. Chains skip
+    # providers that do not when the query carries one, so a domain-pinned
+    # query is never answered by an engine that ignores the pin.
+    supports_site_operator: bool = True
 
     def __init__(self) -> None:
         self._last_timings: List[Dict[str, Any]] = []
@@ -376,6 +380,53 @@ class FirecrawlSearchClient(_JsonPostSearchClient):
             or entry.get("snippet")
             or ""
         ).strip()
+
+
+class AnySearchClient(_JsonPostSearchClient):
+    """AnySearch web search client (``POST /v1/search``).
+
+    Response envelope: ``{"code": 0, "message": ..., "data": {"results":
+    [{"title", "url", "snippet", "content"}], "metadata": {...}}}``. A
+    non-zero ``code`` is an application error even on HTTP 200.
+    """
+
+    source_id = "anysearch"
+    display_name = "AnySearch"
+    # Observed: ``site:un.org ...`` returned no un.org result; the operator
+    # is not honoured, so such queries are routed past this provider.
+    supports_site_operator = False
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = "https://api.anysearch.com/v1/search",
+        timeout: int = 30,
+    ) -> None:
+        super().__init__(api_key, base_url=base_url, timeout=timeout)
+
+    def _build_payload(
+        self,
+        query: str,
+        limit: int,
+        *,
+        freshness: Optional[str],
+        date_restrict: Optional[str],
+    ) -> Dict[str, Any]:
+        _ = (freshness, date_restrict)
+        return {"query": query, "max_results": limit}
+
+    def _result_entries(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        code = payload.get("code")
+        if code not in (0, None):
+            message = payload.get("message") or f"code {code}"
+            raise RuntimeError(f"{self.display_name} search failed: {message}")
+        data = payload.get("data") or {}
+        entries = data.get("results") if isinstance(data, dict) else None
+        return entries if isinstance(entries, list) else []
+
+    def _entry_snippet(self, entry: Dict[str, Any]) -> str:
+        return str(entry.get("snippet") or entry.get("content") or "").strip()
 
 
 class TavilySearchClient(_JsonPostSearchClient):
@@ -1119,6 +1170,24 @@ class GoogleSearchClient(SearchClient):
             )
 
 
+_SITE_OPERATOR_RE = re.compile(r"(?:^|\s)site:\S", re.IGNORECASE)
+
+
+def client_can_serve(client: Any, query: str) -> bool:
+    """Whether ``client`` may be asked ``query`` given its capability flags.
+
+    Composite clients can serve when any member can.
+    """
+    if client is None:
+        return False
+    members = getattr(client, "clients", None)
+    if isinstance(members, (list, tuple)) and members:
+        return any(client_can_serve(member, query) for member in members)
+    if not _SITE_OPERATOR_RE.search(query or "") :
+        return True
+    return bool(getattr(client, "supports_site_operator", True))
+
+
 class CombinedSearchClient(SearchClient):
     """Fan out to multiple search clients concurrently and merge unique hits."""
 
@@ -1154,10 +1223,14 @@ class CombinedSearchClient(SearchClient):
         total_limit = max(1, int(num_results))
         per_source = max(1, int(per_source_limit or total_limit))
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.clients)) as pool:
+        eligible = [client for client in self.clients if client_can_serve(client, query)]
+        if not eligible:
+            return hits
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(eligible)) as pool:
             future_map: Dict[concurrent.futures.Future, SearchClient] = {}
             start_times: Dict[concurrent.futures.Future, float] = {}
-            for client in self.clients:
+            for client in eligible:
                 future = pool.submit(
                     client.search,
                     query,
@@ -1429,6 +1502,16 @@ class PrioritySearchClient(SearchClient):
             fallback = position > 0
             label = getattr(client, "display_name", type(client).__name__)
             source = getattr(client, "source_id", type(client).__name__.lower())
+            if not client_can_serve(client, query):
+                self._append_call_record(
+                    query=query,
+                    duration_ms=0.0,
+                    error="skipped: provider does not honour the site: operator",
+                    source=source,
+                    label=str(label),
+                    fallback=fallback,
+                )
+                continue
             try:
                 chunk = client.search(
                     query,
@@ -1525,6 +1608,141 @@ class PrioritySearchClient(SearchClient):
 
     def get_last_errors(self) -> List[Dict[str, str]]:
         return list(self._last_errors)
+
+
+DEFAULT_FALLBACK_BATCH_SIZES: Tuple[int, ...] = (2, 3)
+
+
+def build_fallback_tiers(
+    fallback_clients: Sequence[SearchClient],
+    *,
+    batch_sizes: Optional[Sequence[int]] = None,
+    order: Optional[Sequence[str]] = None,
+) -> List[SearchClient]:
+    """Group fallback providers into sequential tiers for a priority chain.
+
+    Each tier is queried only when every earlier tier (and the primary
+    provider) failed or returned nothing. A tier with several members is a
+    :class:`CombinedSearchClient` (members run concurrently); a single member
+    is used as-is. ``batch_sizes`` gives the size of each successive tier
+    (default ``(2, 3)``); providers left over after the last size form one
+    more tier. ``order`` (provider ``source_id`` values) reorders the members
+    first; unlisted providers keep their relative order after the listed ones.
+    """
+    clients = [client for client in fallback_clients if client is not None]
+    if not clients:
+        return []
+    if order:
+        wanted = [str(v).strip().casefold() for v in order if str(v).strip()]
+        by_source: Dict[str, List[SearchClient]] = {}
+        for client in clients:
+            source = str(getattr(client, "source_id", "") or "").casefold()
+            by_source.setdefault(source, []).append(client)
+        reordered: List[SearchClient] = []
+        for name in wanted:
+            reordered.extend(by_source.pop(name, []))
+        for remaining in by_source.values():
+            reordered.extend(remaining)
+        clients = reordered
+    sizes: List[int] = []
+    for value in (batch_sizes if batch_sizes is not None else DEFAULT_FALLBACK_BATCH_SIZES):
+        try:
+            size = int(value)
+        except (TypeError, ValueError):
+            continue
+        if size > 0:
+            sizes.append(size)
+    tiers: List[SearchClient] = []
+    position = 0
+    for size in sizes:
+        if position >= len(clients):
+            break
+        members = clients[position : position + size]
+        position += size
+        tiers.append(members[0] if len(members) == 1 else CombinedSearchClient(members))
+    if position < len(clients):
+        members = clients[position:]
+        tiers.append(members[0] if len(members) == 1 else CombinedSearchClient(members))
+    return tiers
+
+
+def fallback_tiers_from_config(
+    config: Any,
+    fallback_clients: Sequence[SearchClient],
+) -> List[SearchClient]:
+    """Read the ``searchFallback`` block and build the fallback tiers.
+
+    ``searchFallback.batch_sizes`` (list of ints, default ``[2, 3]``) and
+    ``searchFallback.order`` (list of provider source ids) are honored; a
+    missing or malformed block yields the default tiers.
+    """
+    block = config.get("searchFallback") if isinstance(config, Mapping) else None
+    batch_sizes: Optional[Sequence[int]] = None
+    order: Optional[Sequence[str]] = None
+    if isinstance(block, Mapping):
+        raw_sizes = block.get("batch_sizes")
+        if isinstance(raw_sizes, (list, tuple)):
+            batch_sizes = list(raw_sizes)
+        raw_order = block.get("order")
+        if isinstance(raw_order, str):
+            raw_order = [raw_order]
+        if isinstance(raw_order, (list, tuple)):
+            order = [str(v) for v in raw_order]
+    return build_fallback_tiers(fallback_clients, batch_sizes=batch_sizes, order=order)
+
+
+DEFAULT_PRIMARY_SOURCE = "brave"
+
+
+def primary_source_from_config(config: Any) -> str:
+    """Return the configured primary provider source id (default ``brave``)."""
+    block = config.get("searchFallback") if isinstance(config, Mapping) else None
+    if isinstance(block, Mapping):
+        value = str(block.get("primary") or "").strip().casefold()
+        if value:
+            return value
+    return DEFAULT_PRIMARY_SOURCE
+
+
+def select_primary_client(
+    config: Any,
+    clients: Sequence[SearchClient],
+) -> Optional[SearchClient]:
+    """Pick the primary provider: the configured one, else Brave, else none.
+
+    Returning ``None`` means no priority chain can be formed and callers keep
+    their legacy behaviour (a concurrent combined client).
+    """
+    by_source: Dict[str, SearchClient] = {}
+    for client in clients:
+        if client is None:
+            continue
+        source = str(getattr(client, "source_id", "") or "").casefold()
+        by_source.setdefault(source, client)
+    for candidate in (primary_source_from_config(config), DEFAULT_PRIMARY_SOURCE):
+        if candidate in by_source:
+            return by_source[candidate]
+    return None
+
+
+def build_priority_chain(
+    config: Any,
+    clients: Sequence[SearchClient],
+) -> Optional[SearchClient]:
+    """Compose ``primary -> fallback tiers`` from the available providers.
+
+    Returns ``None`` when no primary is available (see
+    :func:`select_primary_client`); a single provider is returned as-is.
+    """
+    available = [client for client in clients if client is not None]
+    primary = select_primary_client(config, available)
+    if primary is None:
+        return None
+    rest = [client for client in available if client is not primary]
+    ordered: List[SearchClient] = [primary] + fallback_tiers_from_config(config, rest)
+    if len(ordered) == 1:
+        return ordered[0]
+    return PrioritySearchClient(ordered)
 
 
 def apply_search_depth_override(

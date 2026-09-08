@@ -2,6 +2,7 @@
 from .search import (
     BraveSearchClient,
     BrightDataSERPClient,
+    AnySearchClient,
     FirecrawlSearchClient,
     SearchClient,
     SearchHit,
@@ -12,6 +13,11 @@ from .search import (
     TavilySearchClient,
     FallbackSearchClient,
     apply_search_depth_override,
+    build_fallback_tiers,
+    build_priority_chain,
+    client_can_serve,
+    select_primary_client,
+    fallback_tiers_from_config,
 )
 from .rerank import BaseReranker, Qwen3Reranker, RerankedHit
 from .reference_fetch import (
@@ -40,6 +46,7 @@ __all__ = [
     "SearchHit",
     "BrightDataSERPClient",
     "BraveSearchClient",
+    "AnySearchClient",
     "FirecrawlSearchClient",
     "TavilySearchClient",
     "ParallelSearchClient",
@@ -48,6 +55,11 @@ __all__ = [
     "CombinedSearchClient",
     "FallbackSearchClient",
     "apply_search_depth_override",
+    "build_fallback_tiers",
+    "build_priority_chain",
+    "client_can_serve",
+    "select_primary_client",
+    "fallback_tiers_from_config",
     "FIRECRAWL_SCRAPE_URL",
     "PARALLEL_EXTRACT_URL",
     "TAVILY_EXTRACT_URL",
