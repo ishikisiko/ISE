@@ -1,8 +1,8 @@
 # ISE 开发评测任务清单
 
-首版主线已完成，后续均为可选任务。[操作说明](docs/development_benchmark_usage.md) · [C05 验证](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md) · [历史明细](docs/development_benchmark_task_archive.md) · [系统分析](docs/development_benchmark_system_analysis.md) · [后台执行器设计](docs/development_benchmark_background_executor.md) · [三障碍解除设计](docs/development_benchmark_isolation_launcher.md)。本清单及引用资料不进入被测任务包。
+首版主线已完成，后续均为可选任务。[操作说明](docs/devbench/usage.md) · [C05 验证](/home/ubuntu/.local/share/ise-devbench/controller/docs/c05-summary.md) · [历史明细](docs/devbench/task_archive.md) · [系统分析](docs/devbench/system_analysis.md) · [后台执行器设计](docs/devbench/background_executor.md) · [三障碍解除设计](docs/devbench/isolation_launcher.md) · [操作台设计](docs/devbench/console.md)。本清单及引用资料不进入被测任务包。
 
-验证范围：pi、Codex、Claude 三个 CLI 均已通过经凭据代理的真实 smoke；pi 已有 T01 全链路（前台、`--detach`、无凭据进程发起 + launcher/隔离 worker 各一次）。正式隔离的机制已具备并于 2026-09-08 用首个 `isolated-formal` 批次 `formal-20260908`（glm-5.3 对 opus-5）真实跑完：T01 双 PASS，T02 暴露两处裁判链路缺陷并均已修（T02 裁判修订为 1.0.2、suite 1.0.1），批次完整、正式排名就绪但重复 1、无真人评分、未发布。P3-C/P3-D 于 2026-09-07 实现并验证；P3-E 三障碍解除于 2026-09-08 实现并真实验证（记录见 controller `docs/p3e-summary.md`，设计见 [三障碍解除设计](docs/development_benchmark_isolation_launcher.md)）。真实纠错启动仍待有 FAIL 父运行与授权。
+验证范围：pi、Codex、Claude 三个 CLI 均已通过经凭据代理的真实 smoke；pi 已有 T01 全链路（前台、`--detach`、无凭据进程发起 + launcher/隔离 worker 各一次）。正式隔离的机制已具备并于 2026-09-08 用首个 `isolated-formal` 批次 `formal-20260908`（glm-5.3 对 opus-5）真实跑完：T01 双 PASS，T02 暴露两处裁判链路缺陷并均已修（T02 裁判修订为 1.0.2、suite 1.0.1），批次完整、正式排名就绪但重复 1、无真人评分、未发布。P3-C/P3-D 于 2026-09-07 实现并验证；P3-E 三障碍解除于 2026-09-08 实现并真实验证（记录见 controller `docs/p3e-summary.md`，设计见 [三障碍解除设计](docs/devbench/isolation_launcher.md)）。真实纠错启动仍待有 FAIL 父运行与授权。操作台（网页前端）已于 2026-09-08 实现（P3-F01～F10、F12，controller `devbench/console/`，自测 28 项，全量 489；记录见 controller `docs/p3f-summary.md`）；真实验证 P3-F11 与 systemd 单元安装待用户授权。
 
 ## P0. 设计与决策
 
@@ -221,7 +221,7 @@
 
 ### P3-D. 脱离终端的后台执行器
 
-设计见 [后台执行器设计](docs/development_benchmark_background_executor.md)。启动仍在操作者终端同步完成并消费授权；只把收卷、验收、报告做成幂等并交给后台 worker。
+设计见 [后台执行器设计](docs/devbench/background_executor.md)。启动仍在操作者终端同步完成并消费授权；只把收卷、验收、报告做成幂等并交给后台 worker。
 
 - [x] P3-D01 拆分 `execute_run` 为 `launch_run` 与 `finalize_run`；finalize 的输入只来自磁盘记录，不依赖 launch 进程内存。
 - [x] P3-D02 实现 `orchestration.json` 阶段记录与每步幂等判断（已有提交不重复收卷、已有验收不重评、已有报告只补 outcome），并用 flock 互斥。
@@ -239,42 +239,61 @@
 - [x] P3-E03 `launch` 任务种类与常驻 launcher：授权只在终端签发（记录批准出处），任何无凭据进程只写 launch 请求，launcher 核验授权后取凭据启动并入队 finalize；`batch execute --enqueue-launch/--credentials-from-host/--network/--credential-mode`。（批次 `practice-20260908-launcher`：无凭据进程发起 → systemd launcher 启动 → 隔离 worker 收尾，见 p3e-summary 2.3）
 - [x] P3-E04 系统级 systemd 单元：worker 在 mount namespace 内读不到凭据（`isolated: true` 实测；普通终端同命令被拒），launcher `KillMode=process`（重启不再连带杀掉进行中的运行——首次链路验证正是被此杀死，已按 harness_error 归因并补跑）。
 - [x] P3-E05 三 CLI 经代理的真实 smoke 全部通过：pi 0.85.0（opencode-go）、Claude Code 2.1.263（订阅 OAuth，原生二进制入口）、Codex 0.153.4（ChatGPT 登录，自定义 provider 关闭 WebSocket，容器内 danger-full-access 并如实记录）；`tools/smoke_cli.py` 取代 `smoke_pi.py`；受支持版本更新。
-- [x] P3-E06 设计与记录：ISE `docs/development_benchmark_isolation_launcher.md`、controller `docs/p3e-summary.md`、systemd README、操作说明与 CHANGELOG；controller 自测 445 通过。
+- [x] P3-E06 设计与记录：ISE `docs/devbench/isolation_launcher.md`、controller `docs/p3e-summary.md`、systemd README、操作说明与 CHANGELOG；controller 自测 445 通过。
 - [x] P3-E07 开设首个 `isolated-formal` 批次并真实运行。（2026-09-08 `formal-20260908`：pi+glm-5.3 对 Claude Code+opus-5，T01/T02 各 1 次，全部经代理网络由 launcher 启动、隔离 worker 收尾。T01 双 PASS 100；T02 经 P3-E09 裁判修订后统一重评：pi FAIL 45、Claude FAIL 60。批次完整、正式排名就绪（重复 1、无真人评分、agent-native 工具面不同，见 controller `docs/formal-20260908.md`）；未发布）
 - [x] P3-E08 批次收尾按任务规格搭建裁判输入（controller `grading_specs.py`）：此前把 T01 的裁判参数套给所有任务，T02 首次走批次链路即缺参 INVALID；裁判无产出的 INVALID 生成 INVALID 报告并登记 harness_error；`batch resume --inline --regrade` 显式统一重评。已修并对两场 T02 重评。
 - [x] P3-E09 T02 裁判 stdout 协议缺陷：`run_checks.py` 把 checker 整个 stdout 当 JSON，候选代码在被测路径打印诊断即整场无验收报告（Claude 提交实测复现，base 代码本身就有同风格打印）。用户批准后修为只解析最后一行 JSON：T02 1.0.2（契约不变，六树资格与基线一致）、suite ise-v1 1.0.1 加锁加标签、`grader_digest` 改为可复算算法（controller `tools/grader_digest.py`）、批次修订台账（`batch revise`）、两场 T02 用新裁判统一重评，不重跑模型。遗留：人工评审 rubric manual-v1 只列 T02 1.0.1，新运行评审前需发新 rubric 版本。
 
+### P3-F. 操作台：发起测试与结果分析（2026-09-08 规划）
+
+设计见 [操作台设计](docs/devbench/console.md)。操作台是无凭据进程（与 worker 同一隔离等级），只读记录、只写不含凭据的请求，所有写操作走现有 `python -m devbench` 命令的静态白名单；授权签发、读凭据的 smoke/启动、`retention cleanup --execute` 仍只在操作者终端。代码放 controller `devbench/console/`，不进 ISE 仓库。视觉风格不复用 ISE 主题：施工时按官方 `frontend-design` skill 先出设计计划并对照简报复审再写代码，分析图形按 `dataviz` skill（设计文档 5.9 节）。2026-09-08 实现，记录见 controller `docs/p3f-summary.md`。
+
+- [x] P3-F01 骨架与边界：`devbench console` 子命令（Flask + 原生 ES2015 静态页，无构建、无外部资源），只绑定回环地址；每次启动的 token 与 Origin/Host 校验；不 import `manage.credentials`，`--require-credential-isolation` 自检；ID/路径边界；命令白名单静态表与 `runtime/console/commands.jsonl` 审计，页面显示等价终端命令。（2026-09-08 实现：controller `devbench/console/`，`console-v1`；设计计划与复审 controller `docs/console-design.md`）
+- [x] P3-F02 只读索引与总览：批次/运行/队列/授权/smoke/profile/suite 的聚合读取（`devbench/console/index.py`），派生数据复用 `batch status --volumes`、`run status`、`smoke status/check`、`review status`、`correction status`；总览页显示服务存活、队列与失败任务（可重新入队）、进行中运行、批次列表、配置就绪。（2026-09-08 实现）
+- [x] P3-F03 发起测试向导：`batch register` → `freeze`（approver/approval-reference 人填）→ `preregister` 计划表 → 逐 run 授权状态（缺失时给出预填的 `auth grant` 终端命令并轮询，操作台不签发）→ 前置检查（任务/profile 冻结、smoke 按隔离级别 verified、CLI 来源与版本、launcher 存活、授权绑定匹配）→ `batch execute --execute --enqueue-launch`（网络/凭据模式按隔离级别默认，`--requested-by console:<operator>`）；计划外 run 与删改计划没有入口，补跑先经 `batch backfill`。（2026-09-08 实现；正式隔离只允许 proxied/proxied）
+- [x] P3-F04 运行详情：时间线（`run.json` + `orchestration.json` history）、监督与代理计数、网络/凭据交付方式、日志尾部（不可信横幅、`present_log_text` 告警、按字节范围只读加载）、停止（确认 + reason，说明停止不等于已有报告）、卡住时重新入队收尾；`--inline` 不开放。（2026-09-08 实现；日志按字节范围只读，G5）
+- [x] P3-F05 单次结果：verdict/基础分/分组/必过失败/reason、验收点表（failed_cases）、费用/token/时间（缺失显示 `null`，费用标注非账单）、evaluations 与重评历史（`grader_task_version`）、结局台账、评审/纠错/争议状态、证据文件（文本只作文本、PNG 内联）、提交清单；报告重生成按退出码 0/1/2/3 区分"生成了报告"与"报告器失败"。（2026-09-08 实现）
+- [x] P3-F06 批次分析：口径与状态头、计划矩阵、客观榜/辅助指标/个人榜（未评审 `null` 与 0 分分开，disclaimers 原样）、验收点热力表（跨参测对象共同失败用例高亮并引导 `batch gap`）、成本/时间/token 对比、outcomes/revisions/gaps/interventions/claims/corrections 台账；`aggregate --leaderboards` 重新汇总写回批次目录。（2026-09-08 实现；对 `formal-20260908` 热力表识别出 T02 F1-08、F2-05 两家共同失败）
+- [x] P3-F07 台账表单与发布：`batch outcome/backfill/intervention/claim/gap/revise`（actor 必填；`revise` 前置的任务版本发布仍在终端）、经队列的统一重评、`compare`（`--acknowledge-differences` 显示暂定且不含名次）、`publish` 发布包生成与预览（泄漏检查失败只显示原因）。（2026-09-08 实现）
+- [x] P3-F08 评审与纠错：`review prepare`（sandbox iframe 显示 summary.html，只列 bundle/form，不显示 binding）、页面表单写出 form.json 后 `review record`（`recording_source=human_direct`；FAIL/INVALID 无评分表）、`review dispute`；`correction preview/feedback/derive/status` 与经队列的 `correction launch`；rubric 未覆盖版本的运行标记不可评审。（2026-09-08 实现）
+- [x] P3-F09 后端补缺：`batch resume --regrade --enqueue`（新增 `regrade` 任务种类由 worker 执行，仍逐个显式指定 run）；`correction launch --enqueue-launch`；`management/console.json`；`ise-devbench-console.service`（同 worker 的凭据不可达、不进 docker 组、`IPAddressAllow=localhost`）与 `install.sh`。（2026-09-08 实现：`regrade` 任务种类、`correction launch --enqueue-launch`、`management/console.json`、`ise-devbench-console.service` 与 `install.sh`；单元文件已写好但未 `sudo` 安装启用，待用户执行）
+- [x] P3-F10 自测（假 CLI，不调模型）：向导 → `launcher --once` → `worker --once` 全链路与 CLI 记录逐字段一致；stop → cancelled；失败任务重新入队与重复入队拒绝；review/publish/compare；白名单外命令无入口且审计无记录；路径逃逸、缺 token、错 Origin、非回环 bind 拒绝；日志注入串只作文本且带告警；`devbench.console` 不 import 凭据模块；凭据可读时自检退出 3。（2026-09-08 `tests/test_devbench_console.py` 28 项通过；controller 全量 489）
+- [ ] P3-F11 真实验证（需用户授权与计费）：从操作台发起一次 `local-practice` T01，launcher 启动、worker 收尾，报告字段集与 `practice-20260908-launcher-pi-oc-t01-r1-b1` 一致、`requested_by` 为 `console:<operator>`；下一个 `isolated-formal` 批次全程经操作台并记录到 controller `docs/`。（未做：需用户授权与计费；操作台与单元已就位，等用户决定后进行）
+- [x] P3-F12 文档：操作说明加"从操作台操作"一节（终端仍是完整路径）、controller README 与 CHANGELOG、管理 skill 补一句"操作台存在，skill 仍只调用命令"；完成后勾选并在任务明细中记录。（2026-09-08：controller `docs/p3f-summary.md`、CHANGELOG、README、`docs/usage.md` 3.3、systemd README、管理 skill；ISE 操作说明 4.2）
+
 ### P4. 扩展题库（T04、T03）
+
+2026-09-08 交付：[扩题报告](docs/devbench/expansion_20260908.md)。Q1 的独立性指行为裁判与候选/参考内部结构分离，另有替代实现及反例复核；同一制题者执行，未冒充第二评审者签字或真人评分。新四题版通过 CLI 显式选择，未启动真实开发模型考试。
 
 #### P4-T04. 请求级检索工具限制
 
-- [ ] T04-A01 冻结 disabled_tools、CLI 参数、工具名称集合、错误语义及已知但不可用工具的处理。
-- [ ] T04-A02 明确公开工具身份与 provider 资源的区别、已有 search off 限制、普通追问与澄清的范围。
-- [ ] T04-A03 制作公开任务包、净化 base、可归因 mock 与受控并发夹具。
-- [ ] T04-F1 实现并验证 CLI、普通 HTTP、流式 HTTP 参数接收与传递，20 分。
-- [ ] T04-F2 实现并验证限制后的工具面与其他允许工具的可用性，20 分。
-- [ ] T04-F3 实现并验证模型尝试禁用工具时执行端阻断，20 分。
-- [ ] T04-B1 实现并验证未知名称、非法输入、空值与重复名称，15 分。
-- [ ] T04-B2 实现并验证连续、并发及同会话普通后续请求不串配置，10 分。
-- [ ] T04-R1 实现并验证自主度、预算、preflight 与既有搜索限制的回归，15 分。
-- [ ] T04-A04 制作参考版本及错误对照：只改提示词、遗漏流式入口、修改共享集合、恢复时解除禁用。
-- [ ] T04-Q1 完成 base/reference/mutants 对照、独立复核和干净环境至少 3 次重复资格验收。
-- [ ] T04-Q2 冻结版本与摘要，完成隔离核验后纳入新的 suite；实际模型运行在用户组织该 suite 的比较时进行。
+- [x] T04-A01 冻结 disabled_tools、CLI 参数、工具名称集合、错误语义及已知但不可用工具的处理。
+- [x] T04-A02 明确公开工具身份与 provider 资源的区别、已有 search off 限制、普通追问与澄清的范围。
+- [x] T04-A03 制作公开任务包、净化 base、可归因 mock 与受控并发夹具。
+- [x] T04-F1 实现并验证 CLI、普通 HTTP、流式 HTTP 参数接收与传递，20 分。
+- [x] T04-F2 实现并验证限制后的工具面与其他允许工具的可用性，20 分。
+- [x] T04-F3 实现并验证模型尝试禁用工具时执行端阻断，20 分。
+- [x] T04-B1 实现并验证未知名称、非法输入、空值与重复名称，15 分。
+- [x] T04-B2 实现并验证连续、并发及同会话普通后续请求不串配置，10 分。
+- [x] T04-R1 实现并验证自主度、预算、preflight 与既有搜索限制的回归，15 分。
+- [x] T04-A04 制作参考版本及错误对照：只改提示词、遗漏流式入口、修改共享集合、恢复时解除禁用。
+- [x] T04-Q1 完成 base/reference/mutants 对照、独立复核和干净环境至少 3 次重复资格验收。
+- [x] T04-Q2 冻结版本与摘要，完成隔离核验后纳入新的 suite；实际模型运行在用户组织该 suite 的比较时进行。
 
 #### P4-T03. 文献元数据检索 Skill
 
-- [ ] T03-A01 冻结模拟服务协议、鉴权、字段、错误码、query 输入域和结果/时间/调用预算。
-- [ ] T03-A02 明确工具名、query 契约、配置可用性、证据来源类型与进入既有 registry 的要求。
-- [ ] T03-A03 制作同协议不同数据的开发/验收 mock、公开任务包、净化 base 与 scripted LLM 场景。
-- [ ] T03-F1 实现并验证配置齐备时按既有 registry 注册并暴露工具契约，20 分。
-- [ ] T03-F2 实现并验证请求协议与多响应变体的规范化，20 分。
-- [ ] T03-F3 实现并验证结果进入实际 loop、证据、来源和审计链，20 分。
-- [ ] T03-B1 实现并验证缺配置、非法参数、空结果与服务异常，15 分。
-- [ ] T03-B2 实现并验证调用/时间/条目上限及鉴权数据不进入公开输出，10 分。
-- [ ] T03-R1 实现并验证既有 skill 可用性、preflight 与执行回归，15 分。
-- [ ] T03-A04 制作参考版本及错误对照：脱离 registry、未接入主流程、非法参数发请求、预算仅写说明。
-- [ ] T03-Q1 完成 base/reference/mutants 对照、独立复核和干净环境至少 3 次重复资格验收。
-- [ ] T03-Q2 冻结版本与摘要，完成隔离核验后形成四题 suite；实际模型运行在用户组织该 suite 的比较时进行。
+- [x] T03-A01 冻结模拟服务协议、鉴权、字段、错误码、query 输入域和结果/时间/调用预算。
+- [x] T03-A02 明确工具名、query 契约、配置可用性、证据来源类型与进入既有 registry 的要求。
+- [x] T03-A03 制作同协议不同数据的开发/验收 mock、公开任务包、净化 base 与 scripted LLM 场景。
+- [x] T03-F1 实现并验证配置齐备时按既有 registry 注册并暴露工具契约，20 分。
+- [x] T03-F2 实现并验证请求协议与多响应变体的规范化，20 分。
+- [x] T03-F3 实现并验证结果进入实际 loop、证据、来源和审计链，20 分。
+- [x] T03-B1 实现并验证缺配置、非法参数、空结果与服务异常，15 分。
+- [x] T03-B2 实现并验证调用/时间/条目上限及鉴权数据不进入公开输出，10 分。
+- [x] T03-R1 实现并验证既有 skill 可用性、preflight 与执行回归，15 分。
+- [x] T03-A04 制作参考版本及错误对照：脱离 registry、未接入主流程、非法参数发请求、预算仅写说明。
+- [x] T03-Q1 完成 base/reference/mutants 对照、独立复核和干净环境至少 3 次重复资格验收。
+- [x] T03-Q2 冻结版本与摘要，完成隔离核验后形成四题 suite；实际模型运行在用户组织该 suite 的比较时进行。
 
 ### P5. 高难挑战与连续开发
 

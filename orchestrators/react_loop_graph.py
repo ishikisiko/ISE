@@ -80,6 +80,7 @@ _QUERY_TAG = re.compile(
 _DSML_PIPE = "\uff5c"
 _DSML_HEAD = "<" + _DSML_PIPE * 2 + "DSML" + _DSML_PIPE * 2
 _DSML_TAIL = "</" + _DSML_PIPE * 2 + "DSML" + _DSML_PIPE * 2
+_DSML_MARKER = re.compile(r"</?｜+DSML｜+")
 _DSML_INVOKE = re.compile(
     re.escape(_DSML_HEAD)
     + r'invoke\s+name="([^"]+)"\s*>(?P<body>.*?)'
@@ -118,6 +119,30 @@ def _extract_dsml_tool_calls(text: str) -> List[Tuple[str, Dict[str, str]]]:
             args[param.group(1).strip()] = param.group("value").strip()
         calls.append((name, args))
     return calls
+
+
+def _has_tool_protocol(text: str) -> bool:
+    """Detect unexecuted tool syntax, including several wrapped JSON objects.
+
+    This is a structural guard, not a narration or answer-quality judge. A
+    mention of a protocol name in ordinary prose is not a tool invocation.
+    """
+    if _DSML_MARKER.search(text) or "<function" in text.casefold():
+        return True
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            payload, _ = decoder.raw_decode(text, match.start())
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and (
+            payload.get("action") == "tool"
+            or isinstance(payload.get("tool"), str)
+            or (isinstance(payload.get("name"), str)
+                and any(key in payload for key in ("args", "arguments")))
+        ):
+            return True
+    return False
 
 
 _NUMBERED_RESULT = re.compile(r"(?m)^\s*\d+\.\s+")
@@ -570,6 +595,14 @@ class ReactLoopGraphRunner:
             else:
                 parts.append("本次回答必须满足：" + "、".join(self.initial_checklist))
         analysis_constraints = getattr(self.analysis, "constraints", None)
+        ambiguities = list(getattr(self.analysis, "ambiguities", None) or [])
+        if self.autonomy_policy.model_owns_clarification and ambiguities:
+            parts.append(
+                "分析器提示可能存在歧义（可能误报，并非必须澄清）："
+                + self._safe_trace_text("、".join(str(item) for item in ambiguities), limit=240)
+                + "。请结合问题和已有上下文自行判断；必要时调用 ask_user，"
+                "否则继续检索或直接回答，不要仅因该提示停止。"
+            )
         if (
             isinstance(analysis_constraints, dict)
             and analysis_constraints.get("authority_required")
@@ -954,7 +987,7 @@ class ReactLoopGraphRunner:
         """
         parsed = _extract_dsml_tool_calls(text)
         if not parsed:
-            return AIMessage(content=""), None
+            return AIMessage(content=""), "unrecognized_dsml_markup"
         tool_calls: List[dict] = []
         first_error: Optional[str] = None
         for name, raw_args in parsed:
@@ -975,11 +1008,16 @@ class ReactLoopGraphRunner:
         tool whose arguments validate against its schema is normalized.
         """
         text = self._message_text(response).strip()
-        if _DSML_HEAD in text:
-            return self._normalize_dsml_markup(text)
+        if _DSML_MARKER.search(text):
+            # Providers expose both single- and double-pipe variants. Only
+            # canonicalize delimiters; unknown tag grammars remain invalid.
+            normalized = text.replace("<｜DSML｜", _DSML_HEAD).replace("</｜DSML｜", _DSML_TAIL)
+            return self._normalize_dsml_markup(normalized)
         if "<function" not in text.casefold():
             payload = extract_json_object(text)
             if not isinstance(payload, dict):
+                if _has_tool_protocol(text):
+                    return AIMessage(content=""), "unrecognized_json_tool_markup"
                 return response, None
 
             action = str(payload.get("action") or "").strip()
@@ -1286,6 +1324,8 @@ class ReactLoopGraphRunner:
                     extra=extract_token_usage(response),
                 )
 
+        provider_response = response
+        provider_usage = getattr(response, "usage_metadata", None)
         tool_calls = getattr(response, "tool_calls", None) or []
         invalid_tool_request: Optional[str] = None
         invalid_final_response: Optional[str] = None
@@ -1309,10 +1349,15 @@ class ReactLoopGraphRunner:
                     self._trace_invalid_final_response(iteration, invalid_final_response)
                     response = AIMessage(content="")
 
+        if isinstance(response, AIMessage) and response is not provider_response:
+            response = response.model_copy(update={
+                "usage_metadata": provider_usage,
+                "response_metadata": getattr(provider_response, "response_metadata", {}) or {},
+            })
         token_budget = self._token_budget(state)
         token_budget.record_usage(
             list(state.get("messages") or []),
-            getattr(response, "usage_metadata", None),
+            provider_usage,
         )
 
         return {
@@ -1336,6 +1381,13 @@ class ReactLoopGraphRunner:
         if not isinstance(text, str):
             text = str(text)
 
+        def replace_content(content: str, tool_calls: Optional[List[dict]] = None) -> AIMessage:
+            if isinstance(response, AIMessage):
+                return response.model_copy(update={
+                    "content": content, "tool_calls": tool_calls or [], "invalid_tool_calls": [],
+                })
+            return AIMessage(content=content, tool_calls=tool_calls or [])
+
         payload = extract_json_object(text)
         if payload and payload.get("action") == "tool":
             name = str(payload.get("tool") or "")
@@ -1349,10 +1401,10 @@ class ReactLoopGraphRunner:
                     "id": f"call_{uuid4().hex[:12]}",
                     "type": "tool_call",
                 }
-                return AIMessage(content="", tool_calls=[call])
+                return replace_content("", [call])
         if payload and payload.get("action") == "final" and payload.get("answer"):
-            return AIMessage(content=str(payload["answer"]))
-        return AIMessage(content=text)
+            return replace_content(str(payload["answer"]))
+        return replace_content(text)
 
     def _observe(self, state: Dict[str, Any]) -> Dict[str, Any]:
         ai_message = state["messages"][-1]
@@ -2829,7 +2881,8 @@ class ReactLoopGraphRunner:
             answer=draft,
             critical_ambiguities=(
                 list(getattr(self.analysis, "ambiguities", None) or [])
-                if bool(getattr(self.analysis, "critical_ambiguity", False))
+                if (bool(getattr(self.analysis, "critical_ambiguity", False))
+                    and not self.autonomy_policy.model_owns_clarification)
                 else []
             ),
             policies=policies,
@@ -3049,7 +3102,9 @@ class ReactLoopGraphRunner:
             unwrapped = _unwrap_final_answer(text)
             if unwrapped:
                 text = unwrapped
-            if text:
+            if (text and not getattr(response, "tool_calls", None)
+                    and not getattr(response, "invalid_tool_calls", None)
+                    and not _has_tool_protocol(text)):
                 return text
         except Exception:  # noqa: BLE001 - degrade to best effort on any failure
             pass
@@ -3067,11 +3122,12 @@ class ReactLoopGraphRunner:
 
     @staticmethod
     def _best_effort_answer(draft: str, reason: str) -> str:
+        draft = _unwrap_final_answer(draft) or draft
         payload = extract_json_object(draft)
         if (
             isinstance(payload, dict)
             and any(key in payload for key in ("action", "tool", "name"))
-        ) or "<function" in draft.casefold():
+        ) or _has_tool_protocol(draft):
             draft = ""
         if draft:
             is_chinese = any("\u4e00" <= char <= "\u9fff" for char in draft)

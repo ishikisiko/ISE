@@ -58,6 +58,30 @@ def test_role_model_override_is_preserved():
     assert model.model_name == "glm-4.5-air"
 
 
+def test_opencode_session_is_stable_across_models_and_isolated_between_conversations():
+    from concurrent.futures import ThreadPoolExecutor
+    from utils.provider_session import provider_session
+
+    primary = create_chat_model(config=_opencode_go_config())
+    auxiliary = create_chat_model(config=_opencode_go_config())
+
+    def headers(cid):
+        with provider_session(cid):
+            a = primary._get_headers()
+            b = auxiliary._get_headers()
+            assert a["x-opencode-session"] == b["x-opencode-session"]
+            assert a["User-Agent"].startswith("ISE/")
+            return a["x-opencode-session"]
+
+    fallback = primary._get_headers()["x-opencode-session"]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a, b, again = list(pool.map(headers, ["private conversation A", "B", "private conversation A"]))
+    assert a == again and a != b
+    assert "private" not in a
+    assert primary._get_headers()["x-opencode-session"] == fallback
+    assert "x-opencode-session" not in create_chat_model(config=_provider_config())._get_headers()
+
+
 def test_model_id_can_resolve_its_provider():
     model = create_chat_model(provider="glm-4.5-air", config=_provider_config())
 

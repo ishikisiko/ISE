@@ -227,7 +227,7 @@ python -m tests.baseline_runner --compare runtime/baseline/autonomy/guided runti
 
 ### 6.2 记录的指标
 
-- **答案质量**：事实型用自动 fact-coverage（`final_answer_dataset`）；开放式用人工评分，rubric 为
+- **答案质量（原计划）**：事实型用自动 fact-coverage（`final_answer_dataset`）；开放式用人工评分，rubric 为
   各样本的 `scoring_dimensions` 列（如 `breadth_of_tradeoffs`、`citation_of_real_world_examples`）。
 - **成本侧**：P50/P95 时延、每问 token、LLM 调用数、外部 API 调用数。
 - **行为侧**：迭代数、压缩次数（`compactions`）、峰值上下文占比、**advisory 缺口计数**
@@ -236,14 +236,26 @@ python -m tests.baseline_runner --compare runtime/baseline/autonomy/guided runti
 
 ### 6.3 退出判据
 
-- 事实型子集：`autonomous` 的 fact-coverage 不劣于 `guided`（安全性）。
+- 事实型子集：原计划比较 fact-coverage；2026-09-08 实测发现关键词重叠不验证事实正确性，安全性判断必须同时检查逐题核心正确性，不能只凭该指标通过。
 - 开放式子集：有可复述的人工评分结论（价值证明）。
-- 成本倍数被明确记录并接受（预期 `autonomous` 每问 token / P95 时延约为 `guided` 的 3–4 倍）。
+- 成本倍数被明确记录；原先预期 `autonomous` 每问 token / P95 时延约为 `guided` 的 3–4 倍，这是待验证假设，非实测结果或用户接受记录。
 - **若开放式子集未显示优势，停在此处并记录量化结论是合法结局**（roadmap §6「允许中途改判」）。
 
 ### 6.4 结果
 
-> 待 `runtime/baseline/autonomy/{guided,autonomous}/` 跑分完成后回填。`autonomous` 的预算默认值
-> （`max_iterations`、各工具 `max_calls_per_query`、`context_compaction` 参数）将按本节成本/质量结果
-> 在 `orchestrators/autonomy_policy.py` 的 `AUTONOMOUS_PRESET` 与 `config.example.json` 中回填（任务 8.6）。
-> 初值为 `max_iterations=15`、per-tool 约为 guided 的 3–4 倍、压缩阈值 0.85 / 保留 4 轮。
+2026-09-08 完成两轮真实比较，研究编号 `autonomy-20260908-measured`：每轮 20 事实题 + 20 开放题 × 两模式，**160 条运行及统一模型辅助评审全部完成**。第一轮分析后仅做一组修改，第二轮重新冻结、反转模式调度顺序，保留全部失败。详见[完整报告](reports/autonomy_evaluation_20260908/report.md)、[逐题附表](reports/autonomy_evaluation_20260908/cases.md)和[冻结协议](reports/autonomy_evaluation_20260908/protocol.md)。
+
+| 指标 | 首轮 guided | 首轮 autonomous | 次轮 guided | 次轮 autonomous |
+|---|---:|---:|---:|---:|
+| 事实核心全对 /20 | 18 | 19 | 20 | 19 |
+| 开放完整交付 /20 | 13 | 13 | 14 | 18 |
+| 开放辅助分 /100 | 62.50 | 61.88 | 68.75 | 84.38 |
+| 开放 token 均值（HTTP） | ≥32,198 | 7,176 | ≥59,351 | ≥13,091 |
+| 开放 P95 秒 | 660.28 | 187.47 | 660.27 | 104.86 |
+| 开放硬超时 /20 | 4 | 0 | 3 | 1 |
+
+产品修改为工具协议归一化/交付边界、shim usage 保留、模型拥有澄清权时的循环内归属修正；主模型、预算和默认 guided 未改。辅助评审不是人工评分。次轮 autonomous 开放题较 guided 8 胜 / 8 平 / 4 负，平均高 15.625 分，但 `final016` 两轮都出现核心事实错误，不能宣告事实安全性不劣。`open017` 两轮均只给计划却为 succeeded，仍未解决。
+
+两轮成本以独立 HTTP usage 为准，主评测已知 ≥2,677,496 token，裁判与废弃评审额外消耗单列于报告，USD 未知。应用已注册调用 usage 完整率从 0/75 到 75/75，但次轮仍有两题漏记嵌套调用；入口请求 `max_tokens=4000/temperature=0.2` 未传进 loop，主模型对象配置实际为 5000/0.7，两轮相同。详见[运行审计](reports/autonomy_evaluation_20260908/runtime_audit.md)。
+
+预算决策：保留原默认值，不无依据扩大调用预算或调整压缩阈值。两轮各 75 条有效 loop 状态都没有压缩，次轮最高上下文比例仅约 0.301，不足以完成长上下文校准。8.4 不劣门槛未通过、8.5 真人评分未进行、8.6 长上下文校准未完成；8.7 的结果登记完成。不把本次两轮报告交付等同于 OpenSpec 全部验收闭合。

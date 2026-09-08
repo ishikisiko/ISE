@@ -1,12 +1,14 @@
 import json
 import os
 import time
+from uuid import uuid4
 from typing import Any, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError, Timeout, RequestException
 from urllib3.util.retry import Retry
+from utils.provider_session import provider_headers
 
 
 VALID_API_STYLES = {"auto", "openai", "anthropic"}
@@ -49,6 +51,7 @@ class LLMClient:
         self.api_key = api_key
         self.model_id = model_id
         self.provider = provider
+        self._provider_session_id = "ise-" + uuid4().hex
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
         self.thinking_enabled = thinking_enabled
@@ -238,7 +241,7 @@ class LLMClient:
             try:
                 response = self.session.post(
                     endpoint,
-                    headers=self.headers,
+                    headers={**self.headers, **provider_headers(self.provider, self._provider_session_id)},
                     json=payload,
                     timeout=self.request_timeout,
                 )
@@ -454,7 +457,7 @@ class LLMClient:
             try:
                 response = self.session.post(
                     endpoint,
-                    headers=self.headers,
+                    headers={**self.headers, **provider_headers(self.provider, self._provider_session_id)},
                     json=payload,
                     timeout=self.request_timeout,
                     stream=True,

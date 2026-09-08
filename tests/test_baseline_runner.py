@@ -61,3 +61,27 @@ def test_answer_baseline_persists_progress_after_each_completed_live_row() -> No
 
     assert [row["qid"] for row in details] == ["a", "b"]
     assert snapshots == [["a"], ["a", "b"]]
+    assert all(row["has_answer"] and row["llm_error"] is None for row in details)
+    assert [row["answer"] for row in details] == ["answer for first", "answer for second"]
+
+
+def test_all_baseline_datasets_use_the_production_answer_mode_keyword() -> None:
+    from unittest.mock import create_autospec
+
+    from langchain.langchain_orchestrator import LangChainOrchestrator
+    from orchestrators.autonomy_policy import resolve_autonomy_policy
+    from tests.baseline_runner import run_open_task_dataset, run_route_dataset
+
+    for runner in (run_answer_dataset, run_open_task_dataset, run_route_dataset):
+        orchestrator = create_autospec(LangChainOrchestrator, instance=True)
+        orchestrator.answer.return_value = {
+            "answer": "Paris", "control": {"autonomy": {"mode": "autonomous"}}
+        }
+        rows = runner(
+            orchestrator, [{"qid": "one", "query": "Capital of France?"}],
+            num_results=1, max_tokens=50, temperature=0,
+            autonomy_policy=resolve_autonomy_policy({}, "autonomous"),
+        )
+        assert rows[0]["llm_error"] is None
+        assert rows[0]["autonomy"] == "autonomous"
+        assert orchestrator.answer.call_args.kwargs["autonomy_mode"] == "autonomous"

@@ -23,6 +23,7 @@ from utils.timing_utils import TimingRecorder, extract_token_usage
 from utils.current_time import get_current_date_str
 from utils.workflow_trace import WorkflowTracer, ensure_tracer
 from utils.audit_log import AuditRecorder, resolve_audit_settings
+from utils.provider_session import with_provider_session
 from utils.query_orchestration import (
     EvidenceLedger,
     EvidencePolicyRegistry,
@@ -336,6 +337,7 @@ Always answer in the same language as the user's question."""
                     extra=extract_token_usage(usage_response),
                 )
 
+    @with_provider_session
     def answer(
         self,
         query: str,

@@ -326,6 +326,7 @@ def run_route_dataset(
     num_results: int,
     max_tokens: int,
     temperature: float,
+    autonomy_policy: Any = None,
 ) -> List[Dict[str, Any]]:
     details: List[Dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
@@ -343,6 +344,7 @@ def run_route_dataset(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 allow_search=True,
+                autonomy_mode=getattr(autonomy_policy, "mode", None),
             )
             control = result.get("control") or {}
             inferred = infer_route(control)
@@ -455,6 +457,7 @@ def run_answer_dataset(
     num_results: int,
     max_tokens: int,
     temperature: float,
+    autonomy_policy: Any = None,
     on_progress: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     details: List[Dict[str, Any]] = []
@@ -472,7 +475,7 @@ def run_answer_dataset(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 allow_search=True,
-                autonomy_policy=autonomy_policy,
+                autonomy_mode=getattr(autonomy_policy, "mode", None),
             )
         except Exception as exc:  # noqa: BLE001 - baseline records per-query failures as data
             result = {"answer": "", "llm_error": str(exc)}
@@ -483,6 +486,7 @@ def run_answer_dataset(
                 "query": query,
                 "allowed_sources": row.get("allowed_sources"),
                 "time_sensitive": row.get("time_sensitive"),
+                "answer": result.get("answer") or "",
                 "latency_ms": extract_latency_ms(result),
                 "llm_error": result.get("llm_error"),
                 **quality,
@@ -630,7 +634,7 @@ def run_open_task_dataset(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 allow_search=True,
-                autonomy_policy=autonomy_policy,
+                autonomy_mode=getattr(autonomy_policy, "mode", None),
             )
         except Exception as exc:  # noqa: BLE001 - baseline records per-query failures as data
             result = {"answer": "", "llm_error": str(exc)}

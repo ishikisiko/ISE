@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from uuid import uuid4
 from typing import Any, Dict, Iterator, List, Optional, Type, Union
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -17,10 +18,11 @@ from langchain_core.messages import (
     SystemMessage,
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from pydantic import Field, SecretStr
+from pydantic import Field, PrivateAttr, SecretStr
 
 from llm.api import resolve_model_api_style
 from utils.config_validation import configured_value
+from utils.provider_session import provider_headers
 
 
 def _load_config() -> Dict[str, Any]:
@@ -62,6 +64,7 @@ class UniversalChatModel(BaseChatModel):
     # Internal state
     _session: Any = None
     _anthropic_compatible: bool = False
+    _provider_session_id: str = PrivateAttr(default_factory=lambda: "ise-" + uuid4().hex)
 
     class Config:
         """Pydantic configuration."""
@@ -124,6 +127,7 @@ class UniversalChatModel(BaseChatModel):
         else:
             headers["Authorization"] = f"Bearer {api_key}"
         
+        headers.update(provider_headers(self.provider, self._provider_session_id))
         return headers
 
     def _convert_messages(self, messages: List[BaseMessage]) -> List[Dict[str, Any]]:
