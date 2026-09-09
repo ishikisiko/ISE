@@ -53,6 +53,7 @@ from evidence.source_tiering import (
     official_entity_for_url,
 )
 from evidence.official_domain_resolver import build_official_domain_resolver
+from utils.provider_calls import record_provider_requests_from_snapshots
 from utils.retrieval_trace import emit_search_call_step, search_call_snapshots
 from utils.timing_utils import TimingRecorder, extract_token_usage
 from utils.workflow_trace import ensure_tracer
@@ -605,6 +606,8 @@ class SearchRAGChain:
                     snapshot,
                     step_id=f"search_api_web_{search_api_index}",
                 )
+            if timing_recorder is not None:
+                record_provider_requests_from_snapshots(timing_recorder, records)
 
         def record_provider_state(
             timings: List[Dict[str, Any]],
@@ -805,6 +808,8 @@ class SearchRAGChain:
                         record,
                         step_id=f"search_api_extract_{search_api_index}",
                     )
+                if timing_recorder is not None:
+                    record_provider_requests_from_snapshots(timing_recorder, extraction_records)
 
             if (
                 enable_temporal_recovery

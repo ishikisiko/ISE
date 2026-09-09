@@ -7,7 +7,8 @@ import math
 import os
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set
+import time
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 # Add project directory to path for imports
@@ -16,6 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_JUDGMENT_MODE = "detailed"
 TOP3_ONLY_JUDGMENT_MODE = "top3_only"
 SUPPORTED_JUDGMENT_MODES = {DEFAULT_JUDGMENT_MODE, TOP3_ONLY_JUDGMENT_MODE}
+GOLD_DOC_K_VALUES = (3, 5)
+TIER_K_VALUES = (3, 5)
+MIN_CATEGORY_SAMPLES = 5
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,13 +34,34 @@ def parse_args() -> argparse.Namespace:
     )
     collect_parser.add_argument(
         "--queries-file",
-        required=True,
+        default=None,
         help="UTF-8 text file with one query per line. Blank lines and # comments are ignored.",
+    )
+    collect_parser.add_argument(
+        "--dataset-file",
+        default=None,
+        help="CSV with qid/query (and optional category) columns; alternative to --queries-file.",
     )
     collect_parser.add_argument(
         "--output-file",
         required=True,
         help="Where to save the collected search result file.",
+    )
+    collect_parser.add_argument(
+        "--gold-doc-file",
+        default=None,
+        help="CSV with query,gold_doc_url; gold hits are pre-filled into judgment.relevant_urls for review.",
+    )
+    collect_parser.add_argument(
+        "--all-providers",
+        action="store_true",
+        help="Query every configured search provider independently (no LLM, no loop) and record per-provider results.",
+    )
+    collect_parser.add_argument(
+        "--autonomy",
+        choices=["guided", "autonomous"],
+        default=None,
+        help="Effective autonomy mode for the loop run (default: config).",
     )
     collect_parser.add_argument(
         "--config",
@@ -136,6 +161,21 @@ def parse_args() -> argparse.Namespace:
         "--print-details",
         action="store_true",
         help="Print per-query metric details in addition to the summary.",
+    )
+    evaluate_parser.add_argument(
+        "--gold-doc-file",
+        default=None,
+        help="CSV with query,gold_doc_url used for gold_doc_recall_at_k (matched by normalized query).",
+    )
+    evaluate_parser.add_argument(
+        "--config",
+        default=None,
+        help="Optional config.json for tier classification (pins / denylist only; the resolver never goes online here).",
+    )
+    evaluate_parser.add_argument(
+        "--relevance-annotations",
+        default=None,
+        help="Annotated collect file whose judgments supply relevance for an --all-providers collect file.",
     )
 
     dataset_parser = subparsers.add_parser(
@@ -651,7 +691,14 @@ def default_judgment() -> Dict[str, Any]:
         "judgment_mode": DEFAULT_JUDGMENT_MODE,
         "relevant_ranks": [],
         "relevant_urls": [],
+        # Optional graded relevance per rank (0 irrelevant / 1 relevant / 2 answer
+        # evidence). When present it drives nDCG@5 and answer_hit_at_k.
+        "relevance_grades": [],
+        "gold_doc_urls": [],
         "top3_has_answer_evidence": None,
+        "core_correct": None,
+        "annotator": "",
+        "annotated_at": "",
         "route_correct": None,
         "fulltext_decision_correct": None,
         "chunk_hit_at_5": None,
@@ -754,16 +801,221 @@ def build_orchestrator_for_collection(
     )
 
 
-def collect_records(args: argparse.Namespace) -> Dict[str, Any]:
-    queries = read_queries(args.queries_file)
-    if not queries:
+def load_query_rows(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    """Queries to collect: ``--dataset-file`` CSV rows or ``--queries-file`` lines."""
+    rows: List[Dict[str, Any]] = []
+    if getattr(args, "dataset_file", None):
+        for row in read_csv_records(args.dataset_file):
+            query = str(row.get("query") or "").strip()
+            if not query:
+                continue
+            rows.append(
+                {
+                    "qid": str(row.get("qid") or row.get("id") or "").strip() or None,
+                    "query": query,
+                    "category": str(row.get("category") or row.get("task_type") or row.get("intent_label") or "").strip() or None,
+                }
+            )
+    elif getattr(args, "queries_file", None):
+        rows.extend({"qid": None, "query": query, "category": None} for query in read_queries(args.queries_file))
+    else:
+        raise SystemExit("Provide --queries-file or --dataset-file.")
+    if not rows:
         raise SystemExit("No queries found in the provided file.")
+    return rows
+
+
+def load_gold_doc_map(path: Optional[str]) -> Dict[str, List[str]]:
+    """``normalized query -> [gold_doc_url, ...]`` from a gold_doc / gold_chunk CSV."""
+    mapping: Dict[str, List[str]] = {}
+    if not path:
+        return mapping
+    for row in read_csv_records(path):
+        query = normalize_query_key(str(row.get("query") or ""))
+        url = str(row.get("gold_doc_url") or row.get("url") or "").strip()
+        if not query or not url:
+            continue
+        bucket = mapping.setdefault(query, [])
+        if url not in bucket:
+            bucket.append(url)
+    return mapping
+
+
+def project_control(control: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the loop-era control facts the evaluation reads (design appendix A)."""
+    termination_policy = control.get("termination_policy") or {}
+    return {
+        "search_mode": control.get("search_mode"),
+        "final_executor": control.get("final_executor"),
+        "loop_status": control.get("loop_status"),
+        "termination_reason": control.get("loop_termination_reason") or control.get("termination_reason"),
+        "loop_iterations": control.get("loop_iterations"),
+        "loop_forced_synthesis": control.get("loop_forced_synthesis"),
+        "loop_synthesis_attempts": control.get("loop_synthesis_attempts"),
+        "compactions": control.get("compactions"),
+        "peak_context_ratio": control.get("peak_context_ratio"),
+        "advisory_gap_count": control.get("advisory_gap_count"),
+        "autonomy": control.get("autonomy"),
+        "query_analysis": control.get("query_analysis") or {},
+        "execution_trace": control.get("execution_trace") or {},
+        "evidence_coverage": control.get("evidence_coverage") or {},
+        "loop_verdicts": control.get("loop_verdicts") or [],
+        "loop_fetch_outcomes": control.get("loop_fetch_outcomes") or [],
+        "tool_budgets": termination_policy.get("tool_budgets") or {},
+        "search_sources_active": control.get("search_sources_active") or [],
+        "search_sources_requested": control.get("search_sources_requested") or [],
+        "search_sources_missing": control.get("search_sources_missing") or [],
+        "providers": control.get("providers") or {},
+    }
+
+
+def project_evidence_records(records: Any) -> List[Dict[str, Any]]:
+    """Ledger records with their stable ``metadata.eid`` (needed by citation checks)."""
+    projected: List[Dict[str, Any]] = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        projected.append(
+            {
+                "source_type": record.get("source_type"),
+                "source_tier": record.get("source_tier"),
+                "reference": record.get("reference"),
+                "title": record.get("title"),
+                "content": str(record.get("content") or "")[:2000],
+                "tool_name": record.get("tool_name"),
+                "iteration": record.get("iteration"),
+                "metadata": {
+                    key: metadata.get(key)
+                    for key in (
+                        "eid",
+                        "retrieval_kind",
+                        "provider",
+                        "content_chars",
+                        "truncated",
+                        "retrieved_at",
+                        "published_at",
+                        "source_tier",
+                        "source_target",
+                        "source_verdict_why",
+                        "canonical_reference",
+                    )
+                    if key in metadata
+                },
+            }
+        )
+    return projected
+
+
+def prefill_gold_judgment(record: Dict[str, Any], gold_urls: List[str]) -> None:
+    """Pre-fill relevant_urls with gold hits present in the results (reviewer confirms)."""
+    judgment = record.setdefault("judgment", default_judgment())
+    judgment["gold_doc_urls"] = list(gold_urls)
+    matched = [
+        hit["url"]
+        for hit in record.get("search_hits") or []
+        if any(gold_doc_match(hit.get("url"), gold) for gold in gold_urls)
+    ]
+    if matched:
+        judgment["relevant_urls"] = list(dict.fromkeys(list(judgment.get("relevant_urls") or []) + matched))
+        judgment["notes"] = (str(judgment.get("notes") or "") + " gold_doc 命中已预填 relevant_urls，请复核。").strip()
+
+
+def collect_all_providers(
+    search_client: Any,
+    rows: List[Dict[str, Any]],
+    *,
+    num_results: int,
+) -> List[Dict[str, Any]]:
+    """Ask every leaf provider the same query independently (no loop, no LLM)."""
+    from evidence.official_domain_resolver import flatten_search_clients
+
+    leaves = flatten_search_clients(search_client)
+    if not leaves:
+        raise SystemExit("No search providers configured.")
+    records: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        query = row["query"]
+        print(f"[collect/all-providers] {index}/{len(rows)} {query}")
+        provider_results: List[Dict[str, Any]] = []
+        for client in leaves:
+            source = str(getattr(client, "source_id", type(client).__name__.lower()))
+            started = time.perf_counter()
+            error: Optional[str] = None
+            hits: List[Any] = []
+            try:
+                hits = list(client.search(query, num_results=num_results, per_source_limit=num_results) or [])
+            except Exception as exc:  # noqa: BLE001 - provider failures are data
+                error = str(exc)[:300]
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            call_records = []
+            getter = getattr(client, "get_last_call_records", None)
+            if callable(getter):
+                call_records = [item for item in list(getter() or []) if isinstance(item, dict)]
+            credits = next((item.get("credits") for item in reversed(call_records) if item.get("credits") is not None), None)
+            provider_results.append(
+                {
+                    "provider": source,
+                    "status": "error" if error else "done",
+                    "error": error,
+                    "duration_ms": duration_ms,
+                    "result_count": len(hits),
+                    "credits": credits,
+                    "results": normalize_search_hits(
+                        [{"title": hit.title, "url": hit.url, "snippet": hit.snippet} for hit in hits]
+                    ),
+                }
+            )
+        records.append(
+            {
+                "query_id": row.get("qid") or index,
+                "qid": row.get("qid"),
+                "query": query,
+                "category": row.get("category"),
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "collect_mode": "all_providers",
+                "search_hits": [],
+                "provider_results": provider_results,
+                "judgment": default_judgment(),
+            }
+        )
+    return records
+
+
+def collect_records(args: argparse.Namespace) -> Dict[str, Any]:
+    rows = load_query_rows(args)
+    gold_map = load_gold_doc_map(getattr(args, "gold_doc_file", None))
 
     config = load_config(args.config)
     if args.model:
         config["LLM_PROVIDER"] = args.model
     elif args.provider:
         config["LLM_PROVIDER"] = args.provider
+
+    if getattr(args, "all_providers", False):
+        from main import build_search_client
+
+        search_client = build_search_client(config)
+        records = collect_all_providers(search_client, rows, num_results=args.num_results)
+        for record in records:
+            gold_urls = gold_map.get(normalize_query_key(record["query"]))
+            if gold_urls:
+                record["judgment"]["gold_doc_urls"] = list(gold_urls)
+        return {
+            "meta": {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "pipeline": "search_quality_pipeline",
+                "collect_mode": "all_providers",
+                "num_queries": len(records),
+                "num_results": args.num_results,
+                "providers": [
+                    str(getattr(client, "source_id", ""))
+                    for client in __import__("evidence.official_domain_resolver", fromlist=["flatten_search_clients"]).flatten_search_clients(search_client)
+                ],
+                "note": "Per-provider raw results only; relevance comes from the annotated single-chain collect file (--relevance-annotations at evaluate time).",
+            },
+            "records": records,
+        }
 
     orchestrator = build_orchestrator_for_collection(
         config,
@@ -773,57 +1025,196 @@ def collect_records(args: argparse.Namespace) -> Dict[str, Any]:
     )
 
     records: List[Dict[str, Any]] = []
-    for index, query in enumerate(queries, start=1):
-        print(f"[collect] {index}/{len(queries)} {query}")
-        result = orchestrator.answer(
-            query,
-            num_search_results=args.num_results,
-            per_source_search_results=args.num_results,
-            num_retrieved_docs=args.num_results,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-            allow_search=True,
-            force_search=args.force_search,
-        )
+    for index, row in enumerate(rows, start=1):
+        query = row["query"]
+        print(f"[collect] {index}/{len(rows)} {query}")
+        try:
+            result = orchestrator.answer(
+                query,
+                num_search_results=args.num_results,
+                per_source_search_results=args.num_results,
+                num_retrieved_docs=args.num_results,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                allow_search=True,
+                force_search=args.force_search,
+                autonomy_mode=getattr(args, "autonomy", None),
+            )
+        except Exception as exc:  # noqa: BLE001 - collection records failures as data
+            result = {"answer": "", "llm_error": f"{type(exc).__name__}: {exc}", "control": {}}
 
         control = result.get("control") or {}
-        records.append(
-            {
-                "query_id": index,
-                "query": query,
-                "collected_at": datetime.now(timezone.utc).isoformat(),
-                "search_query": result.get("search_query"),
-                "search_hits": normalize_search_hits(result.get("search_hits") or []),
-                "response_times": result.get("response_times") or {},
-                "control": {
-                    "search_mode": control.get("search_mode"),
-                    "domain": control.get("domain"),
-                    "keywords": control.get("keywords") or [],
-                    "selected_sources": control.get("selected_sources") or [],
-                    "search_sources_active": control.get("search_sources_active") or [],
-                    "search_sources_requested": control.get("search_sources_requested") or [],
-                    "search_sources_missing": control.get("search_sources_missing") or [],
-                },
-                "judgment": default_judgment(),
-            }
-        )
+        record = {
+            "query_id": row.get("qid") or index,
+            "qid": row.get("qid"),
+            "query": query,
+            "category": row.get("category"),
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "search_query": result.get("search_query"),
+            "search_hits": normalize_search_hits(result.get("search_hits") or []),
+            "answer": str(result.get("answer") or "")[:6000],
+            "llm_error": result.get("llm_error"),
+            "response_times": result.get("response_times") or {},
+            "search_api_calls": [
+                call for call in (result.get("search_api_calls") or []) if isinstance(call, dict)
+            ],
+            "evidence_records": project_evidence_records(result.get("evidence_records")),
+            "control": project_control(control),
+            "judgment": default_judgment(),
+        }
+        gold_urls = gold_map.get(normalize_query_key(query))
+        if gold_urls:
+            prefill_gold_judgment(record, gold_urls)
+        records.append(record)
 
     payload = {
         "meta": {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "pipeline": "search_quality_pipeline",
+            "collect_mode": "single_chain",
             "num_queries": len(records),
             "num_results": args.num_results,
             "force_search": bool(args.force_search),
+            "autonomy": getattr(args, "autonomy", None),
+            "gold_doc_file": getattr(args, "gold_doc_file", None),
             "judgment_instructions": [
-                "详细标注模式：把 judgment.annotation_complete 设为 true，保留 judgment_mode='detailed'，填写 relevant_ranks 或 relevant_urls。",
-                "轻量标注模式：把 judgment.annotation_complete 设为 true，设 judgment_mode='top3_only'，只填写 top3_has_answer_evidence。",
+                "详细标注模式：把 judgment.annotation_complete 设为 true，保留 judgment_mode='detailed'，填写 relevant_ranks 或 relevant_urls；可选填 relevance_grades（逐 rank 0/1/2）以启用 nDCG@5。",
+                "轻量标注模式：把 judgment.annotation_complete 设为 true，设 judgment_mode='top3_only'，只填写 top3_has_answer_evidence 与 core_correct(0/1/2)。",
                 "如果采用 detailed 模式但当前返回结果里没有相关结果，可以保留 relevant_ranks/relevant_urls 为空数组。",
+                "gold_doc 命中已预填到 relevant_urls；请复核而不是照抄；annotator / annotated_at 必填。",
             ],
         },
         "records": records,
     }
     return payload
+
+
+def normalize_gold_url(url: str) -> Tuple[str, str]:
+    """``(host, path)`` with lowercase host, ``www.`` stripped, no query/fragment."""
+    cleaned = str(url or "").strip()
+    if not cleaned:
+        return "", ""
+    if "://" not in cleaned:
+        cleaned = "https://" + cleaned
+    parsed = urlparse(cleaned)
+    host = (parsed.hostname or "").casefold()
+    if host.startswith("www."):
+        host = host[4:]
+    path = (parsed.path or "/").rstrip("/") or "/"
+    return host, path
+
+
+def gold_doc_match(hit_url: Any, gold_url: Any) -> bool:
+    """Gold match: same host (www-insensitive) and the hit path starts with the gold path."""
+    hit_host, hit_path = normalize_gold_url(str(hit_url or ""))
+    gold_host, gold_path = normalize_gold_url(str(gold_url or ""))
+    if not hit_host or not gold_host or hit_host != gold_host:
+        return False
+    if gold_path == "/":
+        return True
+    return hit_path == gold_path or hit_path.startswith(gold_path.rstrip("/") + "/")
+
+
+def registrable_domain_of(url: Any) -> str:
+    from evidence.source_tiering import registrable_domain
+
+    return registrable_domain(url)
+
+
+def dcg(grades: List[float]) -> float:
+    return sum(grade / math.log2(index + 1) for index, grade in enumerate(grades, start=1))
+
+
+def ndcg_at_k(grades: List[float], k: int) -> Optional[float]:
+    """nDCG over graded relevance (0/1/2); None when no result carries relevance."""
+    if not grades:
+        return None
+    ranked = [max(0.0, float(grade)) for grade in grades[:k]]
+    ideal = sorted((max(0.0, float(grade)) for grade in grades), reverse=True)[:k]
+    if not ideal or ideal[0] <= 0:
+        return 0.0
+    return dcg(ranked) / dcg(ideal)
+
+
+def coerce_grade(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)) and int(value) in {0, 1, 2}:
+        return int(value)
+    if isinstance(value, str) and value.strip() in {"0", "1", "2"}:
+        return int(value.strip())
+    return None
+
+
+def relevance_grades_for_record(record: Dict[str, Any]) -> List[int]:
+    """Per-rank 0/1/2 grades: explicit ``relevance_grades`` or binary from relevant ranks."""
+    hits = record.get("search_hits") or []
+    judgment = record.get("judgment") or {}
+    explicit = judgment.get("relevance_grades") or []
+    grades = [coerce_grade(value) for value in explicit]
+    if explicit and all(grade is not None for grade in grades) and len(grades) == len(hits):
+        return [int(grade) for grade in grades]
+    relevant = set(extract_relevant_ranks(record))
+    return [1 if rank in relevant else 0 for rank in range(1, len(hits) + 1)]
+
+
+def build_tier_classifier(config: Optional[Dict[str, Any]]) -> Callable[[str, List[str]], str]:
+    """Offline tier classifier: pins / config map / denylist only (resolver disabled)."""
+    from evidence.official_domain_resolver import build_official_domain_resolver
+    from evidence.source_verdict import classify_source
+
+    orchestration = dict((config or {}).get("orchestration") or {})
+    resolution = dict(orchestration.get("official_domain_resolution") or {})
+    resolution.update({"enabled": False, "graph_probes_enabled": False, "pin_shadow_audit": False})
+    orchestration["official_domain_resolution"] = resolution
+    resolver = build_official_domain_resolver(orchestration)
+    official_domains = orchestration.get("official_domains") or {}
+
+    def classify(url: str, entities: List[str]) -> str:
+        try:
+            return classify_source(url, entities=entities, official_domains=official_domains, resolver=resolver).tier
+        except Exception:  # noqa: BLE001 - tiering must never break evaluation
+            return "unknown"
+
+    return classify
+
+
+def tier_metrics(hits: List[Dict[str, Any]], classify: Callable[[str, List[str]], str], entities: List[str]) -> Dict[str, Any]:
+    tiers = [classify(str(hit.get("url") or ""), entities) for hit in hits]
+    metrics: Dict[str, Any] = {"result_tiers": tiers}
+    for k in TIER_K_VALUES:
+        top = tiers[:k]
+        metrics[f"authoritative_at_{k}"] = (sum(1 for tier in top if tier in {"official", "first_party"}) / len(top)) if top else None
+        metrics[f"aggregator_at_{k}"] = (sum(1 for tier in top if tier == "aggregator") / len(top)) if top else None
+    return metrics
+
+
+def domain_diversity_at_k(hits: List[Dict[str, Any]], k: int = 5) -> Optional[float]:
+    top = hits[:k]
+    if not top:
+        return None
+    domains = {registrable_domain_of(hit.get("url")) or str(hit.get("url") or "") for hit in top}
+    return len(domains) / k
+
+
+def domain_diversity_at_5(hits: List[Dict[str, Any]]) -> Optional[float]:
+    return domain_diversity_at_k(hits, 5)
+
+
+def gold_doc_metrics(hits: List[Dict[str, Any]], gold_urls: List[str]) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {"gold_doc_urls": list(gold_urls), "gold_doc_rank": None}
+    if not gold_urls:
+        for k in GOLD_DOC_K_VALUES:
+            metrics[f"gold_doc_recall_at_{k}"] = None
+        return metrics
+    rank = next(
+        (index for index, hit in enumerate(hits, start=1) if any(gold_doc_match(hit.get("url"), gold) for gold in gold_urls)),
+        None,
+    )
+    metrics["gold_doc_rank"] = rank
+    for k in GOLD_DOC_K_VALUES:
+        metrics[f"gold_doc_recall_at_{k}"] = bool(rank is not None and rank <= k)
+    return metrics
 
 
 def extract_relevant_ranks(record: Dict[str, Any]) -> List[int]:
@@ -878,21 +1269,35 @@ def coerce_ternary_score(value: Any) -> Optional[int]:
     return None
 
 
-def evaluate_record(record: Dict[str, Any]) -> Dict[str, Any]:
+def evaluate_record(
+    record: Dict[str, Any],
+    *,
+    gold_urls: Optional[List[str]] = None,
+    classify: Optional[Callable[[str, List[str]], str]] = None,
+) -> Dict[str, Any]:
     query = str(record.get("query") or "")
     judgment = record.get("judgment") or {}
     annotation_complete = bool(judgment.get("annotation_complete"))
     mode = str(judgment.get("judgment_mode") or DEFAULT_JUDGMENT_MODE).strip().lower()
     if mode not in SUPPORTED_JUDGMENT_MODES:
         mode = DEFAULT_JUDGMENT_MODE
+    hits = record.get("search_hits") or []
+    analysis = (record.get("control") or {}).get("query_analysis") or {}
+    entities = list(dict.fromkeys(list(analysis.get("comparison_members") or []) + list(analysis.get("entities") or [])))
 
     metrics: Dict[str, Any] = {
         "query": query,
+        "query_id": record.get("query_id"),
+        "qid": record.get("qid"),
+        "category": record.get("category"),
         "annotation_complete": annotation_complete,
         "judgment_mode": mode,
         "hit_at_3": None,
         "hit_at_5": None,
+        "answer_hit_at_3": None,
+        "answer_hit_at_5": None,
         "mrr": None,
+        "ndcg_at_5": None,
         "unique_useful_results": None,
         "first_relevant_rank": None,
         "relevant_ranks": [],
@@ -903,11 +1308,20 @@ def evaluate_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "answer_completeness": None,
         "answer_groundedness": None,
         "abstention_quality": None,
+        "core_correct": coerce_ternary_score(judgment.get("core_correct")),
+        "result_count": len(hits),
+        "empty_result": len(hits) == 0,
+        "domain_diversity_at_5": domain_diversity_at_5(hits) if hits else None,
+        "loop_status": (record.get("control") or {}).get("loop_status"),
         "total_latency_ms": extract_total_latency_ms(record),
         "search_latency_ms": extract_component_latency_ms(record, "search_sources"),
         "llm_latency_ms": extract_component_latency_ms(record, "llm_calls"),
         "tool_latency_ms": extract_component_latency_ms(record, "tool_calls"),
     }
+    effective_gold = list(gold_urls or judgment.get("gold_doc_urls") or [])
+    metrics.update(gold_doc_metrics(hits, effective_gold))
+    if classify is not None and hits:
+        metrics.update(tier_metrics(hits, classify, entities))
 
     if not annotation_complete:
         return metrics
@@ -930,20 +1344,26 @@ def evaluate_record(record: Dict[str, Any]) -> Dict[str, Any]:
         metrics["abstention_quality"] = coerce_ternary_score(judgment.get("abstention_quality"))
         return metrics
 
-    relevant_ranks = extract_relevant_ranks(record)
+    grades = relevance_grades_for_record(record)
+    relevant_ranks = [rank for rank, grade in enumerate(grades, start=1) if grade >= 1] or extract_relevant_ranks(record)
     first_relevant_rank = relevant_ranks[0] if relevant_ranks else None
-    hits = record.get("search_hits") or []
+    answer_ranks = [rank for rank, grade in enumerate(grades, start=1) if grade >= 2]
 
     unique_useful_keys = set()
     for rank in relevant_ranks:
         if 1 <= rank <= len(hits):
             unique_useful_keys.add(make_hit_key(hits[rank - 1]))
 
+    has_grades = bool((judgment.get("relevance_grades") or []))
     metrics.update(
         {
             "hit_at_3": any(rank <= 3 for rank in relevant_ranks),
             "hit_at_5": any(rank <= 5 for rank in relevant_ranks),
+            "answer_hit_at_3": any(rank <= 3 for rank in answer_ranks) if has_grades else None,
+            "answer_hit_at_5": any(rank <= 5 for rank in answer_ranks) if has_grades else None,
             "mrr": (1.0 / first_relevant_rank) if first_relevant_rank else 0.0,
+            "ndcg_at_5": ndcg_at_k([float(grade) for grade in grades], 5) if hits else None,
+            "relevance_grades": grades,
             "unique_useful_results": len(unique_useful_keys),
             "first_relevant_rank": first_relevant_rank,
             "relevant_ranks": relevant_ranks,
@@ -1093,11 +1513,338 @@ def build_latency_summary(values: List[Optional[float]]) -> Dict[str, Any]:
     return summary
 
 
-def evaluate_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    per_query = [evaluate_record(record) for record in records]
+def _error_class(reason: Any) -> str:
+    text_value = str(reason or "").casefold()
+    if not text_value:
+        return "none"
+    if "skipped" in text_value and "site:" in text_value:
+        return "site_operator_skipped"
+    if "timeout" in text_value or "timed out" in text_value:
+        return "timeout"
+    if "quota" in text_value or "429" in text_value or "rate limit" in text_value or "monthly_limit" in text_value:
+        return "quota"
+    if any(code in text_value for code in ("401", "403", "400", "404", "422")):
+        return "4xx"
+    if any(code in text_value for code in ("500", "502", "503", "504")):
+        return "5xx"
+    return "other"
+
+
+def _retained_url_keys(record: Dict[str, Any]) -> Set[str]:
+    decisions = ((record.get("control") or {}).get("evidence_coverage") or {}).get("decisions") or []
+    keys: Set[str] = set()
+    for decision in decisions:
+        if not isinstance(decision, dict) or decision.get("decision") != "retained":
+            continue
+        key = normalize_url(str(decision.get("reference") or ""))
+        if key:
+            keys.add(key)
+    return keys
+
+
+def build_provider_scorecard(
+    records: List[Dict[str, Any]],
+    *,
+    classify: Optional[Callable[[str, List[str]], str]] = None,
+) -> Dict[str, Any]:
+    """Per-provider availability / errors / latency / fallback share / retained contribution.
+
+    Built from ``search_api_calls`` of single-chain collect records. Official-domain
+    discovery searches (``target`` / resolver labels) are listed separately so they do
+    not pollute the answer-path scorecard. ``unique_yield`` needs ``--all-providers``.
+    """
+    providers: Dict[str, Dict[str, Any]] = {}
+    discovery: Dict[str, Dict[str, Any]] = {}
+
+    def bucket(store: Dict[str, Dict[str, Any]], name: str) -> Dict[str, Any]:
+        return store.setdefault(
+            name,
+            {
+                "requests": 0,
+                "done": 0,
+                "errors": 0,
+                "error_types": {},
+                "empty": 0,
+                "fallback": 0,
+                "durations_ms": [],
+                "results": 0,
+                "retained": 0,
+                "authoritative": 0,
+                "credits_known": 0.0,
+                "credits_known_requests": 0,
+            },
+        )
+
+    for record in records:
+        retained_keys = _retained_url_keys(record)
+        analysis = (record.get("control") or {}).get("query_analysis") or {}
+        entities = list(dict.fromkeys(list(analysis.get("comparison_members") or []) + list(analysis.get("entities") or [])))
+        for call in record.get("search_api_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            kind = str(call.get("kind") or "")
+            if kind in {"extracted_pages", "resolved_entities"}:
+                continue
+            name = str(call.get("provider") or call.get("source") or "unknown")
+            label = str(call.get("label") or "")
+            is_discovery = bool(call.get("target")) or "官方域" in label or "resolver" in label.casefold() or "discovery" in label.casefold()
+            entry = bucket(discovery if is_discovery else providers, name)
+            entry["requests"] += 1
+            status = str(call.get("status") or "done")
+            reason = call.get("reason") or call.get("error")
+            if status == "error":
+                entry["errors"] += 1
+                error_class = _error_class(reason)
+                entry["error_types"][error_class] = entry["error_types"].get(error_class, 0) + 1
+            else:
+                entry["done"] += 1
+            if call.get("fallback"):
+                entry["fallback"] += 1
+            duration = coerce_float(call.get("duration_ms"))
+            if duration is not None and not (status == "error" and _error_class(reason) == "site_operator_skipped"):
+                entry["durations_ms"].append(duration)
+            results = [item for item in (call.get("records") or call.get("results") or []) if isinstance(item, dict)]
+            count = call.get("result_count")
+            try:
+                count_value = int(count) if count is not None else len(results)
+            except (TypeError, ValueError):
+                count_value = len(results)
+            if status != "error" and count_value == 0:
+                entry["empty"] += 1
+            entry["results"] += count_value
+            for item in results:
+                url = str(item.get("url") or "")
+                if normalize_url(url) in retained_keys:
+                    entry["retained"] += 1
+                if classify is not None and classify(url, entities) in {"official", "first_party"}:
+                    entry["authoritative"] += 1
+            credits = call.get("credits")
+            if isinstance(credits, (int, float)) and not isinstance(credits, bool):
+                entry["credits_known"] += float(credits)
+                entry["credits_known_requests"] += 1
+
+    def finish(store: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        table: Dict[str, Any] = {}
+        for name, entry in sorted(store.items()):
+            requests_count = entry["requests"]
+            attempted = entry["requests"] - entry["error_types"].get("site_operator_skipped", 0)
+            durations = entry.pop("durations_ms")
+            table[name] = {
+                "requests": requests_count,
+                "attempted": attempted,
+                "availability": (entry["done"] / attempted) if attempted else None,
+                "error_rate_by_type": entry["error_types"],
+                "empty_rate": (entry["empty"] / entry["done"]) if entry["done"] else None,
+                "latency_p50_ms": percentile(durations, 0.5),
+                "latency_p95_ms": percentile(durations, 0.95),
+                "fallback_share": (entry["fallback"] / requests_count) if requests_count else None,
+                "results_returned": entry["results"],
+                "retained_contribution": (entry["retained"] / entry["results"]) if entry["results"] else None,
+                "authoritative_yield": (entry["authoritative"] / entry["results"]) if (entry["results"] and classify is not None) else None,
+                "credits_known": entry["credits_known"],
+                "credits_known_requests": entry["credits_known_requests"],
+                "cost_per_retained": (entry["credits_known"] / entry["retained"]) if (entry["retained"] and entry["credits_known_requests"]) else None,
+                "unique_yield": None,
+            }
+        return table
+
+    return {
+        "answer_path": finish(providers),
+        "official_domain_discovery": finish(discovery),
+        "note": "当前链只到首个有结果的 provider，unique_yield 与公平的 retained_contribution 待 --all-providers 采集（Q3-04）。",
+    }
+
+
+def relevance_index_from_annotations(records: List[Dict[str, Any]]) -> Dict[str, Set[str]]:
+    """``normalized query -> {normalized relevant URL}`` from annotated single-chain records."""
+    index: Dict[str, Set[str]] = {}
+    for record in records:
+        judgment = record.get("judgment") or {}
+        if not judgment.get("annotation_complete"):
+            continue
+        hits = record.get("search_hits") or []
+        keys: Set[str] = set()
+        grades = relevance_grades_for_record(record)
+        for rank, grade in enumerate(grades, start=1):
+            if grade >= 1 and rank <= len(hits):
+                key = normalize_url(str(hits[rank - 1].get("url") or ""))
+                if key:
+                    keys.add(key)
+        for url in judgment.get("relevant_urls") or []:
+            key = normalize_url(str(url))
+            if key:
+                keys.add(key)
+        index[normalize_query_key(str(record.get("query") or ""))] = keys
+    return index
+
+
+def evaluate_all_providers(
+    records: List[Dict[str, Any]],
+    *,
+    relevance: Optional[Dict[str, Set[str]]] = None,
+    gold_map: Optional[Dict[str, List[str]]] = None,
+    classify: Optional[Callable[[str, List[str]], str]] = None,
+) -> Dict[str, Any]:
+    """Fair per-provider comparison from an ``--all-providers`` collect file.
+
+    * ``relevant_contribution``: relevant results / returned results (relevance from
+      the annotated single-chain file or gold_doc URLs).
+    * ``unique_yield``: relevant results only this provider returned / its relevant results.
+    * ``agreement``: mean pairwise Jaccard of returned URL sets, plus per-query consensus
+      (share of providers containing the most common top-1 URL) as a drift reference.
+    """
+    providers: Dict[str, Dict[str, Any]] = {}
+    pair_overlaps: Dict[Tuple[str, str], List[float]] = {}
+    consensus: List[float] = []
+    per_query: List[Dict[str, Any]] = []
+
+    def bucket(name: str) -> Dict[str, Any]:
+        return providers.setdefault(
+            name,
+            {"requests": 0, "done": 0, "errors": 0, "error_types": {}, "empty": 0, "durations_ms": [], "results": 0,
+             "relevant": 0, "unique_relevant": 0, "gold_hits": 0, "gold_queries": 0, "authoritative": 0,
+             "credits_known": 0.0, "credits_known_requests": 0},
+        )
+
+    for record in records:
+        query_key = normalize_query_key(str(record.get("query") or ""))
+        relevant_keys = (relevance or {}).get(query_key, set())
+        gold_urls = (gold_map or {}).get(query_key) or list((record.get("judgment") or {}).get("gold_doc_urls") or [])
+        url_sets: Dict[str, Set[str]] = {}
+        top1: Dict[str, str] = {}
+        provider_rows = [row for row in record.get("provider_results") or [] if isinstance(row, dict)]
+        query_summary: Dict[str, Any] = {"query": record.get("query"), "qid": record.get("qid"), "providers": {}}
+        for row in provider_rows:
+            name = str(row.get("provider") or "unknown")
+            entry = bucket(name)
+            entry["requests"] += 1
+            if row.get("status") == "error":
+                entry["errors"] += 1
+                error_class = _error_class(row.get("error"))
+                entry["error_types"][error_class] = entry["error_types"].get(error_class, 0) + 1
+            else:
+                entry["done"] += 1
+            duration = coerce_float(row.get("duration_ms"))
+            if duration is not None:
+                entry["durations_ms"].append(duration)
+            results = [item for item in (row.get("results") or []) if isinstance(item, dict)]
+            if row.get("status") != "error" and not results:
+                entry["empty"] += 1
+            keys = {normalize_url(str(item.get("url") or "")) for item in results}
+            keys.discard("")
+            url_sets[name] = keys
+            if results:
+                top1[name] = normalize_url(str(results[0].get("url") or ""))
+            entry["results"] += len(results)
+            relevant_here = keys & relevant_keys
+            entry["relevant"] += len(relevant_here)
+            if gold_urls:
+                entry["gold_queries"] += 1
+                if any(gold_doc_match(item.get("url"), gold) for item in results for gold in gold_urls):
+                    entry["gold_hits"] += 1
+            if classify is not None:
+                entry["authoritative"] += sum(1 for item in results if classify(str(item.get("url") or ""), []) in {"official", "first_party"})
+            credits = row.get("credits")
+            if isinstance(credits, (int, float)) and not isinstance(credits, bool):
+                entry["credits_known"] += float(credits)
+                entry["credits_known_requests"] += 1
+            query_summary["providers"][name] = {"results": len(results), "relevant": len(relevant_here), "status": row.get("status")}
+        # unique relevant: relevant URLs returned by exactly one provider
+        for name, keys in url_sets.items():
+            others: Set[str] = set()
+            for other_name, other_keys in url_sets.items():
+                if other_name != name:
+                    others |= other_keys
+            providers[name]["unique_relevant"] += len((keys & relevant_keys) - others)
+        names = sorted(url_sets)
+        for index, left in enumerate(names):
+            for right in names[index + 1 :]:
+                union = url_sets[left] | url_sets[right]
+                jaccard = (len(url_sets[left] & url_sets[right]) / len(union)) if union else None
+                if jaccard is not None:
+                    pair_overlaps.setdefault((left, right), []).append(jaccard)
+        if top1:
+            counts: Dict[str, int] = {}
+            for url in top1.values():
+                counts[url] = counts.get(url, 0) + 1
+            consensus.append(max(counts.values()) / len(top1))
+            query_summary["top1_consensus"] = consensus[-1]
+        per_query.append(query_summary)
+
+    table: Dict[str, Any] = {}
+    for name, entry in sorted(providers.items()):
+        durations = entry.pop("durations_ms")
+        table[name] = {
+            "requests": entry["requests"],
+            "availability": (entry["done"] / entry["requests"]) if entry["requests"] else None,
+            "error_rate_by_type": entry["error_types"],
+            "empty_rate": (entry["empty"] / entry["done"]) if entry["done"] else None,
+            "latency_p50_ms": percentile(durations, 0.5),
+            "latency_p95_ms": percentile(durations, 0.95),
+            "results_returned": entry["results"],
+            "relevant_contribution": (entry["relevant"] / entry["results"]) if (entry["results"] and relevance) else None,
+            "unique_yield": (entry["unique_relevant"] / entry["relevant"]) if (entry["relevant"] and relevance) else None,
+            "gold_doc_hit_rate": (entry["gold_hits"] / entry["gold_queries"]) if entry["gold_queries"] else None,
+            "authoritative_yield": (entry["authoritative"] / entry["results"]) if (entry["results"] and classify is not None) else None,
+            "credits_known": entry["credits_known"],
+            "credits_known_requests": entry["credits_known_requests"],
+            "cost_per_relevant": (entry["credits_known"] / entry["relevant"]) if (entry["relevant"] and entry["credits_known_requests"]) else None,
+        }
+    agreement = {
+        f"{left}|{right}": average(values) for (left, right), values in sorted(pair_overlaps.items())
+    }
+    return {
+        "providers": table,
+        "agreement": {"pairwise_jaccard": agreement, "top1_consensus_mean": average(consensus), "queries": len(records)},
+        "per_query": per_query,
+        "relevance_source": "annotations" if relevance else ("gold_doc" if gold_map else "none"),
+    }
+
+
+def build_category_macro(per_query: List[Dict[str, Any]], metric: str, *, rate_metric: bool) -> Dict[str, Any]:
+    """Per-category means with the design §3.4 rule: < 5 samples report counts only."""
+    groups: Dict[str, List[Any]] = {}
+    for item in per_query:
+        value = item.get(metric)
+        if value is None:
+            continue
+        groups.setdefault(str(item.get("category") or "uncategorized"), []).append(value)
+    table: Dict[str, Any] = {}
+    means: List[float] = []
+    for name, values in sorted(groups.items()):
+        numeric = [1.0 if bool(v) else 0.0 for v in values] if rate_metric else [float(v) for v in values]
+        entry: Dict[str, Any] = {"n": len(numeric)}
+        if len(numeric) >= MIN_CATEGORY_SAMPLES:
+            entry["value"] = sum(numeric) / len(numeric)
+            means.append(entry["value"])
+        else:
+            entry["value"] = None
+            entry["count_only"] = True
+            entry["positives"] = int(sum(numeric)) if rate_metric else None
+        table[name] = entry
+    return {"groups": table, "macro_average": (sum(means) / len(means)) if means else None}
+
+
+def evaluate_records(
+    records: List[Dict[str, Any]],
+    *,
+    gold_map: Optional[Dict[str, List[str]]] = None,
+    classify: Optional[Callable[[str, List[str]], str]] = None,
+) -> Dict[str, Any]:
+    gold_map = gold_map or {}
+    per_query = [
+        evaluate_record(
+            record,
+            gold_urls=gold_map.get(normalize_query_key(str(record.get("query") or ""))),
+            classify=classify,
+        )
+        for record in records
+    ]
     annotated = [item for item in per_query if item["annotation_complete"]]
     detailed = [item for item in annotated if item["judgment_mode"] == DEFAULT_JUDGMENT_MODE]
     top3_only = [item for item in annotated if item["judgment_mode"] == TOP3_ONLY_JUDGMENT_MODE]
+    with_gold = [item for item in per_query if item.get("gold_doc_urls")]
+    with_tiers = [item for item in per_query if item.get("result_tiers")]
 
     report = {
         "summary": {
@@ -1105,6 +1852,35 @@ def evaluate_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             "annotated_queries": len(annotated),
             "detailed_annotations": len(detailed),
             "top3_only_annotations": len(top3_only),
+            "empty_result_rate": build_metric_summary(
+                [item["empty_result"] for item in per_query],
+                treat_bool_as_rate=True,
+            ),
+            "gold_doc_queries": len(with_gold),
+            "gold_doc_recall_at_3": build_metric_summary(
+                [item.get("gold_doc_recall_at_3") for item in with_gold],
+                treat_bool_as_rate=True,
+            ),
+            "gold_doc_recall_at_5": build_metric_summary(
+                [item.get("gold_doc_recall_at_5") for item in with_gold],
+                treat_bool_as_rate=True,
+            ),
+            "authoritative_at_3": build_metric_summary([item.get("authoritative_at_3") for item in with_tiers]),
+            "authoritative_at_5": build_metric_summary([item.get("authoritative_at_5") for item in with_tiers]),
+            "aggregator_at_3": build_metric_summary([item.get("aggregator_at_3") for item in with_tiers]),
+            "aggregator_at_5": build_metric_summary([item.get("aggregator_at_5") for item in with_tiers]),
+            "domain_diversity_at_5": build_metric_summary([item.get("domain_diversity_at_5") for item in per_query]),
+            "ndcg_at_5": build_metric_summary(
+                [item.get("ndcg_at_5") for item in detailed if item.get("relevance_grades") and item.get("judgment_mode") == DEFAULT_JUDGMENT_MODE and (item.get("relevance_grades") or []) and any(grade == 2 for grade in item.get("relevance_grades") or [])]
+            ),
+            "answer_hit_at_3": build_metric_summary(
+                [item.get("answer_hit_at_3") for item in detailed],
+                treat_bool_as_rate=True,
+            ),
+            "core_correct": build_discrete_score_summary(
+                [item.get("core_correct") for item in annotated],
+                allowed_scores=[0, 1, 2],
+            ),
             "hit_at_3": build_metric_summary(
                 [item["hit_at_3"] for item in annotated],
                 treat_bool_as_rate=True,
@@ -1161,6 +1937,15 @@ def evaluate_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 int(item["unique_useful_results"] or 0) for item in detailed
             ),
         },
+        "by_category": {
+            "hit_at_3": build_category_macro(annotated, "hit_at_3", rate_metric=True),
+            "mrr": build_category_macro(detailed, "mrr", rate_metric=False),
+            "gold_doc_recall_at_5": build_category_macro(with_gold, "gold_doc_recall_at_5", rate_metric=True),
+            "authoritative_at_5": build_category_macro(with_tiers, "authoritative_at_5", rate_metric=False),
+            "empty_result_rate": build_category_macro(per_query, "empty_result", rate_metric=True),
+            "core_correct": build_category_macro(annotated, "core_correct", rate_metric=False),
+        },
+        "providers": build_provider_scorecard(records, classify=classify),
         "per_query": per_query,
     }
     return report
@@ -1176,11 +1961,20 @@ def print_summary(report: Dict[str, Any], *, print_details: bool = False) -> Non
 
     for metric_name in (
         "hit_at_3",
+        "answer_hit_at_3",
+        "gold_doc_recall_at_3",
+        "gold_doc_recall_at_5",
+        "empty_result_rate",
         "route_correct",
         "fulltext_decision_correct",
         "hit_at_5",
         "chunk_hit_at_5",
         "mrr",
+        "ndcg_at_5",
+        "authoritative_at_3",
+        "authoritative_at_5",
+        "aggregator_at_5",
+        "domain_diversity_at_5",
         "avg_unique_useful_results",
         "avg_total_latency_ms",
         "avg_search_latency_ms",
@@ -1194,7 +1988,7 @@ def print_summary(report: Dict[str, Any], *, print_details: bool = False) -> Non
             print(f"- {metric_name}: N/A (denominator={denominator})")
             continue
 
-        if metric_name.startswith("hit_at_") or metric_name.startswith("chunk_hit_at_"):
+        if "positives" in metric:
             print(f"- {metric_name}: {value:.4f} ({metric.get('positives', 0)}/{denominator})")
         elif metric_name.endswith("_correct"):
             print(f"- {metric_name}: {value:.4f} ({metric.get('positives', 0)}/{denominator})")
@@ -1209,6 +2003,7 @@ def print_summary(report: Dict[str, Any], *, print_details: bool = False) -> Non
             print(f"- {metric_name}: {value:.4f} (denominator={denominator})")
 
     for metric_name in (
+        "core_correct",
         "answer_correctness",
         "answer_completeness",
         "answer_groundedness",
@@ -1227,6 +2022,25 @@ def print_summary(report: Dict[str, Any], *, print_details: bool = False) -> Non
         )
 
     print(f"- total_unique_useful_results: {summary['total_unique_useful_results']}")
+
+    providers = (report.get("providers") or {}).get("answer_path") or {}
+    if providers:
+        print("\nProvider scorecard (answer path)")
+        for name, entry in providers.items():
+            print(
+                f"- {name}: requests={entry['requests']} availability={entry['availability']} "
+                f"empty_rate={entry['empty_rate']} p50={entry['latency_p50_ms']} p95={entry['latency_p95_ms']} "
+                f"fallback_share={entry['fallback_share']} retained_contribution={entry['retained_contribution']}"
+            )
+    by_category = report.get("by_category") or {}
+    if by_category:
+        print("\nBy category (macro; n<5 counts only)")
+        for metric_name, block in by_category.items():
+            groups = ", ".join(
+                f"{name}={entry['value']:.3f}(n={entry['n']})" if entry.get("value") is not None else f"{name}=n={entry['n']}"
+                for name, entry in block["groups"].items()
+            )
+            print(f"- {metric_name}: macro={block['macro_average']} | {groups}")
 
     if not print_details:
         return
@@ -1332,7 +2146,32 @@ def main() -> None:
     if not isinstance(records, list):
         raise SystemExit("annotations file must contain a top-level 'records' list.")
 
-    report = evaluate_records(records)
+    gold_map = load_gold_doc_map(args.gold_doc_file)
+    classify = None
+    if args.config:
+        classify = build_tier_classifier(load_config(args.config))
+    else:
+        try:
+            classify = build_tier_classifier(load_config(None))
+        except (OSError, ValueError):
+            classify = build_tier_classifier({})
+
+    if (payload.get("meta") or {}).get("collect_mode") == "all_providers":
+        relevance: Optional[Dict[str, Set[str]]] = None
+        if args.relevance_annotations:
+            with open(args.relevance_annotations, "r", encoding="utf-8") as handle:
+                annotated_payload = json.load(handle)
+            relevance = relevance_index_from_annotations(list(annotated_payload.get("records") or []))
+        report = evaluate_all_providers(records, relevance=relevance, gold_map=gold_map, classify=classify)
+        print(json.dumps({k: v for k, v in report.items() if k != "per_query"}, ensure_ascii=False, indent=2))
+        if args.output_file:
+            ensure_parent_dir(args.output_file)
+            with open(args.output_file, "w", encoding="utf-8") as handle:
+                json.dump(report, handle, ensure_ascii=False, indent=2)
+            print(f"\nSaved all-providers report to {args.output_file}")
+        return
+
+    report = evaluate_records(records, gold_map=gold_map, classify=classify)
     print_summary(report, print_details=args.print_details)
 
     if args.output_file:

@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import requests
 
+from utils.provider_usage import ProviderUsageRecorder, resolve_credits
+
 
 TAVILY_SEARCH_DEPTHS = frozenset({"advanced", "basic", "fast", "ultra-fast"})
 FIRECRAWL_DEPTH_MAP = {"ultra-fast": 1, "fast": 1, "basic": 2, "advanced": 3}
@@ -108,6 +110,7 @@ class SearchClient:
         label: Optional[str] = None,
         fallback: bool = False,
         slot: Optional[str] = None,
+        credits: Optional[float] = None,
     ) -> None:
         """Retain a compact per-request snapshot before callers merge results."""
         normalized_hits = list(hits or [])
@@ -133,6 +136,8 @@ class SearchClient:
             record["fallback"] = True
         if slot:
             record["slot"] = str(slot)
+        if credits is not None:
+            record["credits"] = float(credits)
         self._last_call_records.append(record)
 
     def _extend_call_records(
@@ -221,13 +226,25 @@ class _JsonPostSearchClient(SearchClient):
 
     max_results = 20
 
-    def __init__(self, api_key: str, *, base_url: str, timeout: int = 20) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str,
+        timeout: int = 20,
+        credits_per_request: Optional[float] = None,
+        usage_recorder: Optional[ProviderUsageRecorder] = None,
+    ) -> None:
         super().__init__()
         if not api_key:
             raise ValueError(f"{self.display_name} API key is required.")
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = max(1, int(timeout))
+        # Credits are read from the response body/header when the provider
+        # reports them, else from the configured fixed value; None = unknown.
+        self.credits_per_request = credits_per_request
+        self.usage_recorder = usage_recorder
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -264,6 +281,9 @@ class _JsonPostSearchClient(SearchClient):
         start = time.perf_counter()
         error_message: Optional[str] = None
         hits: List[SearchHit] = []
+        credits: Optional[float] = None
+        credits_source: Optional[str] = None
+        status_code: Optional[int] = None
         try:
             limit = max(1, min(int(per_source_limit or num_results), self.max_results))
             request_payload = self._build_payload(
@@ -279,11 +299,17 @@ class _JsonPostSearchClient(SearchClient):
                     json=request_payload,
                     timeout=self.timeout,
                 )
+                status_code = getattr(response, "status_code", None)
                 response.raise_for_status()
                 payload = response.json()
             except (requests.RequestException, ValueError) as exc:
                 error_message = str(exc)
                 raise RuntimeError(f"{self.display_name} search failed: {exc}") from exc
+            credits, credits_source = resolve_credits(
+                payload,
+                getattr(response, "headers", None),
+                self.credits_per_request,
+            )
 
             if not isinstance(payload, dict):
                 raise RuntimeError(f"{self.display_name} returned an invalid JSON payload.")
@@ -334,7 +360,24 @@ class _JsonPostSearchClient(SearchClient):
                 duration_ms=timing["duration_ms"],
                 hits=hits,
                 error=error_message,
+                credits=credits,
             )
+            if self.usage_recorder is not None:
+                try:
+                    self.usage_recorder.record(
+                        provider=self.source_id,
+                        kind="search",
+                        success=error_message is None,
+                        credits=credits,
+                        credits_source=credits_source,
+                        status_code=status_code,
+                        result_count=len(hits),
+                        query=query,
+                        error=error_message,
+                        duration_ms=timing["duration_ms"],
+                    )
+                except Exception:  # noqa: BLE001 - usage accounting must never break search
+                    pass
 
 
 class FirecrawlSearchClient(_JsonPostSearchClient):
@@ -350,8 +393,16 @@ class FirecrawlSearchClient(_JsonPostSearchClient):
         base_url: str = "https://api.firecrawl.dev/v2/search",
         timeout: int = 30,
         search_depth: Any = None,
+        credits_per_request: Optional[float] = None,
+        usage_recorder: Optional[ProviderUsageRecorder] = None,
     ) -> None:
-        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        super().__init__(
+            api_key,
+            base_url=base_url,
+            timeout=timeout,
+            credits_per_request=credits_per_request,
+            usage_recorder=usage_recorder,
+        )
         self.search_depth = _coerce_firecrawl_depth(search_depth)
 
     def _build_payload(
@@ -402,8 +453,16 @@ class AnySearchClient(_JsonPostSearchClient):
         *,
         base_url: str = "https://api.anysearch.com/v1/search",
         timeout: int = 30,
+        credits_per_request: Optional[float] = None,
+        usage_recorder: Optional[ProviderUsageRecorder] = None,
     ) -> None:
-        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        super().__init__(
+            api_key,
+            base_url=base_url,
+            timeout=timeout,
+            credits_per_request=credits_per_request,
+            usage_recorder=usage_recorder,
+        )
 
     def _build_payload(
         self,
@@ -442,8 +501,16 @@ class TavilySearchClient(_JsonPostSearchClient):
         base_url: str = "https://api.tavily.com/search",
         timeout: int = 20,
         search_depth: str = "basic",
+        credits_per_request: Optional[float] = None,
+        usage_recorder: Optional[ProviderUsageRecorder] = None,
     ) -> None:
-        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        super().__init__(
+            api_key,
+            base_url=base_url,
+            timeout=timeout,
+            credits_per_request=credits_per_request,
+            usage_recorder=usage_recorder,
+        )
         normalized_depth = str(search_depth or "basic").strip().lower()
         self.search_depth = normalized_depth if normalized_depth in TAVILY_SEARCH_DEPTHS else "basic"
 
@@ -505,8 +572,16 @@ class ParallelSearchClient(_JsonPostSearchClient):
         timeout: int = 30,
         mode: str = "fast",
         max_chars_per_result: int = 1500,
+        credits_per_request: Optional[float] = None,
+        usage_recorder: Optional[ProviderUsageRecorder] = None,
     ) -> None:
-        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        super().__init__(
+            api_key,
+            base_url=base_url,
+            timeout=timeout,
+            credits_per_request=credits_per_request,
+            usage_recorder=usage_recorder,
+        )
         normalized_mode = str(mode or "fast").strip().lower()
         self.mode = normalized_mode if normalized_mode in {"fast", "one-shot", "agentic"} else "fast"
         self.max_chars_per_result = max(200, int(max_chars_per_result))

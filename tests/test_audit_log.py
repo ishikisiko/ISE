@@ -468,3 +468,35 @@ def test_config_example_documents_disabled_audit_defaults() -> None:
     assert config["audit"]["max_bytes_per_record"] == 65536
     assert config["server_logging"]["enabled"] is False
     assert config["server_logging"]["dir"] == "runtime/server"
+
+
+def test_size_cap_records_which_fields_were_truncated(tmp_path: Path) -> None:
+    recorder = AuditRecorder(str(tmp_path), max_bytes_per_record=600)
+    path = Path(
+        recorder.record_turn(
+            conversation_id="truncated-fields",
+            query="which fields",
+            allow_search=True,
+            result={
+                "answer": "a" * 3000,
+                "control": {"loop_status": "succeeded", "big": "b" * 3000},
+            },
+        )
+    )
+
+    raw_line = path.read_text(encoding="utf-8").strip()
+    record = json.loads(raw_line)
+    assert record["truncated"] is True
+    assert "answer" in record["truncated_fields"]
+    assert "control" in record["truncated_fields"]
+    assert len(raw_line.encode("utf-8")) <= 600
+
+    untouched = build_audit_record(
+        conversation_id="small",
+        query="tiny",
+        allow_search=False,
+        result={"answer": "short"},
+        max_bytes_per_record=4096,
+    )
+    assert "truncated" not in untouched
+    assert "truncated_fields" not in untouched

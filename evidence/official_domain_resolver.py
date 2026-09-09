@@ -54,6 +54,7 @@ from evidence.official_domain_graph import (
     decide_graph,
 )
 from evidence.source_tiering import normalize_entity_stem
+from utils.provider_calls import notify_provider_call
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -1380,19 +1381,32 @@ class OfficialDomainResolver:
         budget = max(1, int(self.config.max_verification_fetches))
         related = list(candidate_hosts) + [h for h in known_hosts if h]
         for host, _sigs in ordered[:budget]:
-            for produce in (
-                lambda: self._probers.ct_age(
+            for probe_name, produce in (
+                ("ct_age", lambda: self._probers.ct_age(
                     host, min_age_days=self.config.min_domain_age_days
-                ),
-                lambda: self._probers.facade(host),
-                lambda: self._probers.cert_san(host, related),
-                lambda: self._probers.redirect(host, known_hosts),
+                )),
+                ("facade", lambda: self._probers.facade(host)),
+                ("cert_san", lambda: self._probers.cert_san(host, related)),
+                ("redirect", lambda: self._probers.redirect(host, known_hosts)),
             ):
+                started = time.perf_counter()
+                succeeded = True
                 try:
                     for edge in produce() or []:
                         graph.add(edge)
                 except Exception:  # noqa: BLE001 - probes are best-effort
+                    succeeded = False
                     _LOGGER.debug("graph probe failed for %s", host, exc_info=True)
+                if self.config.graph_probes_enabled:
+                    # Each prober may issue zero or several network requests
+                    # (DNS, TLS, HEAD, GET); this records one probe per host.
+                    notify_provider_call(
+                        kind="resolver_probe",
+                        provider=f"graph_{probe_name}",
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        success=succeeded,
+                        target=host,
+                    )
 
     @staticmethod
     def _discovery_queries(label: str) -> List[str]:
@@ -1444,18 +1458,32 @@ class OfficialDomainResolver:
     def _probe_structured(
         self, source: str, stem: str, label: str
     ) -> Optional[Tuple[Signal, str]]:
+        started = time.perf_counter()
+        outcome: Optional[Tuple[Signal, str]] = None
+        failed = False
         try:
             if source == "wikidata":
-                return self._probe_wikidata(stem, label)
-            if source == "pypi":
-                return self._probe_pypi(stem, label)
-            if source == "npm":
-                return self._probe_npm(stem, label)
-            if source == "github":
-                return self._probe_github(stem, label)
+                outcome = self._probe_wikidata(stem, label)
+            elif source == "pypi":
+                outcome = self._probe_pypi(stem, label)
+            elif source == "npm":
+                outcome = self._probe_npm(stem, label)
+            elif source == "github":
+                outcome = self._probe_github(stem, label)
+            else:
+                return None
         except Exception:  # noqa: BLE001 - structured probes are best-effort
+            failed = True
             _LOGGER.debug("structured probe %s failed for %s", source, label, exc_info=True)
-        return None
+        # One probe is one registry lookup (Wikidata may issue a second entity
+        # fetch; the proxy-side count is the authority for exact numbers).
+        notify_provider_call(
+            kind="resolver_probe",
+            provider=str(source),
+            duration_ms=(time.perf_counter() - started) * 1000,
+            success=not failed and outcome is not None,
+        )
+        return outcome
 
     def _probe_wikidata(self, stem: str, label: str) -> Optional[Tuple[Signal, str]]:
         params = {
@@ -1628,6 +1656,8 @@ class OfficialDomainResolver:
         """
         voted: Dict[str, List[str]] = {}
         for client in self._search_clients:
+            source_id = getattr(client, "source_id", "search")
+            started = time.perf_counter()
             try:
                 # Ask for headroom then keep only the first ``limit`` valid
                 # candidates. List-suppressed results must not consume the
@@ -1635,9 +1665,21 @@ class OfficialDomainResolver:
                 hits = client.search(query, num_results=max(limit * 3, limit))
             except Exception:  # noqa: BLE001 - a failed provider must not block voting
                 _LOGGER.debug("search vote failed for %s", query, exc_info=True)
+                notify_provider_call(
+                    kind="resolver_discovery",
+                    provider=str(source_id),
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    success=False,
+                )
                 continue
+            notify_provider_call(
+                kind="resolver_discovery",
+                provider=str(source_id),
+                duration_ms=(time.perf_counter() - started) * 1000,
+                success=True,
+                result_count=len(hits or []),
+            )
             seen_for_provider: set = set()
-            source_id = getattr(client, "source_id", "search")
             accepted = 0
             for hit in hits or []:
                 url = getattr(hit, "url", "") or (hit.get("url") if isinstance(hit, Mapping) else "")
@@ -1658,10 +1700,25 @@ class OfficialDomainResolver:
         if client is None:
             return None
         url = f"https://{host.lstrip('/')}"
+        started = time.perf_counter()
         try:
             extraction = client.extract([url])
         except Exception:  # noqa: BLE001
+            notify_provider_call(
+                kind="resolver_verify",
+                provider=str(getattr(client, "source_id", "direct_fetch")),
+                duration_ms=(time.perf_counter() - started) * 1000,
+                success=False,
+                target=host,
+            )
             return None
+        notify_provider_call(
+            kind="resolver_verify",
+            provider=str(getattr(client, "source_id", "direct_fetch")),
+            duration_ms=(time.perf_counter() - started) * 1000,
+            success=bool(extraction.contents),
+            target=host,
+        )
         content = next(iter(extraction.contents or []), None)
         if content is None:
             return None

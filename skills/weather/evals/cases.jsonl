@@ -1,8 +1,34 @@
-{"query":"What is the weather in Bend, Oregon today?","expect":"weather","preflight":"accepted"}
-{"query":"Is it raining in New York?","expect":"weather","preflight":"accepted"}
-{"query":"Will it snow in Beijing tomorrow?","expect":"weather","preflight":"accepted"}
-{"query":"北京明天天气怎么样","expect":"weather","preflight":"accepted"}
-{"query":"新加坡空气质量如何","expect":"weather","preflight":"accepted"}
-{"query":"Will it rain tomorrow?","expect":"weather","preflight":"location_required"}
-{"query":"Explain the water cycle","expect":"not_weather","preflight":"not_weather_query"}
-{"query":"Brainstorm product ideas","expect":"not_weather","preflight":"not_weather_query"}
+{"query": "What is the weather in Bend, Oregon today?", "expect": "weather", "preflight": "accepted", "why": "explicit city + weather", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Is it raining in New York?", "expect": "weather", "preflight": "accepted", "why": "rain + city", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Will it snow in Beijing tomorrow?", "expect": "weather", "preflight": "accepted", "why": "snow forecast + city", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "北京明天天气怎么样", "expect": "weather", "preflight": "accepted", "why": "中文城市+天气", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "新加坡空气质量如何", "expect": "weather", "preflight": "accepted", "why": "空气质量", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "How humid is it in Singapore today?", "expect": "weather", "preflight": "accepted", "why": "humidity + city", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What is the temperature in London right now?", "expect": "weather", "preflight": "accepted", "why": "temperature + city", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "上海后天会下雨吗", "expect": "weather", "preflight": "accepted", "why": "后天预报", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Tokyo weather forecast for next week", "expect": "weather", "preflight": "accepted", "why": "forecast + city", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "深圳今天气温多少度", "expect": "weather", "preflight": "accepted", "why": "气温", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Is there smog in Delhi today?", "expect": "weather", "preflight": "accepted", "why": "smog", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What is the AQI in Los Angeles right now?", "expect": "weather", "preflight": "accepted", "why": "aqi", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "成都明天的空气质量怎么样", "expect": "weather", "preflight": "accepted", "why": "空气质量预报", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What's the forecast for Paris tomorrow?", "expect": "weather", "preflight": "accepted", "why": "forecast", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "杭州这周会下雪吗", "expect": "weather", "preflight": "accepted", "why": "下雪", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "How hot is it in Sydney today?", "expect": "weather", "preflight": "not_weather_query", "why": "hot is not a listed term; documents the gap if it misses", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": false}
+{"query": "PM2.5 in Beijing today", "expect": "weather", "preflight": "accepted", "why": "pm2.5", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Will it rain tomorrow?", "expect": "weather", "preflight": "location_required", "why": "domain yes, location missing -> reject with location_required", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "明天会下雨吗", "expect": "weather", "preflight": "accepted", "why": "缺地点", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "天气怎么样", "expect": "weather", "preflight": "location_required", "why": "缺地点", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Explain the water cycle", "expect": "not_weather", "preflight": "not_weather_query", "why": "science explainer", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Brainstorm product ideas", "expect": "not_weather", "preflight": "not_weather_query", "why": "unrelated", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "How does a rain sensor work?", "expect": "not_weather", "preflight": "location_required", "why": "hard negative: rain as a device topic", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Snow White movie release date", "expect": "not_weather", "preflight": "location_required", "why": "hard negative: snow in a title", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Weather Underground stock price", "expect": "not_weather", "preflight": "location_required", "why": "hard negative: company name contains weather", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "What is the boiling temperature of water?", "expect": "not_weather", "preflight": "location_required", "why": "hard negative: temperature as physics", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Weather API pricing comparison", "expect": "not_weather", "preflight": "location_required", "why": "hard negative: product pricing", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Climate change policy in the EU", "expect": "not_weather", "preflight": "not_weather_query", "why": "policy", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Write a poem about rain", "expect": "not_weather", "preflight": "location_required", "why": "hard negative: creative writing", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "How to install a humidity sensor on Raspberry Pi", "expect": "not_weather", "preflight": "location_required", "why": "hard negative: hardware", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Convert 98°F to Celsius", "expect": "not_weather", "preflight": "not_weather_query", "why": "unit conversion", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Forecast quarterly revenue for my startup", "expect": "not_weather", "preflight": "accepted", "why": "hard negative: forecast as finance", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "温度传感器的工作原理", "expect": "not_weather", "preflight": "location_required", "why": "困难负例：温度作为器件", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "下雨天适合听的歌", "expect": "not_weather", "preflight": "location_required", "why": "困难负例：下雨作为情境", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}

@@ -24,6 +24,7 @@ from utils.current_time import get_current_date_str
 from utils.workflow_trace import WorkflowTracer, ensure_tracer
 from utils.audit_log import AuditRecorder, resolve_audit_settings
 from utils.provider_session import with_provider_session
+from utils.provider_calls import observe_provider_calls
 from utils.query_orchestration import (
     EvidenceLedger,
     EvidencePolicyRegistry,
@@ -478,23 +479,26 @@ Always answer in the same language as the user's question."""
             return self._finalize_response(result, timing_recorder)
 
         tracer.begin("loop", "Agentic Loop", detail="act / observe / evaluate")
-        result = self._run_loop_executor(
-            query=query,
-            effective_query=effective_query,
-            allow_search=allow_search,
-            conversation_id=conversation_id,
-            time_constraint=time_constraint,
-            num_search_results=total_limit,
-            per_source_limit=per_source_limit,
-            num_retrieved_docs=num_retrieved_docs,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            reference_limit=reference_limit,
-            force_search=force_search,
-            timing_recorder=timing_recorder,
-            tracer=tracer,
-            cancel_event=cancel_event,
-        )
+        # Resolver discovery / verification requests happen far below the
+        # loop; the observer lets them land in the same ``tool_calls`` ledger.
+        with observe_provider_calls(timing_recorder.record_provider_request):
+            result = self._run_loop_executor(
+                query=query,
+                effective_query=effective_query,
+                allow_search=allow_search,
+                conversation_id=conversation_id,
+                time_constraint=time_constraint,
+                num_search_results=total_limit,
+                per_source_limit=per_source_limit,
+                num_retrieved_docs=num_retrieved_docs,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reference_limit=reference_limit,
+                force_search=force_search,
+                timing_recorder=timing_recorder,
+                tracer=tracer,
+                cancel_event=cancel_event,
+            )
         control = result.setdefault("control", {})
         if applied_search_depth:
             control["search_depth"] = applied_search_depth

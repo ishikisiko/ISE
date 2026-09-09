@@ -69,7 +69,9 @@ def planned_queries() -> list[dict[str, Any]]:
     facts = baseline.read_csv_rows(str(ROOT / baseline.DEFAULT_ANSWER_DATASET))
     opened = baseline.read_csv_rows(str(ROOT / baseline.DEFAULT_OPEN_DATASET))
     rows = []
-    for fact, task in zip(facts, opened, strict=True):
+    # The study froze the first 20 fact questions (final001-final020); the
+    # dataset grew on 2026-09-09 (quality plan Q6-02) without changing them.
+    for fact, task in zip(facts[: len(opened)], opened, strict=True):
         rows.extend([dict(fact, dataset="final_answer"), dict(task, dataset="open_task")])
     return rows
 

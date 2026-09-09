@@ -1,6 +1,6 @@
 # 文档索引
 
-顶层四份是理解和维护 ISE 的入口，长期与代码同步；子目录按用途分开。
+顶层六份是理解和维护 ISE 的入口，长期与代码同步；子目录按用途分开。
 文档之间冲突时，架构方向以 `agentic_loop_roadmap.md` 为准，能力契约以 `../openspec/specs/` 为准。
 
 ## 顶层：长期维护
@@ -11,13 +11,16 @@
 | [query_execution_paths.md](query_execution_paths.md) | `utils/query_orchestration.py` 契约边界与各执行路径 |
 | [agentic_loop_roadmap.md](agentic_loop_roadmap.md) | Agentic loop 演进路线 M0–M6，架构方向的唯一权威 |
 | [baseline.md](baseline.md) | 基线度量手册：怎么跑、记什么、各里程碑实测数字 |
+| [quality_evaluation_design.md](quality_evaluation_design.md) | 质量分析设计：12 个质量维度、评分方案、数据集规划与实施路线 |
+| [quality_evaluation_plan.md](quality_evaluation_plan.md) | 质量评测实施计划：Q0–Q6 可勾选任务、里程碑、预算与风险 |
 
 ## guides/：操作指南
 
 | 文件 | 内容 |
 |---|---|
 | [guides/server_logging.md](guides/server_logging.md) | Web 部署的持久化审计与进程日志配置 |
-| [guides/search_quality_evaluation.md](guides/search_quality_evaluation.md) | 检索质量评测步骤与回归脚本 |
+| [guides/search_quality_evaluation.md](guides/search_quality_evaluation.md) | 检索质量评测步骤与回归脚本（含 2026-09-09 新增指标与 `--all-providers`） |
+| [guides/quality_annotation_guide.md](guides/quality_annotation_guide.md) | 质量评测人工标注指南：搜索轻量/详细档、答案 0/1/2 判据、gold 勘误、循环判定抽样 |
 
 ## devbench/：开发能力 Benchmark（出题方资料）
 
@@ -42,6 +45,9 @@
 
 | 文件 | 内容 |
 |---|---|
+| [reports/quality_evaluation_20260909/report.md](reports/quality_evaluation_20260909/report.md) | 质量评测首份报告（2026-09-09）：离线回归 + 历史产物重算 + 禁网探针；真实运行未授权 |
+| [reports/quality_evaluation_20260909/historical_r2_scorecard.md](reports/quality_evaluation_20260909/historical_r2_scorecard.md) | 由 `tests/quality_report.py` 生成的历史 r2 记分卡（含逐题附表） |
+| [reports/quality_evaluation_20260909/offline_scorecard.md](reports/quality_evaluation_20260909/offline_scorecard.md) | 离线 run 的自动记分卡 |
 | [reports/autonomy_evaluation_20260908/report.md](reports/autonomy_evaluation_20260908/report.md) | guided / autonomous 两轮真实评测报告（2026-09-08） |
 | [reports/autonomy_evaluation_20260908/protocol.md](reports/autonomy_evaluation_20260908/protocol.md) | 评测协议；`tests/autonomy_study.py` 冻结其摘要 |
 | [reports/autonomy_evaluation_20260908/cases.md](reports/autonomy_evaluation_20260908/cases.md) | 逐题附表 |

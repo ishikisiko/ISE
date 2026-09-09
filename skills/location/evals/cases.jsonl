@@ -1,5 +1,32 @@
-{"query":"nearest KFC to HKUST","expect":"location","preflight":"accepted"}
-{"query":"香港科技大学附近的医院在哪里","expect":"location","preflight":"accepted"}
-{"query":"Find coffee shops near me.","expect":"location","preflight":"explicit_location_required"}
-{"query":"Where is the nearest hospital?","expect":"location","preflight":"explicit_location_required"}
-{"query":"Population of Canada","expect":"not_location","preflight":"not_location_query"}
+{"query": "nearest KFC to HKUST", "expect": "location", "preflight": "accepted", "why": "nearest X to Y", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "香港科技大学附近的医院在哪里", "expect": "location", "preflight": "accepted", "why": "附近的", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Find coffee shops near Central Park", "expect": "location", "preflight": "accepted", "why": "near + landmark", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "closest pharmacy to Times Square", "expect": "location", "preflight": "accepted", "why": "closest X to Y", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "北京大学附近有什么好吃的", "expect": "location", "preflight": "accepted", "why": "附近有什么", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "上海虹桥火车站周边的酒店", "expect": "location", "preflight": "accepted", "why": "周边的", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "离故宫最近的地铁站是哪个", "expect": "location", "preflight": "accepted", "why": "离…最近的", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "gas stations near Stanford University", "expect": "location", "preflight": "accepted", "why": "near + place", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "restaurants near Eiffel Tower", "expect": "location", "preflight": "accepted", "why": "near", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "closest subway station to Harvard Square", "expect": "location", "preflight": "accepted", "why": "closest", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "西湖附近的咖啡馆", "expect": "location", "preflight": "accepted", "why": "附近的", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "nearest hospital to Shibuya Station", "expect": "location", "preflight": "accepted", "why": "nearest to", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Find a gas station near my current location.", "expect": "location", "preflight": "explicit_location_required", "why": "domain yes, reference vague -> explicit_location_required", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Find coffee shops near me.", "expect": "location", "preflight": "explicit_location_required", "why": "缺显式地点", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Where is the nearest hospital?", "expect": "location", "preflight": "explicit_location_required", "why": "缺显式地点", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "附近有什么餐厅", "expect": "location", "preflight": "explicit_location_required", "why": "缺显式地点", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "nearest ATM to my current location", "expect": "location", "preflight": "explicit_location_required", "why": "缺显式地点", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Population of Canada", "expect": "not_location", "preflight": "not_location_query", "why": "general", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "How far is the Moon from Earth?", "expect": "not_location", "preflight": "not_location_query", "why": "astronomy", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Where was Einstein born?", "expect": "not_location", "preflight": "not_location_query", "why": "biography", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Locate the bug in this code", "expect": "not_location", "preflight": "explicit_location_required", "why": "hard negative: locate as debugging", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Nearest neighbor algorithm explained", "expect": "not_location", "preflight": "explicit_location_required", "why": "hard negative: nearest as ML term", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "What is the closest planet to the Sun?", "expect": "not_location", "preflight": "accepted", "why": "hard negative: closest as astronomy", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "近似最近邻搜索的原理", "expect": "not_location", "preflight": "not_location_query", "why": "困难负例：最近邻是算法", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Explain k-nearest neighbours", "expect": "not_location", "preflight": "explicit_location_required", "why": "hard negative", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "How do I get near-zero latency?", "expect": "not_location", "preflight": "explicit_location_required", "why": "hard negative: near as adverb", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Where is the Mona Lisa displayed?", "expect": "not_location", "preflight": "not_location_query", "why": "museum fact", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What is the capital of France?", "expect": "not_location", "preflight": "not_location_query", "why": "geography fact", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "离职后社保怎么办", "expect": "not_location", "preflight": "explicit_location_required", "why": "困难负例：离作为离职", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "距离产生美是什么意思", "expect": "not_location", "preflight": "explicit_location_required", "why": "困难负例：距离作为成语", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Sort these points by proximity to the origin", "expect": "not_location", "preflight": "not_location_query", "why": "hard negative: geometry", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "周边产品有哪些", "expect": "not_location", "preflight": "explicit_location_required", "why": "困难负例：周边作为商品", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}

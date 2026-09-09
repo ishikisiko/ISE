@@ -13,6 +13,7 @@ import requests
 
 from bs4 import BeautifulSoup
 from utils.config_validation import configured_value
+from utils.provider_usage import ProviderUsageRecorder, resolve_credits, sum_credits
 
 
 PARALLEL_EXTRACT_URL = "https://api.parallel.ai/v1/extract"
@@ -168,7 +169,15 @@ class ReferenceExtractor(ABC):
     source_id = "reference"
     display_name = "Reference Extractor"
 
-    def __init__(self, api_key: str, *, base_url: str, timeout: int) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str,
+        timeout: int,
+        credits_per_request: Optional[float] = None,
+        usage_recorder: Optional[ProviderUsageRecorder] = None,
+    ) -> None:
         api_key = configured_value(api_key)
         if not api_key:
             raise ValueError(f"{self.display_name} API key is required.")
@@ -177,7 +186,30 @@ class ReferenceExtractor(ABC):
         if not self.base_url:
             raise ValueError(f"{self.display_name} endpoint is required.")
         self.timeout = max(1, int(timeout))
+        # Credits are read from the response body/header when the provider
+        # reports them, else from the configured fixed value; None = unknown.
+        self.credits_per_request = credits_per_request
+        self.usage_recorder = usage_recorder
         self._last_timings: List[Dict[str, Any]] = []
+
+    def _resolve_credits(
+        self,
+        body: Any,
+        headers: Any,
+        *,
+        requests_made: int = 1,
+    ) -> tuple[Optional[float], Optional[str]]:
+        """Credits for ``requests_made`` provider calls (body > header > config)."""
+        credits, source = resolve_credits(body, headers, None)
+        if credits is not None:
+            return credits, source
+        fallback = getattr(self, "credits_per_request", None)
+        if fallback is None:
+            return None, None
+        try:
+            return float(fallback) * max(1, int(requests_made)), "config"
+        except (TypeError, ValueError):
+            return None, None
 
     def _record_timing(
         self,
@@ -186,6 +218,10 @@ class ReferenceExtractor(ABC):
         contents: int,
         failures: int,
         error_type: Optional[str] = None,
+        credits: Optional[float] = None,
+        credits_source: Optional[str] = None,
+        status_code: Optional[int] = None,
+        requested_urls: int = 0,
     ) -> None:
         timing: Dict[str, Any] = {
             "source": self.source_id,
@@ -196,7 +232,26 @@ class ReferenceExtractor(ABC):
         }
         if error_type:
             timing["error"] = error_type
+        if credits is not None:
+            timing["credits"] = float(credits)
         self._last_timings.append(timing)
+        recorder = getattr(self, "usage_recorder", None)
+        if recorder is not None:
+            try:
+                recorder.record(
+                    provider=self.source_id,
+                    kind="extract",
+                    success=contents > 0,
+                    credits=credits,
+                    credits_source=credits_source,
+                    status_code=status_code,
+                    result_count=contents,
+                    query=None,
+                    error=error_type,
+                    duration_ms=timing["duration_ms"],
+                )
+            except Exception:  # noqa: BLE001 - usage accounting must never break extraction
+                pass
 
     def get_last_timings(self) -> List[Dict[str, Any]]:
         return list(self._last_timings)
@@ -227,8 +282,16 @@ class ParallelExtractClient(ReferenceExtractor):
         full_content: bool = False,
         max_chars_total: Optional[int] = None,
         max_age_seconds: Optional[int] = None,
+        credits_per_request: Optional[float] = None,
+        usage_recorder: Optional[ProviderUsageRecorder] = None,
     ) -> None:
-        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        super().__init__(
+            api_key,
+            base_url=base_url,
+            timeout=timeout,
+            credits_per_request=credits_per_request,
+            usage_recorder=usage_recorder,
+        )
         self.full_content = bool(full_content)
         self.max_chars_total = _coerce_positive_int(max_chars_total)
         self.max_age_seconds = _coerce_positive_int(max_age_seconds)
@@ -259,6 +322,7 @@ class ParallelExtractClient(ReferenceExtractor):
         if advanced_settings:
             payload["advanced_settings"] = advanced_settings
 
+        status_code: Optional[int] = None
         try:
             response = requests.post(
                 self.base_url,
@@ -269,6 +333,7 @@ class ParallelExtractClient(ReferenceExtractor):
                 json=payload,
                 timeout=self.timeout,
             )
+            status_code = getattr(response, "status_code", None)
             response.raise_for_status()
             body = response.json()
         except (requests.RequestException, ValueError):
@@ -288,8 +353,12 @@ class ParallelExtractClient(ReferenceExtractor):
                 contents=0,
                 failures=len(extraction.failures),
                 error_type="request_failed",
+                status_code=status_code,
             )
             return extraction
+        credits, credits_source = self._resolve_credits(
+            body, getattr(response, "headers", None)
+        )
 
         if not isinstance(body, dict):
             extraction = ReferenceExtraction(
@@ -377,6 +446,10 @@ class ParallelExtractClient(ReferenceExtractor):
             contents=len(extraction.contents),
             failures=len(extraction.failures),
             error_type="empty_content" if not extraction.contents else None,
+            credits=credits,
+            credits_source=credits_source,
+            status_code=status_code,
+            requested_urls=len(normalized_urls),
         )
         return extraction
 
@@ -397,8 +470,16 @@ class FirecrawlScrapeClient(ReferenceExtractor):
         only_main_content: bool = True,
         only_clean_content: bool = False,
         max_age_ms: Optional[int] = None,
+        credits_per_request: Optional[float] = None,
+        usage_recorder: Optional[ProviderUsageRecorder] = None,
     ) -> None:
-        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        super().__init__(
+            api_key,
+            base_url=base_url,
+            timeout=timeout,
+            credits_per_request=credits_per_request,
+            usage_recorder=usage_recorder,
+        )
         self.only_main_content = bool(only_main_content)
         self.only_clean_content = bool(only_clean_content)
         self.max_age_ms = _coerce_nonnegative_int(max_age_ms)
@@ -415,6 +496,9 @@ class FirecrawlScrapeClient(ReferenceExtractor):
         started_at = time.perf_counter()
         extraction = ReferenceExtraction(provider=self.source_id)
         request_timeout_ms = min(max(self.timeout * 1000, 1000), 300000)
+        credit_values: List[Optional[float]] = []
+        credits_source: Optional[str] = None
+        last_status: Optional[int] = None
 
         for url in normalized_urls:
             payload: Dict[str, Any] = {
@@ -440,6 +524,7 @@ class FirecrawlScrapeClient(ReferenceExtractor):
                     json=payload,
                     timeout=self.timeout,
                 )
+                last_status = getattr(response, "status_code", None)
                 response.raise_for_status()
                 body = response.json()
             except (requests.RequestException, ValueError):
@@ -451,6 +536,11 @@ class FirecrawlScrapeClient(ReferenceExtractor):
                     )
                 )
                 continue
+            page_credits, page_source = self._resolve_credits(
+                body, getattr(response, "headers", None)
+            )
+            credit_values.append(page_credits)
+            credits_source = credits_source or page_source
 
             if not isinstance(body, dict) or body.get("success") is False:
                 extraction.failures.append(
@@ -523,6 +613,10 @@ class FirecrawlScrapeClient(ReferenceExtractor):
             contents=len(extraction.contents),
             failures=len(extraction.failures),
             error_type="request_failed" if not extraction.contents else None,
+            credits=sum_credits(credit_values),
+            credits_source=credits_source,
+            status_code=last_status,
+            requested_urls=len(normalized_urls),
         )
         return extraction
 
@@ -543,8 +637,16 @@ class TavilyExtractClient(ReferenceExtractor):
         extract_depth: str = "basic",
         format: str = "markdown",
         chunks_per_source: Optional[int] = None,
+        credits_per_request: Optional[float] = None,
+        usage_recorder: Optional[ProviderUsageRecorder] = None,
     ) -> None:
-        super().__init__(api_key, base_url=base_url, timeout=timeout)
+        super().__init__(
+            api_key,
+            base_url=base_url,
+            timeout=timeout,
+            credits_per_request=credits_per_request,
+            usage_recorder=usage_recorder,
+        )
         normalized_depth = str(extract_depth or "basic").strip().lower()
         self.extract_depth = (
             normalized_depth if normalized_depth in {"basic", "advanced"} else "basic"
@@ -576,6 +678,7 @@ class TavilyExtractClient(ReferenceExtractor):
             chunks = self.chunks_per_source or 3
             payload["chunks_per_source"] = min(max(chunks, 1), 5)
 
+        status_code: Optional[int] = None
         try:
             response = requests.post(
                 self.base_url,
@@ -586,6 +689,7 @@ class TavilyExtractClient(ReferenceExtractor):
                 json=payload,
                 timeout=self.timeout,
             )
+            status_code = getattr(response, "status_code", None)
             response.raise_for_status()
             body = response.json()
         except (requests.RequestException, ValueError):
@@ -605,8 +709,12 @@ class TavilyExtractClient(ReferenceExtractor):
                 contents=0,
                 failures=len(extraction.failures),
                 error_type="request_failed",
+                status_code=status_code,
             )
             return extraction
+        credits, credits_source = self._resolve_credits(
+            body, getattr(response, "headers", None)
+        )
 
         if not isinstance(body, dict):
             extraction = ReferenceExtraction(
@@ -684,6 +792,10 @@ class TavilyExtractClient(ReferenceExtractor):
             contents=len(extraction.contents),
             failures=len(extraction.failures),
             error_type="empty_content" if not extraction.contents else None,
+            credits=credits,
+            credits_source=credits_source,
+            status_code=status_code,
+            requested_urls=len(normalized_urls),
         )
         return extraction
 
@@ -720,6 +832,8 @@ class DirectFetchClient(ReferenceExtractor):
         self.user_agent = (
             str(user_agent or "").strip() or _DEFAULT_DIRECT_FETCH_UA
         )
+        self.credits_per_request = None
+        self.usage_recorder = None
         self._last_timings: List[Dict[str, Any]] = []
 
     def extract(
@@ -844,6 +958,19 @@ class DirectFetchClient(ReferenceExtractor):
         # Drop boilerplate whitespace and overly long runs of nav-like noise.
         kept = [line for line in lines if line and len(line) > 1]
         return "\n".join(kept)
+
+
+def _last_timing_credits(extractor: Any) -> Optional[float]:
+    """Credits reported by the extractor's most recent request, if any."""
+    getter = getattr(extractor, "get_last_timings", None)
+    timings = list(getter() or []) if callable(getter) else []
+    for entry in reversed(timings):
+        if isinstance(entry, dict) and entry.get("credits") is not None:
+            try:
+                return float(entry["credits"])
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 class ReferenceExtractorRouter:
@@ -996,6 +1123,9 @@ class ReferenceExtractorRouter:
                         else 0
                     ),
                 }
+                attempt_credits = _last_timing_credits(extractor)
+                if attempt_credits is not None:
+                    attempt["credits"] = attempt_credits
                 if insufficient_content:
                     attempt["reason"] = "insufficient_content"
                 elif objective_incomplete:
@@ -1076,10 +1206,18 @@ def _direct_fetch_settings(config: Mapping[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+def provider_usage_recorder_from_config(config: Mapping[str, Any]) -> ProviderUsageRecorder:
+    """Shared per-provider usage ledger (``providerUsage.dir``, default runtime/provider_usage)."""
+    block = config.get("providerUsage") if isinstance(config, Mapping) else None
+    directory = block.get("dir") if isinstance(block, Mapping) else None
+    return ProviderUsageRecorder(directory or None)
+
+
 def build_reference_extractors(config: Mapping[str, Any]) -> List[ReferenceExtractor]:
     """Build selected-page extractors from compatible runtime configuration."""
 
     extractors: List[ReferenceExtractor] = []
+    usage_recorder = provider_usage_recorder_from_config(config)
 
     direct_settings = _direct_fetch_settings(config)
     direct_enabled = _coerce_bool(direct_settings.get("enabled", True), True)
@@ -1113,6 +1251,8 @@ def build_reference_extractors(config: Mapping[str, Any]) -> List[ReferenceExtra
                 full_content=_coerce_bool(parallel_settings.get("full_content"), False),
                 max_chars_total=parallel_settings.get("max_chars_total"),
                 max_age_seconds=parallel_settings.get("max_age_seconds"),
+                credits_per_request=parallel_settings.get("credits_per_request"),
+                usage_recorder=usage_recorder,
             )
         )
 
@@ -1140,6 +1280,8 @@ def build_reference_extractors(config: Mapping[str, Any]) -> List[ReferenceExtra
                     False,
                 ),
                 max_age_ms=firecrawl_settings.get("max_age_ms"),
+                credits_per_request=firecrawl_settings.get("credits_per_request"),
+                usage_recorder=usage_recorder,
             )
         )
 
@@ -1161,6 +1303,8 @@ def build_reference_extractors(config: Mapping[str, Any]) -> List[ReferenceExtra
                 extract_depth=str(tavily_settings.get("extract_depth") or "basic"),
                 format=str(tavily_settings.get("format") or "markdown"),
                 chunks_per_source=tavily_settings.get("chunks_per_source"),
+                credits_per_request=tavily_settings.get("credits_per_request"),
+                usage_recorder=usage_recorder,
             )
         )
 

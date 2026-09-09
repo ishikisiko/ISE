@@ -1,0 +1,53 @@
+ISE Operations Manual (Evaluation Corpus Edition)
+
+Purpose and scope
+
+This manual describes how an operator runs, monitors and troubleshoots the Intelligent Search Engine (ISE) in a small team deployment. It is written for the evaluation corpus of the local RAG benchmark, so every statement is self-contained and deliberately concrete. Where the manual states a number, that number is authoritative for the corpus even when the live product later changes.
+
+1. Deployment topology
+
+ISE runs as a single Flask process that serves the web UI and the JSON API on port 8000. The process embeds the LangChain orchestrator, the LangGraph agentic loop and the FAISS vector store; there is no separate worker fleet. A typical small deployment uses one application host with four virtual CPUs and eight gigabytes of memory. The recommended reverse proxy is Nginx with a 660 second upstream read timeout, because a single agentic query may legitimately run for up to eleven minutes before the loop's hard deadline cancels it.
+
+Conversation checkpoints are stored in a SQLite database under the checkpoints directory. The database is pruned with a least-recently-used policy that keeps at most 200 conversation threads by default. Uploaded documents live in the uploads directory and are indexed on first use; the index is rebuilt whenever a file is added or removed.
+
+2. Configuration files
+
+All secrets live in config.json, which is created by copying config.example.json. The environment variable NLP_CONFIG_PATH points the process at an alternative configuration file, which is the recommended way to run the evaluation harness against an isolated configuration. Never commit config.json; the repository ignores it.
+
+The local RAG block is named localRag and carries two integers: chunk_size, which defaults to 1000 characters, and chunk_overlap, which defaults to 200 characters. The overlap must be smaller than the chunk size, otherwise startup fails with a validation error. The embedding provider is configured under the embeddings block; the corpus edition uses an OpenAI-compatible endpoint with the model name qwen3.7-text-embedding and a request timeout of 30 seconds.
+
+3. Search providers and fallback order
+
+Web search is served by a priority chain. The primary provider is AnySearch, followed by Brave; when both fail or return nothing, the remaining providers are tried in two batches: first Firecrawl and Tavily concurrently, then Parallel, BrightData and Google concurrently. The chain stops at the first tier that returns at least one usable result. A query that carries the site: operator skips providers that do not honour it.
+
+Brave Search has a monthly quota of 2000 requests on the primary key and switches to the secondary key after 1500 requests. Usage is appended to runtime/brave_search_usage.jsonl. Firecrawl, Tavily and Parallel are metered in credits; their per-request credits are appended to runtime/provider_usage/<provider>.jsonl once the credits accounting is enabled. On 7 September 2026 the official-domain discovery step consumed 556 Firecrawl credits in a single day because every entity fanned out two discovery queries to six providers; discovery is now limited to one provider by default.
+
+4. The agentic loop
+
+Every non-trivial query runs the same ReAct loop with three nodes: act, observe and evaluate. The model chooses a tool in the act node, the tool result is registered in the evidence ledger in the observe node, and a deterministic critic decides in the evaluate node whether to stop, continue or synthesize. The guided mode allows at most 5 iterations, 3 web_search calls, 3 fetch_url calls and 2 search_recovery calls per query. The autonomous mode widens these budgets to 15 iterations, 12 web_search calls, 9 fetch_url calls and 9 search_recovery calls.
+
+Each retained piece of evidence receives a stable citation identifier of the form [E1], [E2] and so on. The identifier is keyed by the canonical URL, so fetching the full text of a page that was already found as a snippet reuses the same identifier and upgrades the stored record. Answers must cite every sentence that contains a specific number; a citation that resolves to no ledger entry is reported as citation_unresolved and blocks the draft.
+
+5. Monitoring
+
+The response payload carries a response_times block with total_ms, llm_calls, tool_calls and search_sources. Operators should watch three signals: the P95 end-to-end latency for fact questions, which should stay under 120 seconds in guided mode; the daily credit consumption per provider; and the share of loops that end in the exhausted or stagnated state. A rising share of exhausted loops usually means that the query analyzer is extracting noisy comparison members, not that the search providers are failing.
+
+The audit log is disabled by default. When enabled it writes one JSON line per answered turn under runtime/audit/<conversation_id>.jsonl, capped at 65536 bytes per record. Records that had to be shortened carry truncated=true and a truncated_fields list naming the shortened top-level fields.
+
+6. Troubleshooting
+
+Symptom: every query answers "search unavailable". Check that at least one provider key is configured and that the primary provider is not rate limited; the search_sources_missing list in the control block names providers that were requested but not configured.
+
+Symptom: local documents are never cited. Verify that the uploads directory contains files with the .txt, .md or .pdf extension and that the embedding endpoint is reachable; Markdown files require either the markdown package or the plain-text fallback loader.
+
+Symptom: the loop always ends with evidence_insufficient on pricing questions. Pricing answers require an official source whose full text was fetched. Add the official pricing page to orchestration.pricing_sources or pin the vendor's domain under official_domain_resolution.pins.
+
+Symptom: a conversation resumes with stale citations. Clear the checkpoints directory or start a new conversation; citation identifiers are stable within a conversation but are not shared across conversations.
+
+7. Backup and rotation
+
+Back up config.json, the checkpoints directory and the uploads directory together, because citation identifiers in stored conversations refer to the uploaded files by path. Rotate provider keys by editing config.json and restarting the process; the process does not watch the file for changes. Audit files can be deleted at any time without affecting answers.
+
+8. Release checklist
+
+Before tagging a release, run the full pytest suite, the offline quality regression with the quality_offline marker, and a five question D0 validity smoke. The release is blocked when token_capture_rate is below 1.0, when any strict parameter-forwarding assertion fails, or when the tool_call_capture_ratio falls under 0.95. Record the resulting numbers in docs/baseline.md under the matching milestone.

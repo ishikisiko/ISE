@@ -39,6 +39,8 @@ _SENSITIVE_ASSIGNMENT = re.compile(
     r"(?i)\b(api[_-]?key|authorization|cookie|token|secret|password)\s*([:=])\s*[^\s,;]+"
 )
 _URL_WITH_QUERY = re.compile(r"https?://[^\s?#]+(?:\?[^\s#]*)?(?:#[^\s]*)?")
+# Bookkeeping written by the size cap itself; never shortened or pruned.
+_SIZE_CAP_MARKER_FIELDS = frozenset({"truncated", "truncated_fields"})
 
 
 def _normalize_max_bytes(value: int) -> int:
@@ -168,21 +170,28 @@ def _shorten_text(value: str, overflow: int) -> str:
     return "" if shortened == value else shortened
 
 
-def _string_locations(value: Any) -> List[tuple[Any, Any, str]]:
-    """Return mutable locations for string values, largest-first callers decide."""
-    locations: List[tuple[Any, Any, str]] = []
+def _string_locations(
+    value: Any,
+    *,
+    field: Optional[str] = None,
+) -> List[tuple[Any, Any, str, Optional[str]]]:
+    """Return mutable string locations tagged with their top-level field name."""
+    locations: List[tuple[Any, Any, str, Optional[str]]] = []
     if isinstance(value, dict):
         for child_key, child in value.items():
+            if field is None and str(child_key) in _SIZE_CAP_MARKER_FIELDS:
+                continue
+            owner = field if field is not None else str(child_key)
             if isinstance(child, str):
-                locations.append((value, child_key, child))
+                locations.append((value, child_key, child, owner))
             else:
-                locations.extend(_string_locations(child))
+                locations.extend(_string_locations(child, field=owner))
     elif isinstance(value, list):
         for index, child in enumerate(value):
             if isinstance(child, str):
-                locations.append((value, index, child))
+                locations.append((value, index, child, field))
             else:
-                locations.extend(_string_locations(child))
+                locations.extend(_string_locations(child, field=field))
     return locations
 
 
@@ -190,22 +199,26 @@ def _serialized_value_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
 
 
-def _prune_largest_collection(record: Dict[str, Any]) -> bool:
-    """Reduce optional structured payloads after string truncation is exhausted."""
+def _prune_largest_collection(record: Dict[str, Any]) -> Optional[str]:
+    """Reduce optional structured payloads after string truncation is exhausted.
+
+    Returns the name of the top-level field that was pruned, or ``None`` when
+    nothing else can be reduced.
+    """
     for field in ("steps", "control", "response_times", "search_warnings"):
         value = record.get(field)
         if isinstance(value, list) and value:
             keep = len(value) // 2
             del value[keep:]
-            return True
+            return field
         if isinstance(value, dict) and value:
             largest_key = max(
                 value,
                 key=lambda key: _serialized_value_size(value[key]),
             )
             del value[largest_key]
-            return True
-    return False
+            return field
+    return None
 
 
 def _compact_control_projection(record: Dict[str, Any]) -> bool:
@@ -257,6 +270,16 @@ def _apply_size_cap(record: Dict[str, Any], max_bytes: int) -> Dict[str, Any]:
     # Round-trip through JSON so nested event/result objects are not mutated.
     record = json.loads(json.dumps(record, ensure_ascii=False, default=str))
     record["truncated"] = True
+    # Names of the top-level fields that were shortened, compacted or pruned so
+    # an offline audit can tell which part of the record is incomplete.
+    truncated_fields: List[str] = []
+    # Attached before shrinking so the size cap accounts for the marker itself.
+    record["truncated_fields"] = truncated_fields
+
+    def mark(field: Optional[str]) -> None:
+        name = str(field) if field else "record"
+        if name not in truncated_fields:
+            truncated_fields.append(name)
 
     # Answer carries the largest expected payload, so reduce it first as promised
     # by the spec, then shrink other string fields until the configured cap fits.
@@ -265,25 +288,30 @@ def _apply_size_cap(record: Dict[str, Any], max_bytes: int) -> Dict[str, Any]:
         if isinstance(answer, str) and answer:
             overflow = _serialized_size(record) - max_bytes
             record["answer"] = _shorten_text(answer, overflow)
+            mark("answer")
             continue
 
         # Large plan/trace metadata should become its compact projection before
         # generic string trimming can erase its configured/executed summary.
         if _compact_control_projection(record):
+            mark("control")
             continue
 
         locations = [location for location in _string_locations(record) if location[2]]
         if locations:
-            parent, key, value = max(
+            parent, key, value, field = max(
                 locations,
                 key=lambda item: len(item[2].encode("utf-8")),
             )
             overflow = _serialized_size(record) - max_bytes
             parent[key] = _shorten_text(value, overflow)
+            mark(field)
             continue
 
-        if not _prune_largest_collection(record):
+        pruned = _prune_largest_collection(record)
+        if pruned is None:
             break
+        mark(pruned)
 
     return record
 

@@ -252,3 +252,10 @@ the collect → annotate → evaluate workflow and regression scripts.
 ```bash
 env1/bin/pytest -q
 ```
+
+Zero-cost quality regression (no LLM, no live search; D1 query analysis, D6 tiering / resolver replay,
+D10 fault injection, local-corpus gold, skill preflight cases) runs as a PR-time gate in under two minutes:
+
+```bash
+env1/bin/python -m pytest -q -m quality_offline
+```

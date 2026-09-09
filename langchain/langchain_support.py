@@ -65,20 +65,36 @@ class LangChainFileReader:
                 
                 if ext in self.LOADER_MAPPING:
                     try:
-                        module_name, class_name, loader_kwargs = self.LOADER_MAPPING[ext]
-                        module = __import__(module_name, fromlist=[class_name])
-                        loader_cls = getattr(module, class_name)
-                        loader = loader_cls(file_path, **loader_kwargs)
-                        lc_docs = loader.load()
-                        
-                        for lc_doc in lc_docs:
+                        for lc_doc in self._load_file(file_path, ext):
                             documents.append(Document.from_langchain(lc_doc))
-                            
                     except Exception as exc:
                         print(f"Skipping file '{file_path}': {exc}")
                         continue
         
         return documents
+
+    def _load_file(self, file_path: str, ext: str) -> List[LCDocument]:
+        """Load one file with its mapped loader; plain-text fallback for Markdown.
+
+        ``UnstructuredMarkdownLoader`` needs the optional ``markdown`` package.
+        When it is missing (or the loader fails for any other reason) a
+        Markdown file is still indexable as raw text, which is what local RAG
+        over project docs needs; silently skipping the file hid every ``.md``
+        document from retrieval.
+        """
+        module_name, class_name, loader_kwargs = self.LOADER_MAPPING[ext]
+        try:
+            module = __import__(module_name, fromlist=[class_name])
+            loader_cls = getattr(module, class_name)
+            loader = loader_cls(file_path, **loader_kwargs)
+            return loader.load()
+        except Exception as exc:
+            if ext != ".md":
+                raise
+            print(f"Markdown loader unavailable for '{file_path}' ({exc}); using plain-text loader.")
+            from langchain_community.document_loaders import TextLoader
+
+            return TextLoader(file_path, encoding="utf-8").load()
     
     def load_as_langchain_docs(self) -> List[LCDocument]:
         """Load documents directly as LangChain Documents."""
@@ -94,11 +110,7 @@ class LangChainFileReader:
                 
                 if ext in self.LOADER_MAPPING:
                     try:
-                        module_name, class_name, loader_kwargs = self.LOADER_MAPPING[ext]
-                        module = __import__(module_name, fromlist=[class_name])
-                        loader_cls = getattr(module, class_name)
-                        loader = loader_cls(file_path, **loader_kwargs)
-                        documents.extend(loader.load())
+                        documents.extend(self._load_file(file_path, ext))
                     except Exception as exc:
                         print(f"Skipping file '{file_path}': {exc}")
                         continue

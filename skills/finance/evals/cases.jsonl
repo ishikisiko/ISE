@@ -1,8 +1,34 @@
-{"query": "claude pro 向 fable 赠送 100 美元额度", "expect": "not_finance", "why": "产品补贴/赠送额度是商业政策，不是金融市场数据；出现货币金额不构成金融证据", "origin": "harden-finance-domain-routing 1.1"}
-{"query": "OpenAI API 的定价是多少", "expect": "not_finance", "why": "产品定价属于 general，结构化行情源无法回答", "origin": "harden-finance-domain-routing 1.1"}
-{"query": "某模型的免费配额政策", "expect": "not_finance", "why": "配额政策属于 general", "origin": "harden-finance-domain-routing 1.1"}
-{"query": "这家公司最新财报如何", "expect": "finance", "why": "财报属于金融市场数据", "origin": "harden-finance-domain-routing 1.2"}
-{"query": "请查看 $AAPL", "expect": "finance", "why": "显式 ticker 语法构成确定性金融证据，无需关键词佐证", "origin": "harden-finance-domain-routing 1.2"}
-{"query": "苹果股价", "expect": "finance", "why": "股价查询", "origin": "harden-finance-domain-routing 1.1"}
-{"query": "美元兑人民币汇率", "expect": "finance", "why": "汇率查询", "origin": "harden-finance-domain-routing 1.1"}
-{"query": "NVDA 行情", "expect": "finance", "why": "证券行情查询", "origin": "harden-finance-domain-routing 1.1"}
+{"query": "这家公司最新财报如何", "expect": "finance", "preflight": "symbol_required", "why": "财报", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "请查看 $AAPL", "expect": "finance", "preflight": "accepted", "why": "显式 ticker", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "苹果股价", "expect": "finance", "preflight": "accepted", "why": "股价", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "美元兑人民币汇率", "expect": "finance", "preflight": "accepted", "why": "汇率", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "NVDA 行情", "expect": "finance", "preflight": "accepted", "why": "行情", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What is the current price of Apple stock?", "expect": "finance", "preflight": "accepted", "why": "stock price", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What is the stock price of Microsoft?", "expect": "finance", "preflight": "accepted", "why": "stock price", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "How is NVIDIA stock performing today?", "expect": "finance", "preflight": "accepted", "why": "stock", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What is the market cap of Tesla?", "expect": "finance", "preflight": "accepted", "why": "market cap", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "恒生指数今天收盘多少", "expect": "finance", "preflight": "accepted", "why": "恒生指数别名", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "纳斯达克指数走势", "expect": "finance", "preflight": "accepted", "why": "指数", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Bitcoin price now", "expect": "finance", "preflight": "accepted", "why": "bitcoin alias", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "比特币现在多少钱", "expect": "finance", "preflight": "accepted", "why": "比特币别名", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "S&P 500 today", "expect": "finance", "preflight": "accepted", "why": "index alias", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "特斯拉市值", "expect": "finance", "preflight": "accepted", "why": "市值", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "600519 股价", "expect": "finance", "preflight": "accepted", "why": "A 股代码", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "TSLA share price history last month", "expect": "finance", "preflight": "accepted", "why": "history", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "腾讯财报", "expect": "finance", "preflight": "accepted", "why": "财报", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "claude pro 向 fable 赠送 100 美元额度", "expect": "not_finance", "preflight": "not_finance_query", "why": "产品补贴/赠送额度是商业政策，不是金融市场数据", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "OpenAI API 的定价是多少", "expect": "not_finance", "preflight": "not_finance_query", "why": "产品定价属于 general", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "某模型的免费配额政策", "expect": "not_finance", "preflight": "not_finance_query", "why": "配额政策属于 general", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What is the current inflation rate in the United States?", "expect": "not_finance", "preflight": "not_finance_query", "why": "macro statistic, no market data source", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "How much does a Tesla Model 3 cost?", "expect": "not_finance", "preflight": "accepted", "why": "hard negative: product price", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Stock photo websites", "expect": "not_finance", "preflight": "symbol_required", "why": "hard negative: stock as photos", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Chicken stock recipe", "expect": "not_finance", "preflight": "symbol_required", "why": "hard negative: stock as food", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Quote of the day", "expect": "not_finance", "preflight": "symbol_required", "why": "hard negative: quote as saying", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Bank of America savings account interest rate", "expect": "not_finance", "preflight": "not_finance_query", "why": "hard negative: retail banking product", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "iPhone 17 price in China", "expect": "not_finance", "preflight": "not_finance_query", "why": "hard negative: product price", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "GDP growth of Japan in 2025", "expect": "not_finance", "preflight": "not_finance_query", "why": "macro statistic", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "How to read an earnings call transcript", "expect": "not_finance", "preflight": "symbol_required", "why": "hard negative: earnings as how-to", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "证券从业资格考试报名", "expect": "not_finance", "preflight": "symbol_required", "why": "困难负例：证券作为考试", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "指数函数的导数", "expect": "not_finance", "preflight": "symbol_required", "why": "困难负例：指数作为数学", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "库存管理系统怎么选", "expect": "not_finance", "preflight": "not_finance_query", "why": "困难负例：库存不是证券", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Share of renewable energy in Germany's grid", "expect": "not_finance", "preflight": "not_finance_query", "why": "hard negative: share as proportion", "origin": "quality_evaluation Q2-05 (2026-09-09)"}

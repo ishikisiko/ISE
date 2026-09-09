@@ -1,0 +1,66 @@
+qid,query,category,language,gold_intent_shape,gold_members,gold_member_aliases,gold_entities,gold_claim_classes,gold_critical_ambiguity,gold_existence_query,gold_time_scope,gold_temporal_fanout,gold_requires_evidence,difficulty,created_at,gold_verified_by,notes
+qa001,对比 GLM-5.2 和 Kimi K2.7 的 API 价格,comparison,zh,comparison,GLM-5.2|Kimi K2.7,Kimi K2.7=K2.7/Kimi,GLM-5.2|Kimi K2.7,comparison|numeric|pricing,0,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),价格对比
+qa002,Compare AWS Fargate vs Cloud Run for cold-start tolerance,comparison,en,comparison,AWS Fargate|Cloud Run,,AWS Fargate|Cloud Run,comparison,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),尾句 for cold-start tolerance 不是成员
+qa003,Redis 和 Milvus 有什么区别，注意不要只看官方宣传要抓到实际差异,comparison,zh,comparison,Redis|Milvus,,Redis|Milvus,comparison,0,0,none,0,1,hard,2026-09-09,claude-fable-5.1 (agent),指令尾句“注意不要…”不是成员；“有什么区别”不是存在性问题
+qa004,比较一下 PostgreSQL、MySQL 和 SQLite 的适用场景,comparison,zh,comparison,PostgreSQL|MySQL|SQLite,,PostgreSQL|MySQL|SQLite,comparison,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),“一下”“的适用场景”不是成员
+qa005,苹果和微软的区别,comparison,zh,comparison,苹果|微软,,苹果|微软,comparison,0,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa006,Tavily、Firecrawl 与 BrightData 对应的用来获取网页内容的 API 有什么不同,comparison,zh,comparison,Tavily|Firecrawl|BrightData,,Tavily|Firecrawl|BrightData,comparison,0,0,none,0,1,hard,2026-09-09,claude-fable-5.1 (agent),failure_analysis 报告中的失败模式；“有什么不同”是对比而非存在性
+qa007,帮我对比 iPhone 17 与 Pixel 10 的相机,comparison,zh,comparison,iPhone 17|Pixel 10,,iPhone 17|Pixel 10,comparison,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),“的相机”是限定语
+qa008,Claude Fable 5.1 和 Opus 5 哪个更适合写代码,comparison,zh,comparison,Claude Fable 5.1|Opus 5,Claude Fable 5.1=Fable 5.1/Fable|Opus 5=Opus,Claude Fable 5.1|Opus 5,comparison,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),“哪个更…”是隐式对比线索
+qa009,DeepSeek V4 vs Qwen 3.7 pricing per million tokens,comparison,en,comparison,DeepSeek V4|Qwen 3.7,DeepSeek V4=DeepSeek/V4|Qwen 3.7=Qwen,DeepSeek V4|Qwen 3.7,comparison|numeric|pricing,0,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa010,Which is faster for vector search: FAISS or Milvus? Please cite benchmarks.,comparison,en,comparison,FAISS|Milvus,,FAISS|Milvus,comparison,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),指令尾句 Please cite benchmarks 不是成员
+qa011,LangChain 与 LlamaIndex 在 RAG 场景下的区别是什么？请给出官方文档依据,comparison,zh,comparison,LangChain|LlamaIndex,,LangChain|LlamaIndex,comparison,0,0,none,0,1,hard,2026-09-09,claude-fable-5.1 (agent),中英混排 + 指令尾句
+qa012,Stripe 和 Adyen 的手续费谁更低,comparison,zh,comparison,Stripe|Adyen,,Stripe|Adyen,comparison|numeric|pricing,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),“手续费”是价格线索
+qa013,Kubernetes on-prem versus managed Kubernetes for a regulated fintech,comparison,en,comparison,on-prem Kubernetes|managed Kubernetes,on-prem Kubernetes=Kubernetes on-prem/on-prem|managed Kubernetes=managed,Kubernetes,comparison|compliance,0,0,none,0,1,hard,2026-09-09,claude-fable-5.1 (agent),成员是两种部署形态；regulated 触发 compliance
+qa014,Brave Search API 和 Tavily 的免费额度各是多少,comparison,zh,comparison,Brave Search API|Tavily,Brave Search API=Brave/Brave Search,Brave Search API|Tavily,comparison|numeric|pricing,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),额度属于定价类
+qa015,Compare the three largest cloud providers on egress pricing,comparison,en,comparison,,,,comparison|numeric|pricing,1,0,none,0,1,hard,2026-09-09,claude-fable-5.1 (agent),成员未点名：应视为关键歧义或需澄清
+qa016,GPT-5 和 Claude 的上下文窗口分别多大，输出成表格,comparison,zh,comparison,GPT-5|Claude,,GPT-5|Claude,comparison|numeric,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),“输出成表格”是格式指令
+qa017,Vite versus Webpack build speed in 2026,comparison,en,comparison,Vite|Webpack,,Vite|Webpack,comparison|temporal,0,0,window,0,1,medium,2026-09-09,claude-fable-5.1 (agent),显式年份
+qa018,把 Tesla Model 3 和 BYD Seal 的续航做个对比，不要引用二手评测,comparison,zh,comparison,Tesla Model 3|BYD Seal,Tesla Model 3=Model 3/Tesla|BYD Seal=BYD/Seal,Tesla Model 3|BYD Seal,comparison,0,0,none,0,1,hard,2026-09-09,claude-fable-5.1 (agent),指令尾句“不要引用二手评测”
+qa019,Rust vs Go vs Zig for systems programming,comparison,en,comparison,Rust|Go|Zig,,Rust|Go|Zig,comparison,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),三成员
+qa020,MongoDB 与 PostgreSQL 谁更适合 CMS 工作负载？先说结论再说理由,comparison,zh,comparison,MongoDB|PostgreSQL,,MongoDB|PostgreSQL,comparison,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),指令尾句
+qa021,Notion vs Obsidian: which respects privacy more under GDPR?,comparison,en,comparison,Notion|Obsidian,,Notion|Obsidian|GDPR,comparison|compliance,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),GDPR 是实体也是合规线索
+qa022,对比前者和后者的价格,comparison,zh,comparison,,,,comparison|numeric|pricing,1,0,none,0,1,hard,2026-09-09,claude-fable-5.1 (agent),指代对比：关键歧义
+qa023,现在北京天气怎么样,temporal,zh,information_request,,,北京,current,0,0,recent,0,1,easy,2026-09-09,claude-fable-5.1 (agent),“现在”是当前态，不是多年历史；不应扇出年份
+qa024,最近三年 AI 芯片出货量的变化趋势,temporal,zh,information_request,,,,temporal|historical,0,0,historical,1,1,medium,2026-09-09,claude-fable-5.1 (agent),真正需要多年覆盖
+qa025,2020 到 2024 年比特币价格走势,temporal,zh,information_request,,,比特币,numeric|pricing|temporal|historical,0,0,historical,1,1,medium,2026-09-09,claude-fable-5.1 (agent),显式年份区间
+qa026,What is the latest version of Python?,temporal,en,information_request,,,Python,current,0,0,recent,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa027,OpenAI 是哪一年成立的,temporal,zh,information_request,,,OpenAI,,0,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),“哪一年”是历史事实问句，不是最近一年时间窗
+qa028,今天纳斯达克收盘多少点,temporal,zh,information_request,,,纳斯达克,current|numeric,0,0,recent,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa029,过去一周 GitHub Copilot 有哪些更新,temporal,zh,information_request,,,GitHub Copilot,temporal,0,0,window,0,1,medium,2026-09-09,claude-fable-5.1 (agent),一周窗口
+qa030,Bitcoin price history from 2017 through 2021,temporal,en,information_request,,,Bitcoin,numeric|pricing|temporal|historical,0,0,historical,1,1,medium,2026-09-09,claude-fable-5.1 (agent),
+qa031,目前 DeepSeek 最新模型的定价是多少,temporal,zh,information_request,,,DeepSeek,current|numeric|pricing,0,0,recent,0,1,easy,2026-09-09,claude-fable-5.1 (agent),“目前”当前态
+qa032,近五年上海常住人口变化,temporal,zh,information_request,,,上海,temporal|historical,0,0,historical,1,1,medium,2026-09-09,claude-fable-5.1 (agent),
+qa033,What changed in React 19 compared with React 18?,temporal,en,comparison,React 19|React 18,,React 19|React 18,comparison,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),版本对比，不是时间窗
+qa034,现在有哪些 VS Code 插件支持 Copilot,temporal,zh,information_request,,,VS Code|Copilot,current,0,1,recent,0,1,medium,2026-09-09,claude-fable-5.1 (agent),存在性枚举问句：不应扇出年份、不是对比
+qa035,昨天英超有哪些比赛结果,temporal,zh,information_request,,,英超,current,0,1,recent,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa036,Is Kubernetes 1.31 still supported today?,temporal,en,information_request,,,Kubernetes 1.31,current,0,0,recent,0,1,medium,2026-09-09,claude-fable-5.1 (agent),
+qa037,最近一个月 Firecrawl 的价格有没有调整,temporal,zh,information_request,,,Firecrawl,numeric|pricing|temporal,0,0,window,0,1,medium,2026-09-09,claude-fable-5.1 (agent),一个月窗口
+qa038,历年诺贝尔物理学奖得主名单,temporal,zh,information_request,,,诺贝尔物理学奖,historical,0,0,historical,1,1,medium,2026-09-09,claude-fable-5.1 (agent),“历年”需要多年覆盖
+qa039,当前 Brave Search API 每月免费配额是多少,temporal,zh,information_request,,,Brave Search API,current|numeric|pricing,0,0,recent,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa040,它的价格是多少,ambiguous,zh,information_request,,,,numeric|pricing,1,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),无实体的指代
+qa041,这个模型支持多模态吗,ambiguous,zh,information_request,,,,,1,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa042,帮我对比一下,ambiguous,zh,comparison,,,,comparison,1,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),对比成员缺失
+qa043,Which one is cheaper?,ambiguous,en,comparison,,,,comparison|numeric|pricing,1,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa044,那个 API 的速率限制是多少,ambiguous,zh,information_request,,,,numeric,1,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa045,How does it compare to the previous version?,ambiguous,en,comparison,,,,comparison,1,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),
+qa046,把前者换成后者会更快吗,ambiguous,zh,information_request,,,,,1,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),
+qa047,GLM-5.2 的价格和它的上下文长度,ambiguous,zh,information_request,,,GLM-5.2,numeric|pricing,0,0,none,0,1,medium,2026-09-09,claude-fable-5.1 (agent),“它”指向已点名实体：非关键歧义
+qa048,Apple 苹果 是水果还是公司？,ambiguous,zh,information_request,,,Apple,,0,0,none,0,0,medium,2026-09-09,claude-fable-5.1 (agent),词义歧义但问题本身可答，不应阻断
+qa049,Compare these two,ambiguous,en,comparison,,,,comparison,1,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa050,它们哪个更便宜,ambiguous,zh,comparison,,,,comparison|numeric|pricing,1,0,none,0,1,easy,2026-09-09,claude-fable-5.1 (agent),
+qa051,你是谁,chat_local,zh,information_request,,,,,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),闲聊
+qa052,给我一句鼓励的话,chat_local,zh,information_request,,,,,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),闲聊
+qa053,用一句话解释什么是 RAG,chat_local,zh,information_request,,,RAG,,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),概念解释，无需证据
+qa054,How are you doing today?,chat_local,en,information_request,,,,,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),闲聊；today 不是时间约束
+qa055,Tell me a joke,chat_local,en,information_request,,,,,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),
+qa056,这个项目的核心模块有哪些,chat_local,zh,information_request,,,,,0,1,none,0,0,medium,2026-09-09,claude-fable-5.1 (agent),本地文档问句；“这个项目”指上传文档而非未解析实体
+qa057,文档里对 rerank 的作用是怎么描述的？,chat_local,zh,information_request,,,,,0,0,none,0,0,medium,2026-09-09,claude-fable-5.1 (agent),本地
+qa058,我上传的文件里有没有提到 XXX,chat_local,zh,information_request,,,,,0,1,none,0,0,medium,2026-09-09,claude-fable-5.1 (agent),本地存在性
+qa059,Summarize the uploaded PDF in three bullet points,chat_local,en,information_request,,,,,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),本地
+qa060,Write a Python function to reverse a string,chat_local,en,information_request,,,Python,,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),代码请求，无需检索
+qa061,Convert 10 miles to kilometers,chat_local,en,information_request,,,,numeric,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),计算类；数值但不需要网页证据
+qa062,Translate “good morning” to Spanish,chat_local,en,information_request,,,,,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),
+qa063,文档中对本地 RAG 的 chunk size 和 overlap 是怎么设置的？,chat_local,zh,information_request,,,,numeric,0,0,none,0,0,medium,2026-09-09,claude-fable-5.1 (agent),本地
+qa064,What is photosynthesis?,chat_local,en,information_request,,,,,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),常识问句
+qa065,Calculate 5 factorial,chat_local,en,information_request,,,,numeric,0,0,none,0,0,easy,2026-09-09,claude-fable-5.1 (agent),计算类；无需网页证据

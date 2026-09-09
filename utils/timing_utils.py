@@ -128,6 +128,46 @@ class TimingRecorder:
             entry.update(extra)
         self.tool_calls.append(entry)
 
+    def record_provider_request(
+        self,
+        *,
+        kind: str,
+        provider: str,
+        duration_ms: float,
+        success: bool = True,
+        **extra: Any,
+    ) -> None:
+        """Register one concrete external request (search / extract / resolver).
+
+        ``record_tool_call`` counts logical tool invocations; this counts the
+        HTTP requests those tools actually made, which is what the D0
+        ``tool_call_capture_ratio`` compares against proxy-side counts.
+        """
+        if not self.enabled:
+            return
+        payload: Dict[str, Any] = {"kind": str(kind), "provider": str(provider or "unknown")}
+        for key, value in extra.items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                payload[key] = value[:200]
+            elif isinstance(value, (bool, int, float)):
+                payload[key] = value
+        try:
+            duration_value = float(duration_ms or 0.0)
+        except (TypeError, ValueError):
+            duration_value = 0.0
+        self.record_tool_call(
+            tool="provider_request",
+            duration_ms=duration_value,
+            success=bool(success),
+            extra=payload,
+        )
+
+    def provider_requests(self) -> List[Dict[str, Any]]:
+        """Return the concrete external-request entries recorded so far."""
+        return [entry for entry in self.tool_calls if entry.get("tool") == "provider_request"]
+
     def record_search_timing(
         self,
         *,

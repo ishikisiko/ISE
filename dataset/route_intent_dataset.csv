@@ -1,59 +1,58 @@
-
-qid,query,intent_label,expected_route
-route001,What is the speed of light?,general_knowledge,general_web
-route002,"What is the weather in Bend, Oregon today?",weather,weather_api
-route003,Convert 10 miles to kilometers.,unit_conversion,calculator
-route004,What time is it in Tokyo right now?,time,time_api
-route005,How are you doing today?,small_talk,chat
-route006,Summarize the cause of the French Revolution.,summary_request,general_web
-route007,Latest news on climate change.,news_request,general_web
-route008,When is the next NBA game for the Golden State Warriors?,sports,sports_api
-route009,What is the current price of Apple stock?,finance,finance_api
-route010,Calculate 5 factorial.,math_calculation,calculator
-route011,Translate “good morning” to Spanish.,translation,translation_api
-route012,Who is the current CEO of Tesla?,general_knowledge,general_web
-route013,Tell me a joke.,small_talk,chat
-route014,Write a Python function to reverse a string.,code_request,code_execution
-route015,Population of Canada.,general_knowledge,general_web
-route016,When did World War II end?,general_knowledge,general_web
-route017,What are the benefits of vitamin D?,health,general_web
-route018,How to cook spaghetti carbonara?,recipe,general_web
-route019,Find coffee shops near me.,local_search,general_web
-route020,What is photosynthesis?,general_knowledge,general_web
-route021,When is Thanksgiving in 2026?,date_query,general_web
-route022,Convert 98°F to Celsius.,unit_conversion,calculator
-route023,Explain the concept of blockchain.,general_knowledge,general_web
-route024,What is 50 USD in EUR?,currency_conversion,calculator
-route025,Who won the Oscar for Best Picture in 2025?,entertainment,general_web
-route026,Describe photosynthesis in simple terms.,general_knowledge,general_web
-route027,Is it raining in New York?,weather,weather_api
-route028,What is the square root of 256?,math_calculation,calculator
-route029,Who founded Microsoft?,general_knowledge,general_web
-route030,Tell me the latest score of the Lakers game.,sports,sports_api
-route031,What is the temperature in London right now?,weather,weather_api
-route032,Will it snow in Beijing tomorrow?,weather,weather_api
-route033,How humid is it in Singapore today?,weather,weather_api
-route034,What is the stock price of Microsoft?,finance,finance_api
-route035,How is NVIDIA stock performing today?,finance,finance_api
-route036,What is the market cap of Tesla?,finance,finance_api
-route037,When is the next Manchester United match?,sports,sports_api
-route038,What was the score of the Lakers vs Celtics game?,sports,sports_api
-route039,Who won the Wimbledon men's final?,sports,sports_api
-route040,How do I get from the airport to downtown Tokyo?,transportation,general_web
-route041,What time does the next train to Osaka leave?,transportation,general_web
-route042,Find a gas station near my current location.,location,general_web
-route043,Where is the nearest hospital?,location,general_web
-route044,What time is it in London right now?,time,time_api
-route045,Convert 100 Celsius to Fahrenheit.,unit_conversion,calculator
-route046,What is 25 percent of 800?,math_calculation,calculator
-route047,How many kilometers are in a marathon?,unit_conversion,calculator
-route048,Translate "thank you" into French.,translation,translation_api
-route049,How do you say "good evening" in Japanese?,translation,translation_api
-route050,Write a function in Python to check if a number is prime.,code_request,code_execution
-route051,How are you?,small_talk,chat
-route052,What is the tallest mountain in the world?,general_knowledge,general_web
-route053,Who painted the Mona Lisa?,general_knowledge,general_web
-route054,What causes the northern lights?,general_knowledge,general_web
-route055,What is the current inflation rate in the United States?,finance,general_web
-route056,drive from SFO to San Jose,transportation,transportation_api
-route057,nearest KFC to HKUST,location,location_api
+qid,query,intent_label,expected_route,allowed_first_tools,allowed_tool_sequences,route_coverage_gap,needs_web_evidence,language,difficulty,created_at,gold_verified_by
+route001,What is the speed of light?,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route002,"What is the weather in Bend, Oregon today?",weather,weather_api,weather_conditions,"weather_conditions(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route003,Convert 10 miles to kilometers.,unit_conversion,calculator,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route004,What time is it in Tokyo right now?,time,time_api,none|web_search,none|web_search,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route005,How are you doing today?,small_talk,chat,none,none,0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route006,Summarize the cause of the French Revolution.,summary_request,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route007,Latest news on climate change.,news_request,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route008,When is the next NBA game for the Golden State Warriors?,sports,sports_api,sports_schedule,"sports_schedule(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route009,What is the current price of Apple stock?,finance,finance_api,finance_market_data,"finance_market_data(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route010,Calculate 5 factorial.,math_calculation,calculator,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route011,Translate “good morning” to Spanish.,translation,translation_api,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route012,Who is the current CEO of Tesla?,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route013,Tell me a joke.,small_talk,chat,none,none,0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route014,Write a Python function to reverse a string.,code_request,code_execution,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route015,Population of Canada.,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route016,When did World War II end?,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route017,What are the benefits of vitamin D?,health,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route018,How to cook spaghetti carbonara?,recipe,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route019,Find coffee shops near me.,local_search,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route020,What is photosynthesis?,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route021,When is Thanksgiving in 2026?,date_query,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route022,Convert 98°F to Celsius.,unit_conversion,calculator,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route023,Explain the concept of blockchain.,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route024,What is 50 USD in EUR?,currency_conversion,calculator,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route025,Who won the Oscar for Best Picture in 2025?,entertainment,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route026,Describe photosynthesis in simple terms.,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route027,Is it raining in New York?,weather,weather_api,weather_conditions,"weather_conditions(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route028,What is the square root of 256?,math_calculation,calculator,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route029,Who founded Microsoft?,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route030,Tell me the latest score of the Lakers game.,sports,sports_api,sports_schedule,"sports_schedule(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route031,What is the temperature in London right now?,weather,weather_api,weather_conditions,"weather_conditions(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route032,Will it snow in Beijing tomorrow?,weather,weather_api,weather_conditions,"weather_conditions(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route033,How humid is it in Singapore today?,weather,weather_api,weather_conditions,"weather_conditions(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route034,What is the stock price of Microsoft?,finance,finance_api,finance_market_data,"finance_market_data(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route035,How is NVIDIA stock performing today?,finance,finance_api,finance_market_data,"finance_market_data(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route036,What is the market cap of Tesla?,finance,finance_api,finance_market_data,"finance_market_data(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route037,When is the next Manchester United match?,sports,sports_api,sports_schedule,"sports_schedule(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route038,What was the score of the Lakers vs Celtics game?,sports,sports_api,sports_schedule,"sports_schedule(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route039,Who won the Wimbledon men's final?,sports,sports_api,sports_schedule,"sports_schedule(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route040,How do I get from the airport to downtown Tokyo?,transportation,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route041,What time does the next train to Osaka leave?,transportation,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route042,Find a gas station near my current location.,location,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route043,Where is the nearest hospital?,location,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route044,What time is it in London right now?,time,time_api,none|web_search,none|web_search,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route045,Convert 100 Celsius to Fahrenheit.,unit_conversion,calculator,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route046,What is 25 percent of 800?,math_calculation,calculator,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route047,How many kilometers are in a marathon?,unit_conversion,calculator,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route048,"Translate ""thank you"" into French.",translation,translation_api,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route049,"How do you say ""good evening"" in Japanese?",translation,translation_api,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route050,Write a function in Python to check if a number is prime.,code_request,code_execution,none,none,1,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route051,How are you?,small_talk,chat,none,none,0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route052,What is the tallest mountain in the world?,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route053,Who painted the Mona Lisa?,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route054,What causes the northern lights?,general_knowledge,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route055,What is the current inflation rate in the United States?,finance,general_web,web_search|search_recovery|fetch_url,"web_search(,fetch_url|search_recovery)*",0,1,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route056,drive from SFO to San Jose,transportation,transportation_api,route_directions,"route_directions(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)
+route057,nearest KFC to HKUST,location,location_api,nearby_places,"nearby_places(,web_search)*",0,0,en,easy,2026-07-01,dataset author (pre-plan); tool columns added 2026-09-09 by claude-fable-5.1 (agent)

@@ -1,0 +1,6 @@
+{
+  "_comment": "Gold corrections fixed before any answer is read (protocol.md). Keyed by qid; core_fact replaces the CSV reference for judge v4 and human annotators. Original CSVs are never rewritten.",
+  "final002": {"core_fact": "Ganymede is the largest moon; it orbits Jupiter and is larger than the planet Mercury. Pluto is a dwarf planet; a comparison to Pluto is not required.", "note": "CSV calls Pluto a planet.", "fixed_on": "2026-09-08"},
+  "final016": {"core_fact": "Google Inc. was incorporated on September 4, 1998. August 1998 is Andy Bechtolsheim's investment, not the incorporation; '1998' alone partially answers 'when'.", "note": "CSV states August 1998 as the official founding date.", "fixed_on": "2026-09-08"},
+  "final017": {"core_fact": "The Nile is conventionally listed as the longest river (about 6,650 km); Amazon measurements are disputed. A sourced, qualified answer is acceptable.", "note": "Amazon dispute must not be penalised.", "fixed_on": "2026-09-08"}
+}

@@ -223,32 +223,42 @@
         "api_key": "YOUR_FIRECRAWL_API_KEY_HERE",
         "base_url": "https://api.firecrawl.dev/v2/search",
         "timeout": 30,
-        "search_depth": null
+        "search_depth": null,
+        "credits_per_request": null
     },
     "anySearch": {
         "api_key": "YOUR_ANYSEARCH_API_KEY_HERE",
         "base_url": "https://api.anysearch.com/v1/search",
-        "timeout": 30
+        "timeout": 30,
+        "credits_per_request": null
     },
     "tavilySearch": {
         "api_key": "YOUR_TAVILY_API_KEY_HERE",
         "base_url": "https://api.tavily.com/search",
         "timeout": 20,
-        "search_depth": "basic"
+        "search_depth": "basic",
+        "credits_per_request": null
     },
     "parallelSearch": {
         "api_key": "YOUR_PARALLEL_API_KEY_HERE",
         "base_url": "https://api.parallel.ai/v1beta/search",
         "timeout": 30,
         "mode": "fast",
-        "max_chars_per_result": 1500
+        "max_chars_per_result": 1500,
+        "credits_per_request": null
+    },
+    "providerUsage": {
+        "_comment": "Per-provider credit ledger under dir/<provider>.jsonl (same shape as brave_search_usage.jsonl). credits_per_request in a metered provider block is the fallback when the response reports no credits; null keeps credits unknown rather than zero. daily_credit_limits feed the quality runner's pre-flight check.",
+        "dir": "runtime/provider_usage",
+        "daily_credit_limits": {"firecrawl": null, "tavily": null, "parallel": null}
     },
     "parellel2": {
         "_comment": "Parallel Extract for selected public URLs. The runtime also accepts the legacy bare API-key string already used by existing config.json files.",
         "api_key": "YOUR_PARALLEL_API_KEY_HERE",
         "base_url": "https://api.parallel.ai/v1/extract",
         "timeout": 45,
-        "full_content": false
+        "full_content": false,
+        "credits_per_request": null
     },
     "firecrawl2": {
         "_comment": "Firecrawl Scrape fallback for selected public URLs. The runtime also accepts the legacy bare API-key string already used by existing config.json files.",
@@ -256,7 +266,8 @@
         "base_url": "https://api.firecrawl.dev/v2/scrape",
         "timeout": 45,
         "only_main_content": true,
-        "only_clean_content": false
+        "only_clean_content": false,
+        "credits_per_request": null
     },
     "tavily2": {
         "_comment": "Tavily Extract fallback for selected public URLs. The runtime also accepts the legacy bare API-key string already used by existing config.json files.",
@@ -264,7 +275,8 @@
         "base_url": "https://api.tavily.com/extract",
         "timeout": 45,
         "extract_depth": "basic",
-        "format": "markdown"
+        "format": "markdown",
+        "credits_per_request": null
     },
     "FINNHUB_API_KEY": "",
     "SPORTSDB_API_KEY": "",

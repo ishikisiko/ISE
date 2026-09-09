@@ -1,0 +1,55 @@
+qid,query,category,expected_loop_behavior,language,difficulty,created_at,gold_verified_by,notes
+hl001,"Redis 和 Milvus 有什么区别，注意不要只看官方宣传，要抓到实际差异",comparison_instruction_tail,should_complete,zh,hard,2026-09-09,claude-fable-5.1 (agent),指令尾句不应成为对比成员
+hl002,"Compare AWS Fargate vs Cloud Run for cold-start tolerance. Cite official docs only.",comparison_instruction_tail,should_fetch_official,en,hard,2026-09-09,claude-fable-5.1 (agent),
+hl003,"对比 GLM-5.2 和 Kimi K2.7 的 API 价格，只引用官方价目页",comparison_instruction_tail,should_fetch_official,zh,hard,2026-09-09,claude-fable-5.1 (agent),价格+官方
+hl004,"LangChain 与 LlamaIndex 在 RAG 场景下的区别是什么？请给出官方文档依据，不要引用博客",comparison_instruction_tail,should_fetch_official,zh,hard,2026-09-09,claude-fable-5.1 (agent),
+hl005,"Which is faster for vector search: FAISS or Milvus? Please cite benchmarks and say which workload each wins.",comparison_instruction_tail,should_complete,en,hard,2026-09-09,claude-fable-5.1 (agent),
+hl006,"把 Tesla Model 3 和 BYD Seal 的续航做个对比，不要引用二手评测，输出成表格",comparison_instruction_tail,should_complete,zh,hard,2026-09-09,claude-fable-5.1 (agent),
+hl007,"MongoDB 与 PostgreSQL 谁更适合 CMS 工作负载？先说结论再说理由，控制在 200 字",comparison_instruction_tail,should_complete,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+hl008,"Notion vs Obsidian: which respects privacy more under GDPR? Answer for a small EU startup.",comparison_instruction_tail,should_complete,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl009,"Rust vs Go vs Zig for systems programming — ignore syntax, focus on tooling and safety guarantees",comparison_instruction_tail,should_complete,en,medium,2026-09-09,claude-fable-5.1 (agent),三成员
+hl010,"Stripe 和 Adyen 的手续费谁更低？按 100 万美元月流水算给我个数",comparison_instruction_tail,should_fetch_official,zh,hard,2026-09-09,claude-fable-5.1 (agent),价格计算
+hl011,"Vite versus Webpack build speed in 2026, and whether the difference still matters for a 50-package monorepo",comparison_instruction_tail,should_complete,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl012,"比较一下 PostgreSQL、MySQL 和 SQLite 的适用场景，别复述官网",comparison_instruction_tail,should_complete,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+hl013,"Tavily、Firecrawl 与 BrightData 对应的用来获取网页内容的 API 有什么不同",multi_entity,should_complete,zh,hard,2026-09-09,claude-fable-5.1 (agent),历史失败案例（迭代用尽）
+hl014,"OpenAI、Anthropic、Google、DeepSeek 四家旗舰模型的上下文窗口各是多少",multi_entity,should_fetch_official,zh,hard,2026-09-09,claude-fable-5.1 (agent),四实体
+hl015,"List the default ports of PostgreSQL, MySQL, Redis, MongoDB and Elasticsearch",multi_entity,should_complete,en,medium,2026-09-09,claude-fable-5.1 (agent),五实体
+hl016,"Kubernetes、Docker Swarm、Nomad 三者的调度器差异",multi_entity,should_complete,zh,hard,2026-09-09,claude-fable-5.1 (agent),
+hl017,"Brave Search、Tavily、Firecrawl、Parallel 的免费额度各是多少",multi_entity,should_fetch_official,zh,hard,2026-09-09,claude-fable-5.1 (agent),多实体+价格
+hl018,"Summarize what Stripe, Adyen and Checkout.com each charge for European card payments",multi_entity,should_fetch_official,en,hard,2026-09-09,claude-fable-5.1 (agent),
+hl019,"React、Vue、Svelte 最新大版本号分别是多少",multi_entity,should_complete,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+hl020,"Which of Python, Node.js and Go currently has the longest LTS/support window?",multi_entity,should_complete,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl021,"Compare the H100, MI300X and TPU v5p on memory capacity and bandwidth",multi_entity,should_complete,en,hard,2026-09-09,claude-fable-5.1 (agent),
+hl022,"小米、华为、OPPO 最新旗舰手机的发布日期",multi_entity,should_complete,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+hl023,"GLM-5.2 的 API 价格是多少",pricing,should_fetch_official,zh,medium,2026-09-09,claude-fable-5.1 (agent),需 official 已抓全文
+hl024,"What does OpenAI charge for GPT-5 per million input and output tokens?",pricing,should_fetch_official,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl025,"DeepSeek V4 Flash 输入输出各多少钱，缓存命中打几折",pricing,should_fetch_official,zh,hard,2026-09-09,claude-fable-5.1 (agent),
+hl026,"Firecrawl Hobby 套餐每月多少 credits？超出后怎么计费",pricing,should_fetch_official,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+hl027,"How much does Tavily charge per credit and how many credits does an advanced search cost?",pricing,should_fetch_official,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl028,"Anthropic Claude Sonnet 5 每百万 token 定价，输入输出分别多少美元",pricing,should_fetch_official,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+hl029,"Kimi K2.7 Code 的定价页写的是多少",pricing,should_fetch_official,zh,medium,2026-09-09,claude-fable-5.1 (agent),pin kimi
+hl030,"用 GLM-5.2 处理 100 万输入 token 和 20 万输出 token 一共多少钱（国内渠道）",pricing,should_fetch_official,zh,hard,2026-09-09,claude-fable-5.1 (agent),pricing_total 计算
+hl031,"What is Brave Search API's price per 1,000 queries on the Base plan?",pricing,should_fetch_official,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl032,"Parallel Search API 每千次调用多少美元",pricing,should_fetch_official,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+hl033,"现在 Python 最新稳定版本是多少",temporal,should_fetch_official,zh,easy,2026-09-09,claude-fable-5.1 (agent),需带日期的官方来源
+hl034,"最近三年 AI 芯片出货量的变化趋势",temporal,should_complete,zh,hard,2026-09-09,claude-fable-5.1 (agent),多年覆盖
+hl035,"What changed in Kubernetes 1.36 compared with 1.35?",temporal,should_fetch_official,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl036,"过去一周 GitHub Copilot 有哪些更新",temporal,should_complete,zh,medium,2026-09-09,claude-fable-5.1 (agent),一周窗口
+hl037,"Is Ubuntu 22.04 still receiving standard security updates today?",temporal,should_fetch_official,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl038,"2020 到 2024 年比特币每年的最高价",temporal,should_complete,zh,hard,2026-09-09,claude-fable-5.1 (agent),多年扇出
+hl039,"现在北京天气怎么样",temporal,should_complete,zh,easy,2026-09-09,claude-fable-5.1 (agent),skill；不应扇出年份
+hl040,"Which Node.js release lines are in Active LTS right now?",temporal,should_fetch_official,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl041,"最近一个月 Firecrawl 的价格有没有调整",temporal,should_fetch_official,zh,hard,2026-09-09,claude-fable-5.1 (agent),时效+价格
+hl042,"历年诺贝尔物理学奖得主名单（近 5 年）",temporal,should_complete,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+hl043,"它的价格是多少",ambiguous,should_clarify,zh,easy,2026-09-09,claude-fable-5.1 (agent),无实体
+hl044,"帮我对比一下",ambiguous,should_clarify,zh,easy,2026-09-09,claude-fable-5.1 (agent),对比成员缺失
+hl045,"Which one is cheaper?",ambiguous,should_clarify,en,easy,2026-09-09,claude-fable-5.1 (agent),
+hl046,"这个模型支持多模态吗",ambiguous,should_clarify,zh,easy,2026-09-09,claude-fable-5.1 (agent),
+hl047,"Compare these two",ambiguous,should_clarify,en,easy,2026-09-09,claude-fable-5.1 (agent),
+hl048,"Apple 苹果 是水果还是公司？",ambiguous,should_complete,zh,medium,2026-09-09,claude-fable-5.1 (agent),词义歧义但可答；不应澄清
+hl049,"Mercury 的官网是哪个",ambiguous,should_clarify,zh,hard,2026-09-09,claude-fable-5.1 (agent),Mercury 多义（银行/行星/元素）
+hl050,"How does it compare to the previous version?",ambiguous,should_clarify,en,medium,2026-09-09,claude-fable-5.1 (agent),
+hl051,"把前者换成后者会更快吗",ambiguous,should_clarify,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+hl052,"GLM-6 的 API 定价是多少",ambiguous,should_abstain,zh,hard,2026-09-09,claude-fable-5.1 (agent),不存在的型号：应说明无官方来源而不是编造
+hl053,"Tell me the price",ambiguous,should_clarify,en,easy,2026-09-09,claude-fable-5.1 (agent),
+hl054,"What will Bitcoin cost on 2027-01-01?",ambiguous,should_abstain,en,easy,2026-09-09,claude-fable-5.1 (agent),不可答

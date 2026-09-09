@@ -1,5 +1,31 @@
-{"query":"从上海到苏州怎么走","expect":"transportation","preflight":"accepted"}
-{"query":"drive from SFO to San Jose","expect":"transportation","preflight":"accepted"}
-{"query":"How do I get from the airport to downtown Tokyo?","expect":"transportation","preflight":"explicit_route_endpoints_required"}
-{"query":"What time does the next train to Osaka leave?","expect":"transportation","preflight":"route_endpoints_required"}
-{"query":"Latest news on climate change","expect":"not_transportation","preflight":"not_transportation_query"}
+{"query": "从上海到苏州怎么走", "expect": "transportation", "preflight": "accepted", "why": "从…到…怎么走", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "drive from SFO to San Jose", "expect": "transportation", "preflight": "accepted", "why": "drive from to", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "从北京南站到首都机场怎么走", "expect": "transportation", "preflight": "accepted", "why": "站到机场", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "directions from Times Square to JFK", "expect": "transportation", "preflight": "accepted", "why": "directions from to", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "How do I get from Shibuya to Narita by train?", "expect": "transportation", "preflight": "accepted", "why": "transit mode", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "从杭州东站坐地铁到西湖", "expect": "transportation", "preflight": "accepted", "why": "地铁", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "walk from Big Ben to Buckingham Palace", "expect": "transportation", "preflight": "accepted", "why": "walking", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "bike from Golden Gate Park to Fisherman's Wharf", "expect": "transportation", "preflight": "accepted", "why": "bicycle", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "transit from Harvard Square to Logan Airport", "expect": "transportation", "preflight": "accepted", "why": "transit", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "从广州塔到白云机场的公交路线", "expect": "transportation", "preflight": "accepted", "why": "公交", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "route from Louvre to Gare du Nord", "expect": "transportation", "preflight": "accepted", "why": "route from to", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "从深圳北站到香港西九龙怎么走", "expect": "transportation", "preflight": "accepted", "why": "跨境", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "How do I get from the airport to downtown Tokyo?", "expect": "transportation", "preflight": "explicit_route_endpoints_required", "why": "vague endpoints -> explicit_route_endpoints_required", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What time does the next train to Osaka leave?", "expect": "transportation", "preflight": "route_endpoints_required", "why": "no origin -> route_endpoints_required", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "从机场到市中心怎么走", "expect": "transportation", "preflight": "explicit_route_endpoints_required", "why": "模糊端点", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Latest news on climate change", "expect": "not_transportation", "preflight": "not_transportation_query", "why": "news", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Convert 10 miles to kilometers", "expect": "not_transportation", "preflight": "not_transportation_query", "why": "unit conversion", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Train a neural network from scratch", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "hard negative: train as ML verb", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Flight of the Bumblebee composer", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "hard negative: flight in a title", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "What drives inflation?", "expect": "not_transportation", "preflight": "not_transportation_query", "why": "hard negative: drives as verb", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Route 53 DNS pricing", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "hard negative: route as product name", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "How to build a data pipeline from Kafka to Snowflake", "expect": "not_transportation", "preflight": "accepted", "why": "hard negative: from/to in software", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Google Transit API documentation", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "hard negative: transit as API name", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "从零开始学 Python", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "困难负例：从作为起点比喻", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Directions for baking bread", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "hard negative: directions as instructions", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Driving license renewal fee in California", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "hard negative: driving as licence", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Train ticket refund policy", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "hard negative: policy not route", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "What is the fastest route to learn Rust?", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "hard negative: route as metaphor", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "从哪年开始 Python 2 停止维护", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "困难负例：从作为时间", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Explain public transit funding models", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "hard negative: policy", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "交通事故责任如何认定", "expect": "not_transportation", "preflight": "route_endpoints_required", "why": "困难负例：交通作为法律话题", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}

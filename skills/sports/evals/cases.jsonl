@@ -1,6 +1,30 @@
-{"query":"When is the next NBA game for the Golden State Warriors?","expect":"sports","preflight":"accepted"}
-{"query":"Tell me the latest score of the Lakers game.","expect":"sports","preflight":"accepted"}
-{"query":"What was the score of the Lakers vs Celtics game?","expect":"sports","preflight":"accepted"}
-{"query":"曼联最近比赛","expect":"sports","preflight":"accepted"}
-{"query":"Who won the Wimbledon men's final?","expect":"sports","preflight":"accepted"}
-{"query":"Explain offside rules","expect":"not_sports","preflight":"not_sports_query"}
+{"query": "When is the next NBA game for the Golden State Warriors?", "expect": "sports", "preflight": "accepted", "why": "team schedule", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Tell me the latest score of the Lakers game.", "expect": "sports", "preflight": "accepted", "why": "score", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "What was the score of the Lakers vs Celtics game?", "expect": "sports", "preflight": "accepted", "why": "two teams", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "曼联最近比赛", "expect": "sports", "preflight": "accepted", "why": "中文球队", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Who won the Wimbledon men's final?", "expect": "sports", "preflight": "accepted", "why": "event", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "勇士下一场比赛是什么时候", "expect": "sports", "preflight": "accepted", "why": "下一场", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "湖人今天比赛结果", "expect": "sports", "preflight": "accepted", "why": "比赛结果", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Manchester United next match", "expect": "sports", "preflight": "accepted", "why": "next match", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "英超今天有哪些比赛", "expect": "sports", "preflight": "accepted", "why": "英超", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "凯尔特人对湖人的比分", "expect": "sports", "preflight": "accepted", "why": "比分", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "NBA finals schedule", "expect": "sports", "preflight": "accepted", "why": "nba", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "世界杯决赛什么时候", "expect": "sports", "preflight": "accepted", "why": "世界杯", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Premier League table this week", "expect": "sports", "preflight": "accepted", "why": "premier league", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "奥运会乒乓球赛程", "expect": "sports", "preflight": "accepted", "why": "奥运", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Explain offside rules", "expect": "not_sports", "preflight": "not_sports_query", "why": "rules explainer", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Game theory and the Nash equilibrium", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: game as economics", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "How do I score a resume?", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: score as verb", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Match the following words to their definitions", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: match as verb", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Credit score requirements for a mortgage", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: credit score", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "The Imitation Game movie review", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: game in a title", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Regex match in Python", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: match as programming", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "篮球的历史起源", "expect": "not_sports", "preflight": "accepted", "why": "困难负例：篮球历史不是赛程/比分", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "足球场标准尺寸", "expect": "not_sports", "preflight": "accepted", "why": "困难负例：足球场尺寸", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Sports nutrition for marathon runners", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: sports as nutrition", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "NFL salary cap rules explained", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: league finance", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Board game recommendations for families", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: board game", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "Chess opening theory", "expect": "not_sports", "preflight": "not_sports_query", "why": "not a schedule/score query", "origin": "quality_evaluation Q2-05 (2026-09-09)"}
+{"query": "Wimbledon ticket prices 2026", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: ticket pricing", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "比赛规则怎么制定", "expect": "not_sports", "preflight": "accepted", "why": "困难负例：规则", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}
+{"query": "How to write a match-3 game in Unity", "expect": "not_sports", "preflight": "accepted", "why": "hard negative: game dev", "origin": "quality_evaluation Q2-05 (2026-09-09)", "known_gap": true, "observed_handles_query": true}

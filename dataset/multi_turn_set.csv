@@ -1,0 +1,49 @@
+qid,group_id,turn_index,query,expected_reference_resolution,language,difficulty,created_at,gold_verified_by,notes
+mt001-1,mt001,1,Redis 的作者是谁？,Redis,zh,easy,2026-09-09,claude-fable-5.1 (agent),
+mt001-2,mt001,2,他还创建过什么项目？,Salvatore Sanfilippo (antirez),zh,medium,2026-09-09,claude-fable-5.1 (agent),他 = 上一轮的作者
+mt001-3,mt001,3,那个数据库的最新版本是多少？,Redis,zh,medium,2026-09-09,claude-fable-5.1 (agent),那个数据库 = Redis（不是第二轮的项目）
+mt002-1,mt002,1,What is the capital of France?,France,en,easy,2026-09-09,claude-fable-5.1 (agent),
+mt002-2,mt002,2,How many people live there?,Paris,en,easy,2026-09-09,claude-fable-5.1 (agent),there = Paris
+mt002-3,mt002,3,And in the whole country?,France,en,medium,2026-09-09,claude-fable-5.1 (agent),country = France
+mt003-1,mt003,1,对比 GLM-5.2 和 Kimi K2.7 的 API 价格,GLM-5.2; Kimi K2.7,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+mt003-2,mt003,2,前者的上下文窗口有多大？,GLM-5.2,zh,medium,2026-09-09,claude-fable-5.1 (agent),前者 = GLM-5.2
+mt003-3,mt003,3,后者呢？,Kimi K2.7,zh,medium,2026-09-09,claude-fable-5.1 (agent),后者 = Kimi K2.7
+mt004-1,mt004,1,Who discovered penicillin?,penicillin,en,easy,2026-09-09,claude-fable-5.1 (agent),
+mt004-2,mt004,2,When did he win the Nobel Prize?,Alexander Fleming,en,medium,2026-09-09,claude-fable-5.1 (agent),he = Fleming
+mt004-3,mt004,3,Who shared it with him?,1945 Nobel Prize in Physiology or Medicine (Chain and Florey),en,medium,2026-09-09,claude-fable-5.1 (agent),it = that prize
+mt005-1,mt005,1,珠穆朗玛峰有多高？,珠穆朗玛峰,zh,easy,2026-09-09,claude-fable-5.1 (agent),
+mt005-2,mt005,2,第二高的山呢？,K2 / 乔戈里峰,zh,medium,2026-09-09,claude-fable-5.1 (agent),第二高 = 世界第二高峰
+mt005-3,mt005,3,两者相差多少米？,珠穆朗玛峰与 K2,zh,medium,2026-09-09,claude-fable-5.1 (agent),两者 = 前两轮的山
+mt006-1,mt006,1,What is the default port of PostgreSQL?,PostgreSQL,en,easy,2026-09-09,claude-fable-5.1 (agent),
+mt006-2,mt006,2,And MySQL?,MySQL default port,en,easy,2026-09-09,claude-fable-5.1 (agent),elliptical: same attribute for a new entity
+mt006-3,mt006,3,Which of the two is used by Redis?,neither (Redis uses 6379),en,medium,2026-09-09,claude-fable-5.1 (agent),the two = 5432 / 3306; trap
+mt007-1,mt007,1,Milvus 是什么类型的数据库？,Milvus,zh,easy,2026-09-09,claude-fable-5.1 (agent),
+mt007-2,mt007,2,它和 Redis 的区别是什么？,Milvus vs Redis,zh,medium,2026-09-09,claude-fable-5.1 (agent),它 = Milvus
+mt007-3,mt007,3,哪个更适合做缓存？,Redis (缓存),zh,medium,2026-09-09,claude-fable-5.1 (agent),哪个 = 上轮两者
+mt008-1,mt008,1,When was Google Inc. incorporated?,Google Inc.,en,medium,2026-09-09,claude-fable-5.1 (agent),
+mt008-2,mt008,2,Who were its founders?,Google,en,easy,2026-09-09,claude-fable-5.1 (agent),its = Google
+mt008-3,mt008,3,Where did they meet?,Larry Page and Sergey Brin (Stanford),en,medium,2026-09-09,claude-fable-5.1 (agent),they = founders
+mt009-1,mt009,1,现在北京天气怎么样？,北京,zh,easy,2026-09-09,claude-fable-5.1 (agent),skill
+mt009-2,mt009,2,明天呢？,北京 明天天气,zh,easy,2026-09-09,claude-fable-5.1 (agent),省略地点
+mt009-3,mt009,3,上海也一样吗？,上海 明天天气,zh,medium,2026-09-09,claude-fable-5.1 (agent),新地点 + 沿用时间
+mt010-1,mt010,1,What is the speed of light in vacuum?,speed of light,en,easy,2026-09-09,claude-fable-5.1 (agent),
+mt010-2,mt010,2,How long does it take to reach the Moon at that speed?,speed of light -> Earth-Moon distance,en,medium,2026-09-09,claude-fable-5.1 (agent),that speed = c
+mt010-3,mt010,3,And the Sun?,light travel time Earth-Sun,en,medium,2026-09-09,claude-fable-5.1 (agent),elliptical
+mt011-1,mt011,1,OpenAI 是哪一年成立的？,OpenAI,zh,easy,2026-09-09,claude-fable-5.1 (agent),
+mt011-2,mt011,2,它现在的旗舰模型是什么？,OpenAI 旗舰模型,zh,medium,2026-09-09,claude-fable-5.1 (agent),它 = OpenAI；时效
+mt011-3,mt011,3,那个模型每百万 token 多少钱？,上轮旗舰模型的定价,zh,hard,2026-09-09,claude-fable-5.1 (agent),那个模型 = 第二轮答案；价格需官方页
+mt012-1,mt012,1,Which planet is the largest in the solar system?,largest planet,en,easy,2026-09-09,claude-fable-5.1 (agent),
+mt012-2,mt012,2,How many moons does it have?,Jupiter,en,medium,2026-09-09,claude-fable-5.1 (agent),it = Jupiter；时效（计数会变）
+mt012-3,mt012,3,Which of them is the largest?,Jupiter's moons -> Ganymede,en,medium,2026-09-09,claude-fable-5.1 (agent),them = Jupiter's moons
+mt013-1,mt013,1,Kubernetes 最新次版本是哪个？,Kubernetes,zh,medium,2026-09-09,claude-fable-5.1 (agent),时效
+mt013-2,mt013,2,这个版本有什么重要变化？,上轮版本号,zh,medium,2026-09-09,claude-fable-5.1 (agent),这个版本 = 上轮答案
+mt013-3,mt013,3,它还支持多久？,该版本的支持周期,zh,medium,2026-09-09,claude-fable-5.1 (agent),它 = 同一版本
+mt014-1,mt014,1,Who painted the Mona Lisa?,Mona Lisa,en,easy,2026-09-09,claude-fable-5.1 (agent),
+mt014-2,mt014,2,Where is it displayed?,Mona Lisa (Louvre),en,easy,2026-09-09,claude-fable-5.1 (agent),it = the painting
+mt014-3,mt014,3,What else did he paint?,Leonardo da Vinci,en,medium,2026-09-09,claude-fable-5.1 (agent),he = the painter
+mt015-1,mt015,1,Tavily 的免费额度是多少？,Tavily,zh,medium,2026-09-09,claude-fable-5.1 (agent),
+mt015-2,mt015,2,Firecrawl 呢？,Firecrawl 免费额度,zh,medium,2026-09-09,claude-fable-5.1 (agent),省略属性
+mt015-3,mt015,3,两家哪个更划算？,Tavily vs Firecrawl 定价,zh,hard,2026-09-09,claude-fable-5.1 (agent),两家 = 前两轮
+mt016-1,mt016,1,长江有多长？,长江,zh,easy,2026-09-09,claude-fable-5.1 (agent),
+mt016-2,mt016,2,黄河呢？,黄河 长度,zh,easy,2026-09-09,claude-fable-5.1 (agent),省略属性
+mt016-3,mt016,3,它们都流经哪个省？,长江与黄河共同流经的省份,zh,hard,2026-09-09,claude-fable-5.1 (agent),它们 = 两条河

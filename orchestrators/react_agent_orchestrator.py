@@ -333,6 +333,7 @@ class ReactAgentOrchestrator:
             "search_hits": search_hits,
             "evidence_items": [],
             "evidence_records": list(loop_result.get("evidence_records") or []),
+            "search_api_calls": list(loop_result.get("search_api_calls") or []),
             "evidence_sources_active": [],
             "evidence_sources_used": [],
             "evidence_source_types_active": [],

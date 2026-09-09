@@ -111,3 +111,28 @@ env1/bin/python tests/search_quality_pipeline.py collect \
   --num-results 5 \
   --force-search
 ```
+
+## 4. 2026-09-09 起的新字段与指标（质量评测计划 Q1）
+
+`collect` 现在记录当前 loop 的 `control`（`query_analysis`、`execution_trace`、`evidence_coverage`、`loop_verdicts`、`loop_fetch_outcomes`、`tool_budgets`、`autonomy`、`loop_status` / `termination_reason`）、`search_api_calls`（含 provider、状态、时延、`fallback`、`credits`）、带 `metadata.eid` 的 `evidence_records`（截断到 2000 字）与答案；`selected_sources` 与恒空的 `keywords` 已删除。新参数：
+
+```bash
+# 用 CSV 数据集（qid/query/category）并预填 gold 命中
+env1/bin/python tests/search_quality_pipeline.py collect \
+  --dataset-file dataset/gold_doc_dataset.csv --gold-doc-file dataset/gold_doc_dataset.csv \
+  --output-file runtime/quality/<run>/search_collect_gold_doc.json --num-results 5 --force-search --show-timings
+
+# 全供应商采集：每个 provider 独立请求同一查询，不进 loop、不调用 LLM
+env1/bin/python tests/search_quality_pipeline.py collect --all-providers \
+  --dataset-file dataset/gold_doc_dataset.csv --output-file runtime/quality/<run>/search_collect_all_providers.json
+
+# 评测：gold 直通、离线 tier 分类（只用 pins / 拒绝表，不联网）、把标注过的单链文件作为全供应商相关性来源
+env1/bin/python tests/search_quality_pipeline.py evaluate --annotations-file dataset/annotations/search_<date>.json \
+  --gold-doc-file dataset/gold_doc_dataset.csv --output-file runtime/quality/<run>/search_report.json
+env1/bin/python tests/search_quality_pipeline.py evaluate --annotations-file runtime/quality/<run>/search_collect_all_providers.json \
+  --relevance-annotations dataset/annotations/search_<date>.json --output-file runtime/quality/<run>/search_report_all_providers.json
+```
+
+标注新增字段：`relevance_grades`（逐 rank 0/1/2，启用 nDCG@5 与 `answer_hit_at_k`）、`gold_doc_urls`（脚本预填）、`core_correct`（0/1/2）、`annotator`、`annotated_at`。判据见 [quality_annotation_guide.md](quality_annotation_guide.md)。
+
+`evaluate` 新增指标：`ndcg_at_5`、`answer_hit_at_3`、`gold_doc_recall_at_3/5`（host 去 `www.`、去 query/fragment、路径前缀匹配）、`authoritative_at_3/5`、`aggregator_at_3/5`、`domain_diversity_at_5`、`empty_result_rate`、`core_correct`、`by_category`（样本 < 5 的类别只报计数）与 `providers` 记分卡（`availability`、`error_rate_by_type`、`empty_rate`、`latency_p50/p95`、`fallback_share`、`retained_contribution`、`authoritative_yield`、`credits_known`、`cost_per_retained`；官方域名发现搜索单列在 `official_domain_discovery`）。全供应商报告给出 `relevant_contribution`、`unique_yield`、`gold_doc_hit_rate` 与跨供应商一致性（`pairwise_jaccard`、`top1_consensus_mean`）。旧的 `relevant_ranks` / `top3_only` 标注文件仍可评测，MRR / Hit@k 口径不变。

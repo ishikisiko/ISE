@@ -70,6 +70,11 @@ def search_call_snapshot(call: Mapping[str, Any]) -> Dict[str, Any]:
     if call.get("error"):
         snapshot["reason"] = safe_trace_text(call.get("error"), limit=180)
         snapshot["status"] = "error"
+    credits = call.get("credits")
+    if isinstance(credits, (int, float)) and not isinstance(credits, bool):
+        snapshot["credits"] = float(credits)
+    if call.get("kind"):
+        snapshot["kind"] = safe_trace_text(call.get("kind"), limit=40)
     return snapshot
 
 

@@ -259,3 +259,73 @@ python -m tests.baseline_runner --compare runtime/baseline/autonomy/guided runti
 两轮成本以独立 HTTP usage 为准，主评测已知 ≥2,677,496 token，裁判与废弃评审额外消耗单列于报告，USD 未知。应用已注册调用 usage 完整率从 0/75 到 75/75，但次轮仍有两题漏记嵌套调用；入口请求 `max_tokens=4000/temperature=0.2` 未传进 loop，主模型对象配置实际为 5000/0.7，两轮相同。详见[运行审计](reports/autonomy_evaluation_20260908/runtime_audit.md)。
 
 预算决策：保留原默认值，不无依据扩大调用预算或调整压缩阈值。两轮各 75 条有效 loop 状态都没有压缩，次轮最高上下文比例仅约 0.301，不足以完成长上下文校准。8.4 不劣门槛未通过、8.5 真人评分未进行、8.6 长上下文校准未完成；8.7 的结果登记完成。不把本次两轮报告交付等同于 OpenSpec 全部验收闭合。
+
+---
+
+## 7. 质量评测（[quality_evaluation_plan.md](quality_evaluation_plan.md)）
+
+本章是设计文档 D0–D11 指标的登记处。产物落 gitignored 的 `runtime/quality/<date>-<tag>/`，报告进 `docs/reports/quality_evaluation_<date>/`。2026-09-09 首轮**没有授权真实运行**，登记的全部是离线回归、历史真实产物重算与禁网探针的数字；详见 [首份报告](reports/quality_evaluation_20260909/report.md)。
+
+### 7.1 运行入口
+
+```bash
+env1/bin/python -m pytest -q -m quality_offline                        # 零成本回归（≈10 秒）
+env1/bin/python -m tests.quality_runner --suite offline                 # 同上 + 各离线评测 JSON，断言 0 次网络请求
+env1/bin/python -m tests.quality_runner --suite validity --max-queries 5   # [真实运行] D0 冒烟
+env1/bin/python -m tests.quality_runner --suite search|local|answer|reliability  # [真实运行]
+env1/bin/python -m tests.quality_report --run runtime/quality/<run>     # scorecard.json + report.md
+env1/bin/python -m tests.quality_report --compare <run_a> <run_b>       # 回归门（设计 §5.2）
+```
+
+### 7.2 质量评测 · D0
+
+| 指标 | 2026-09-09 | 说明 |
+|---|---|---|
+| `param_forwarding_pass` | **0/3 严格断言（xfail，QD-20260909-01/02）** | 禁网真实 builder 捕获线上请求体：入口 4000/0.2/3 → 实际 5000/0.7/5；`autonomy` 正确 |
+| `token_capture_rate` 等六项 | 未运行 | `python -m tests.quality.validity --max-queries 5` |
+
+### 7.3 质量评测 · D1（`dataset/query_analysis_gold.csv`，65 题，确定性层）
+
+| 指标 | 值 | 门槛 |
+|---|---:|---|
+| intent_shape 准确率 | 0.846 | — |
+| 对比类成员 P / R / F1 | 0.867 / 0.605 / 0.712 | F1 ≥ 0.9 未达 |
+| 对比类 `noise_member_rate` | **0.133** | 0（未达，QD-20260909-04） |
+| 实体 P / R | 0.474 / 0.846 | — |
+| claim_classes micro-F1 | 0.747 | — |
+| `critical_ambiguity` P / R | 0.80 / 0.73 | P ≥ 0.9 未达 |
+| `existence_query` 精确率 | 0.60 | — |
+| time_scope 准确率 | 0.908 | — |
+| `false_temporal_fanout_rate` | **0.0** | 0（通过） |
+
+### 7.4 质量评测 · D2 preflight（`skills/*/evals/cases.jsonl`，161 例）
+
+precision / recall：finance 0.72 / 1.00，weather 0.66 / 0.95，location 0.68 / 1.00，transportation 0.54 / 1.00，sports 0.50 / 1.00；53 例 known_gap（QD-20260909-05）。门槛 precision ≥ 0.95 全部未达。
+
+### 7.5 质量评测 · D6（离线 + 历史台账）
+
+分级 167 URL：official_precision **1.000**、official_recall 0.457、strict 准确率 0.671、权威折叠 0.856、denylist_compliance **1.0**、non_evidence_exclusion **1.0**、仿冒 TLD 误判 first_party 4/30。解析器回放 78 实体：accuracy 0.282（pinned 15/15）、none_rate 0.654、缓存错误 official 4。历史 r2 台账：retained 34.1% / limited 14.0% / rejected 51.8%，权威占 retained 12.4%，`aggregator_leak_rate` 0.063（authority_required 题 0）。
+
+### 7.6 质量评测 · D7 引用（历史 r2，80 题，离线重跑 `check_citations`）
+
+`hallucinated_citation_count` **7 处 / 3 题**（硬门槛未通过）；`citation_recall` 0.486（guided 事实 1.0 / autonomous 事实 0.255）；`authority_compliance` 0.215；`pricing_source_compliance` 0.947；`recency_compliance` 0/3；37/80 题零引用。v3 裁判：core_correct=2 39/40（final016 错）。r1：幻觉引用 7 处 / 2 题，`citation_recall` 0.285。
+
+### 7.7 质量评测 · D8（历史）
+
+r2：`false_exhaustion_rate` **0**（0/3）；`premature_success_rate` 0.019（final016）；forced / degraded synthesis 0.267 / 0.253；judge_invocation 0.410、**judge_error_rate 0.138**（≤ 0.05 未达；r1 0.072）；invalid_tool_request 0.005；narration guard 0；no_progress P95 2；首答平均 1.47 轮；advisory 忽略率 0.923（r1 0.957）；压缩 0。按组迭代数 3.20 / 1.05 / 4.75 / 1.42，与自主度报告 §4.4 一致。
+
+### 7.8 质量评测 · D9（历史 r2）
+
+token 均值 18,963（P50 5,239 / P95 76,892；75/80 取 transport 旁观）；时延 P50 34.3 s / P95 438.5 s；阶段均值 act 45.2 s、judge 25.7 s、synthesize 5.9 s、search 5.2 s；非成功终态 23 题占总 token **81.5%**（≤ 10% 未达）；每正确答案 7,333 token（事实题 guided 12,452 / autonomous 1,944）；credits 与 USD 未知。
+
+### 7.9 质量评测 · D10 / D11
+
+故障注入 8/8 通过。历史 r2 产物凭据泄漏 0；注入集 22 页结构检查全部通过；`injection_resistance`、`consistency_at_3` 未运行。
+
+### 7.10 质量评测 · 本地 RAG 参数扫描
+
+未运行。语料 `tests/fixtures/local_corpus/`（16 文件 / 209 chunk @1000/200）、gold 38 题（多 span 10、absent 6、跨语言 7）与 `local_chunk_grid_search.py --top-k 3,5` 已就绪；跑完后在此登记默认 1000/200 的位次。
+
+### 7.11 数据集规模与标注人
+
+见首份报告 §6；全部由 agent 单人构建（`gold_verified_by` 注明），时效类 gold 除 final037/039/041/059 外未对照官方页核实。

@@ -28,6 +28,7 @@ from utils.query_orchestration import (
     evaluate_termination,
     normalize_termination_config,
 )
+from utils.provider_calls import record_provider_requests_from_snapshots
 from utils.retrieval_trace import emit_search_call_step, search_call_snapshots
 from utils.search_routing import extract_json_object
 from utils.timing_utils import extract_token_usage
@@ -463,6 +464,10 @@ class ReactLoopGraphRunner:
         # expose the same bounded facts even when no SSE listener is attached.
         self.tracer = ensure_tracer(tracer) if tracer is not None else WorkflowTracer()
         self._trace_start_index = 0
+        # Concrete provider requests made by loop tools, in call order. The
+        # SSE trace already renders them; this keeps a bounded machine-readable
+        # copy for ``control.search_api_calls`` (search-quality evaluation).
+        self._search_api_calls: List[Dict[str, Any]] = []
         # Optional request-level cancellation token (a threading.Event). When
         # set, work-initiating nodes stop before starting new calls; in-flight
         # calls finish naturally and register their results first.
@@ -1508,6 +1513,25 @@ class ReactLoopGraphRunner:
                     success=not failed,
                     extra={"kind": "loop_search_tool"},
                 )
+                # The concrete provider requests behind the logical tool call
+                # (D0 ``tool_call_capture_ratio``): search snapshots for
+                # web_search / search_recovery, extractor attempts for fetch_url.
+                if tool is not None:
+                    if tool_name == "fetch_url":
+                        outcomes_getter = getattr(tool, "get_last_fetch_outcomes", None)
+                        outcomes = list(outcomes_getter() or []) if callable(outcomes_getter) else []
+                        record_provider_requests_from_snapshots(
+                            self.timing_recorder,
+                            [
+                                {"kind": "extracted_pages", "attempts": outcome.get("attempts") or []}
+                                for outcome in outcomes
+                                if isinstance(outcome, dict) and outcome.get("attempts")
+                            ],
+                        )
+                    else:
+                        record_provider_requests_from_snapshots(
+                            self.timing_recorder, self._tool_search_api_calls(tool)
+                        )
 
             if tool is not None:
                 for api_position, snapshot in enumerate(
@@ -1519,6 +1543,10 @@ class ReactLoopGraphRunner:
                         snapshot,
                         step_id=f"react_search_api_{iteration}_{position}_{api_position}",
                     )
+                    if len(self._search_api_calls) < 60:
+                        self._search_api_calls.append(
+                            {**snapshot, "tool": tool_name, "iteration": iteration, "position": position}
+                        )
 
             items = self._tool_trace_items(call, result_value=content, failed=failed)
             count = self._tool_result_count(call, content)
@@ -3503,6 +3531,7 @@ class ReactLoopGraphRunner:
         trace_events, trace_truncated = self._trace_events()
         result["trace_events"] = trace_events
         result["trace_truncated"] = trace_truncated
+        result["search_api_calls"] = list(self._search_api_calls)
         if resume:
             result["evidence_pool_size"] = len(final_state.get("evidence_pool") or [])
         return result

@@ -23,6 +23,7 @@ from search.search import (
     TavilySearchClient,
 )
 from search.rerank import BaseReranker, Qwen3Reranker
+from search.reference_fetch import provider_usage_recorder_from_config
 from utils.chunking import resolve_chunk_settings
 from utils.config_validation import configured_value
 from utils.temperature_config import get_temperature_for_task
@@ -150,6 +151,7 @@ def build_search_client(
     missing_requested: List[str] = []
     fallback_clients: List[SearchClient] = []
     brave_client: Optional[SearchClient] = None
+    usage_recorder = provider_usage_recorder_from_config(config_or_key)
 
     brave_cfg = config_or_key.get("braveSearch") or {}
     brave_primary_key = configured_value(brave_cfg.get("primary_api_key"))
@@ -191,6 +193,8 @@ def build_search_client(
                         ),
                         timeout=int(firecrawl_cfg.get("timeout", 30)),
                         search_depth=firecrawl_cfg.get("search_depth"),
+                        credits_per_request=firecrawl_cfg.get("credits_per_request"),
+                        usage_recorder=usage_recorder,
                     )
                 )
             except Exception as exc:
@@ -210,6 +214,8 @@ def build_search_client(
                         base_url=(tavily_cfg.get("base_url") or "https://api.tavily.com/search"),
                         timeout=int(tavily_cfg.get("timeout", 20)),
                         search_depth=str(tavily_cfg.get("search_depth") or "basic"),
+                        credits_per_request=tavily_cfg.get("credits_per_request"),
+                        usage_recorder=usage_recorder,
                     )
                 )
             except Exception as exc:
@@ -231,6 +237,8 @@ def build_search_client(
                             or "https://api.anysearch.com/v1/search"
                         ),
                         timeout=int(anysearch_cfg.get("timeout", 30)),
+                        credits_per_request=anysearch_cfg.get("credits_per_request"),
+                        usage_recorder=usage_recorder,
                     )
                 )
             except Exception as exc:
@@ -256,6 +264,8 @@ def build_search_client(
                         max_chars_per_result=int(
                             parallel_cfg.get("max_chars_per_result", 1500)
                         ),
+                        credits_per_request=parallel_cfg.get("credits_per_request"),
+                        usage_recorder=usage_recorder,
                     )
                 )
             except Exception as exc:

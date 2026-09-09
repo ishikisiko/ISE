@@ -1,0 +1,23 @@
+Skyweave Composite Handling and Storage Guide
+Evaluation corpus edition. Skyweave is a fictional material produced by Aetherian Dynamics; the values below exist only for retrieval testing.
+
+1. Receiving
+Inspect every crate on arrival. Each crate holds 20 sheets separated by foam interleaves and carries a humidity indicator card; reject the crate if the indicator shows more than 60 percent relative humidity. Record the crate serial number, which starts with the plant code A for Althaven or O for Ostera, in the inventory system within 24 hours.
+
+2. Storage
+Store sheets flat on racks rated for at least 400 kilograms per bay. The storage room must stay between 15 and 25 degrees Celsius and below 55 percent relative humidity. Sheets may be stored for 18 months from the curing date printed on the label; after that they must be re-tested before use. Never store Skyweave within two metres of solvents or in direct sunlight, because ultraviolet exposure for more than 200 hours degrades the surface resin.
+
+3. Cutting and machining
+Use diamond-coated wet saws or enclosed dry cutting with extraction. Feed rates above 1.5 metres per minute cause delamination at the cut edge. Drill holes with brad-point bits at 1,200 revolutions per minute and always back the sheet with sacrificial plywood. Edge sealing with the approved SW-7 sealant is mandatory before the part enters service.
+
+4. Bonding and fastening
+Bonded joints use the two-part epoxy SW-EPX cured at 60 degrees Celsius for four hours; a room-temperature cure is possible but takes 72 hours and reaches only 85 percent of the rated joint strength. Mechanical fasteners must be titanium or stainless steel; aluminium fasteners cause galvanic corrosion in contact with the carbon layer.
+
+5. Repair
+Surface scratches shallower than 0.3 millimetres are cosmetic and need only a resin wipe. Deeper damage requires a scarf repair with a 20 to 1 taper ratio and a patch that extends at least 25 millimetres beyond the damage on every side. Repairs are logged against the sheet serial number and reviewed by the materials engineering office in Althaven.
+
+6. Health and safety
+Cutting dust is an irritant; wear P3 respirators and nitrile gloves. The workplace exposure limit is 1 milligram per cubic metre averaged over eight hours. Cured resin is not hazardous, but uncured SW-EPX epoxy is a skin sensitiser and must be handled with gloves and eye protection. Dispose of offcuts as non-hazardous industrial waste; do not incinerate them on site.
+
+7. Documentation
+Every finished part ships with a traveller card listing the sheet serial numbers, the cutting operator, the sealing date and the bonding cure record. Keep traveller cards for ten years. Customers of the Sereleian Airship Authority additionally receive a digital copy through the authority's fleet maintenance portal.
