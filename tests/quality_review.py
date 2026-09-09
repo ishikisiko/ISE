@@ -18,6 +18,11 @@ Blind: the judge never sees mode, round, system name or scores. One request
 per answer (``provider_session``), fixed model, temperature 0, immutable output
 files bound to the result digest and the frozen manifest.
 
+Judge defaults (provider, model, reasoning, budgets, datasets, errata) come from
+the ``judge`` block of ``config.quality.json``; an explicit flag still wins. That
+file's digest is frozen into ``review-manifest-v4.json``, so editing the block
+after a batch started makes this script refuse to score against that batch.
+
     python -m tests.quality_review --source runtime/quality/<run> --max-reviews 5
     python -m tests.quality_review --source runtime/baseline/autonomy-20260908-measured/r2 --dry-run
 
@@ -38,9 +43,20 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.autonomy_study import digest, utc_now, write_new  # noqa: E402
-from tests.quality.common import ROOT, load_answer_records, read_csv_rows, read_json  # noqa: E402
+from tests.quality.common import (  # noqa: E402
+    ROOT,
+    apply_config_defaults,
+    load_answer_records,
+    load_quality_config,
+    quality_config_path,
+    quality_defaults,
+    read_csv_rows,
+    read_json,
+    sha256_file,
+)
 
 REVIEW_VERSION = "v4"
+# Last-resort defaults: config.quality.json normally supplies these.
 DEFAULT_PROVIDER = "opencode-go"
 DEFAULT_MODEL = "glm-5.2"
 DEFAULT_MAX_RECORD_CHARS = 6000
@@ -290,12 +306,18 @@ def build_manifest(args: argparse.Namespace, dataset_paths: List[str]) -> Dict[s
         "system_prompt": REVIEW_SYSTEM, "label_blinding": True, "human_review": "separate (dataset/annotations/answer_<date>.csv)",
         "dataset_digests": {path: digest((ROOT / path).read_bytes()) for path in dataset_paths if (ROOT / path).is_file()},
         "errata_digest": digest((ROOT / args.errata).read_bytes()) if (ROOT / args.errata).is_file() else None,
+        "quality_config_digest": sha256_file(quality_config_path(args.quality_config)),
         "reviewer_source_digest": digest(Path(__file__).read_bytes()),
     }
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
+    # Two-stage parse: --quality-config decides the defaults the real parser starts from.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--quality-config", default=None)
+    quality_config = load_quality_config(pre.parse_known_args()[0].quality_config)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--quality-config", default=None, help="Evaluation defaults file (default config.quality.json; also ISE_QUALITY_CONFIG).")
     parser.add_argument("--source", required=True, help="Run directory (answer_details.jsonl) or study round (runs/*/result.json).")
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--provider", default=DEFAULT_PROVIDER)
@@ -308,7 +330,12 @@ def main() -> None:
     parser.add_argument("--max-reviews", type=int, default=None)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true", help="Build inputs and manifest without calling the judge.")
-    args = parser.parse_args()
+    apply_config_defaults(parser, quality_defaults(quality_config, "judge"), source=str(quality_config_path(pre.parse_known_args()[0].quality_config)))
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
 
     source = Path(args.source)
     directory = source / f"reviews-{REVIEW_VERSION}"

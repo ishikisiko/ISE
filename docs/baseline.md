@@ -277,6 +277,8 @@ env1/bin/python -m tests.quality_report --run runtime/quality/<run>     # scorec
 env1/bin/python -m tests.quality_report --compare <run_a> <run_b>       # 回归门（设计 §5.2）
 ```
 
+裁判模型与 runner 默认参数取自入库的 `config.quality.json`（`runner` / `judge` 两块，不含凭据）；显式 CLI 参数优先，`--quality-config <file>` 或 `ISE_QUALITY_CONFIG` 可整体换一份。该文件的哈希写入 `run_meta.json` 与 `review-manifest-v4.json`。
+
 ### 7.2 质量评测 · D0
 
 | 指标 | 2026-09-09 | 说明 |

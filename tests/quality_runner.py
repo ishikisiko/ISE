@@ -6,6 +6,12 @@
     python -m tests.quality_runner --suite answer --datasets final_answer,open_task
     python -m tests.quality_runner --suite loop,cost --source runtime/baseline/autonomy-20260908-measured/r2
     python -m tests.quality_runner --suite all --tag formal --dry-run
+    python -m tests.quality_runner --suite answer --quality-config config.quality.local.json
+
+Flag defaults come from the ``runner`` block of ``config.quality.json``
+(``--quality-config`` / ``ISE_QUALITY_CONFIG`` point elsewhere); an explicit flag
+still wins, and an unknown key in that block is fatal. Credentials stay in
+``config.json``. The file's path and digest go into ``run_meta.json``.
 
 Suites: validity / search / local / offline / answer / loop / cost / reliability / safety / all.
 Every run writes ``runtime/quality/<date>-<tag>/run_meta.json`` (commit, secret-free
@@ -32,10 +38,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.quality.common import (  # noqa: E402
     ROOT,
+    apply_config_defaults,
     build_run_meta,
     load_config,
+    load_quality_config,
     new_run_dir,
+    quality_config_path,
+    quality_defaults,
     read_csv_rows,
+    sha256_file,
     today,
     utc_now,
     write_json,
@@ -60,7 +71,12 @@ PY = sys.executable
 
 
 def parse_args() -> argparse.Namespace:
+    # Two-stage parse: --quality-config decides the defaults the real parser starts from.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--quality-config", default=None)
+    quality_config = load_quality_config(pre.parse_known_args()[0].quality_config)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--quality-config", default=None, help="Evaluation defaults file (default config.quality.json; also ISE_QUALITY_CONFIG).")
     parser.add_argument("--suite", required=True, help="Comma-separated suites or 'all'.")
     parser.add_argument("--tag", default="quality")
     parser.add_argument("--run-dir", default=None, help="Explicit run directory (default runtime/quality/<date>-<tag>).")
@@ -81,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--judge-provider", default="opencode-go")
     parser.add_argument("--data-path", default="tests/fixtures/local_corpus")
     parser.add_argument("--dry-run", action="store_true", help="Print the commands without executing anything.")
+    apply_config_defaults(parser, quality_defaults(quality_config, "runner"), source=str(quality_config_path(pre.parse_known_args()[0].quality_config)))
     return parser.parse_args()
 
 
@@ -325,7 +342,10 @@ def suite_answer(run_dir: Path, args: argparse.Namespace, config: Dict[str, Any]
         details.append(row)
     write_jsonl(run_dir / "answer_details.jsonl", details)
     if not args.skip_review:
-        run_command([PY, "-m", "tests.quality_review", "--source", str(run_dir), "--provider", args.judge_provider, "--model", args.judge_model] + (["--config", args.config] if args.config else []), dry_run=False, log=run_dir / "review.log")
+        review_cmd = [PY, "-m", "tests.quality_review", "--source", str(run_dir), "--provider", args.judge_provider, "--model", args.judge_model]
+    if args.quality_config:
+        review_cmd += ["--quality-config", args.quality_config]
+    run_command(review_cmd + (["--config", args.config] if args.config else []), dry_run=False, log=run_dir / "review.log")
     for module, output in (("citation_eval", "citation_eval.json"), ("evidence_eval", "evidence_eval.json"), ("loop_eval", "loop_eval.json"), ("cost_eval", "cost.json"), ("fetch_eval", "fetch_eval.json")):
         run_command([PY, "-m", f"tests.quality.{module}", "--source", str(run_dir), "--output-file", str(run_dir / output)], dry_run=False, log=run_dir / "evaluators.log")
 
@@ -448,6 +468,8 @@ def main() -> None:
         datasets=[ROOT / path for path in OFFLINE_DATASETS + list(ANSWER_DATASETS.values()) if (ROOT / path).is_file()],
         extra={
             "suites": suites, "arguments": {key: value for key, value in vars(args).items() if key != "config"},
+            "quality_config": {"path": str(quality_config_path(args.quality_config).relative_to(ROOT)) if quality_config_path(args.quality_config).is_relative_to(ROOT) else str(quality_config_path(args.quality_config)),
+                               "digest": sha256_file(quality_config_path(args.quality_config))},
             "rubric_version": "v4", "review_model": {"provider": args.judge_provider, "model": args.judge_model},
             "termination_judge": {key: judge_cfg.get(key) for key in ("provider", "model", "enabled")},
             "search_fallback": config.get("searchFallback"), "autonomy_mode": args.autonomy or (config.get("autonomy") or {}).get("mode", "guided"),

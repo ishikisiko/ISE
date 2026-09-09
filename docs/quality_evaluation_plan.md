@@ -16,6 +16,7 @@
 - 真实运行（消耗搜索配额、LLM 调用、provider credits）的任务标 **[真实运行]**，启动前需用户授权并记录配额预算；离线任务不标。
 - 需要人工标注或人工判定的任务标 **[人工]**，标注者与数据集构建者尽量不同人；做不到时在产物里注明。
 - 任何指标口径变更先改设计文档对应小节，再改脚本，最后在 baseline.md 该指标首次登记处注明变更日期。
+- 评测脚本的参数优先级固定为**显式 CLI 参数 > `config.quality.json` > 脚本内置默认值**；配置块里的未知键或类型不符一律报错退出，不静默回落。`config.json` 只出凭据与产品行为，评测协议不写进去。
 
 ### 0.3 前置条件
 
@@ -27,6 +28,7 @@
 | 人工标注人（轻量档 ≥ 1 人，双标 ≥ 2 人） | 未安排 | Q1-04、Q4-02、Q4-05 |
 | 评测运行目录 `runtime/quality/`（gitignored） | `runtime/` 已忽略 | 全部 |
 | 数据集与标注文件版本化位置 | `dataset/` 已入库；`tests/search_quality_external_*` 被忽略 | 新标注放 `dataset/annotations/`，不放 `tests/` |
+| 评测参数配置 `config.quality.json`（入库、无凭据） | 2026-09-09 新增；`runner` / `judge` 两块 | 裁判模型与 runner 默认值改这里，不改 `config.json`；`--quality-config` / `ISE_QUALITY_CONFIG` 可换文件 |
 
 ### 0.4 真实运行预算估算
 

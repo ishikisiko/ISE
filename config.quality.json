@@ -1,0 +1,33 @@
+{
+    "_comment": "Evaluation-framework defaults. Product behaviour lives in config.json; this file only shapes how tests/quality_runner.py and tests/quality_review.py are invoked. No credentials here — provider api_key/base_url still come from config.json. Precedence: explicit CLI flag > this file > the script's built-in default. Unknown keys are fatal. Point elsewhere with --quality-config or ISE_QUALITY_CONFIG. Changing the judge block after a review batch started is refused by the frozen review-manifest.",
+    "schema_version": 1,
+    "runner": {
+        "_comment": "Defaults for `python -m tests.quality_runner`. Keys match the CLI flag names (--num-results -> num_results). null keeps the flag unset.",
+        "tag": "quality",
+        "datasets": "final_answer,open_task",
+        "max_queries": null,
+        "num_results": 5,
+        "max_tokens": 4000,
+        "temperature": 0.2,
+        "autonomy": null,
+        "soft_timeout": 600,
+        "workers": 1,
+        "repeats": 3,
+        "multi_turn": false,
+        "skip_review": false,
+        "judge_provider": "opencode-go",
+        "judge_model": "glm-5.2",
+        "data_path": "tests/fixtures/local_corpus"
+    },
+    "judge": {
+        "_comment": "Defaults for `python -m tests.quality_review` (rubric v4). The resolved values plus this file's digest are frozen into review-manifest-v4.json on the first scored answer; editing them afterwards makes the reviewer refuse to run against that batch.",
+        "provider": "opencode-go",
+        "model": "glm-5.2",
+        "reasoning": "low",
+        "max_tokens": 4096,
+        "max_record_chars": 6000,
+        "datasets": "dataset/final_answer_dataset.csv,dataset/open_task_dataset.csv,dataset/abstention_set.csv",
+        "errata": "dataset/annotations/gold_errata.json",
+        "workers": 2
+    }
+}

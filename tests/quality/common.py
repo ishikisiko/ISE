@@ -6,6 +6,7 @@ and judges live in their own scripts.
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import hashlib
 import json
@@ -24,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 QUALITY_RUNTIME_ROOT = ROOT / "runtime" / "quality"
+QUALITY_CONFIG_PATH = ROOT / "config.quality.json"
 
 SECRET_MARKERS = ("key", "token", "secret", "password", "authorization", "cookie")
 
@@ -103,6 +105,68 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     config_path = path or os.environ.get("NLP_CONFIG_PATH") or str(ROOT / "config.json")
     with open(config_path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def quality_config_path(path: Optional[str] = None) -> Path:
+    candidate = path or os.environ.get("ISE_QUALITY_CONFIG") or QUALITY_CONFIG_PATH
+    resolved = Path(candidate)
+    return resolved if resolved.is_absolute() else ROOT / resolved
+
+
+def load_quality_config(path: Optional[str] = None) -> Dict[str, Any]:
+    """Evaluation-framework defaults (``config.quality.json``); credentials stay in ``config.json``.
+
+    An explicitly requested file must exist; the built-in default file may be
+    absent, in which case every script keeps its own argparse defaults.
+    """
+    file_path = quality_config_path(path)
+    if not file_path.is_file():
+        if path or os.environ.get("ISE_QUALITY_CONFIG"):
+            raise SystemExit(f"quality config not found: {file_path}")
+        return {}
+    with file_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{file_path}: quality config must be a JSON object")
+    return payload
+
+
+def quality_defaults(config: Dict[str, Any], section: str) -> Dict[str, Any]:
+    """One block of the quality config, minus ``_comment``-style annotations."""
+    block = config.get(section)
+    if not isinstance(block, dict):
+        return {}
+    return {key: value for key, value in block.items() if not key.startswith("_")}
+
+
+def apply_config_defaults(parser: argparse.ArgumentParser, defaults: Dict[str, Any], *, source: str) -> Dict[str, Any]:
+    """Feed a config block into ``parser`` as defaults; an explicit CLI flag still wins.
+
+    Unknown keys and values the flag's own ``type``/``choices`` would reject are
+    fatal, so a typo in the config file can never silently keep the built-in
+    default. Reads ``parser._actions`` because argparse exposes no public map.
+    """
+    actions = {action.dest: action for action in parser._actions if action.dest not in {"help", argparse.SUPPRESS}}
+    unknown = sorted(key for key in defaults if key not in actions)
+    if unknown:
+        raise SystemExit(f"{source}: unknown option(s): {', '.join(unknown)}")
+    resolved: Dict[str, Any] = {}
+    for key, value in defaults.items():
+        action = actions[key]
+        if value is not None:
+            if action.nargs == 0:
+                if not isinstance(value, bool):
+                    raise SystemExit(f"{source}: {key} must be true or false, got {value!r}")
+            elif action.type is not None:
+                try:
+                    value = action.type(value)
+                except (TypeError, ValueError) as exc:
+                    raise SystemExit(f"{source}: invalid value for {key}: {value!r} ({exc})")
+            if action.choices is not None and value not in action.choices:
+                raise SystemExit(f"{source}: {key} must be one of {', '.join(map(str, action.choices))}, got {value!r}")
+        resolved[key] = value
+    parser.set_defaults(**resolved)
+    return resolved
 
 
 # ---------------------------------------------------------------- provenance
