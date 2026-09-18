@@ -1,6 +1,6 @@
 # forward-entry-generation-params
 
-状态：缺陷登记（由质量评测 Q0-01 参数透传断言发现，2026-09-09）。缺陷编号 **QD-20260909-01**（`max_tokens` / `temperature`）与 **QD-20260909-02**（`num_search_results`）。本 change 只登记与界定，不在评测计划内顺手修改产品（[quality_evaluation_plan.md](../../../docs/quality_evaluation_plan.md) §0.1）。
+状态：已实施（2026-09-18，见 tasks.md 实施记录）。原登记：缺陷登记（由质量评测 Q0-01 参数透传断言发现，2026-09-09）。缺陷编号 **QD-20260909-01**（`max_tokens` / `temperature`）与 **QD-20260909-02**（`num_search_results`）。本 change 只登记与界定，不在评测计划内顺手修改产品（[quality_evaluation_plan.md](../../../docs/quality_evaluation_plan.md) §0.1）。
 
 ## Why
 
@@ -10,7 +10,7 @@
 
 路线图归属：M6 能力扩张期的可观测性/契约修补，不改变架构方向。不变量：I1–I3 不涉及；I4（token 上界可配置可观测）正是本缺陷的违背点；I5 修复应可独立发布。
 
-## What Changes（待实施）
+## What Changes（已实施）
 
 - `ReactAgentOrchestrator.answer()` 把 `max_tokens` / `temperature` 传入 `_answer_with_langgraph()`，`ReactLoopGraphRunner` 在 act / synthesize / degraded synthesis 调用时以 `invoke(..., max_tokens=..., temperature=...)` 覆盖模型默认值；judge 与压缩摘要保持各自角色配置。
 - `ReActSearchTool` 与 `ReActSearchRecoveryTool` 接收请求级 `num_search_results`（经 `set_request_options` 或等价钩子），provider 请求条数与入口一致；`search_recovery` 内嵌生成同样使用入口参数。

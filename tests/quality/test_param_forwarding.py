@@ -6,11 +6,9 @@ disabled. The fake HTTP session captures the exact request payload the loop
 sends, which is the only trustworthy witness of ``max_tokens`` /
 ``temperature`` (design D0 ``param_forwarding_pass``).
 
-Known defects are pinned as *strict* xfail so a fix flips them loudly:
-
-* QD-20260909-01 -- ``max_tokens`` / ``temperature`` are not forwarded
-  (`openspec/changes/forward-entry-generation-params`).
-* QD-20260909-02 -- ``num_search_results`` does not reach ``web_search``.
+QD-20260909-01 (``max_tokens`` / ``temperature``) and QD-20260909-02
+(``num_search_results``) were fixed by ``forward-entry-generation-params``
+(2026-09-18); the three assertions below are now plain tests.
 
 Set ``ISE_QUALITY_PROBE_OUT=/path/probe.json`` to persist the observed values
 for ``tests/quality/validity.py``.
@@ -27,9 +25,6 @@ import requests
 from search.search import SearchClient, SearchHit
 
 pytestmark = pytest.mark.quality_offline
-
-DEFECT_MAX_TOKENS = "QD-20260909-01 entry max_tokens/temperature not forwarded to loop model calls"
-DEFECT_NUM_RESULTS = "QD-20260909-02 entry num_search_results not forwarded to web_search"
 
 REQUESTED = {"max_tokens": 4000, "temperature": 0.2, "num_search_results": 3, "autonomy": "guided"}
 
@@ -146,6 +141,7 @@ def probe(monkeypatch):
         "search_requests": list(search_client.requests),
         "control_autonomy": (result.get("control") or {}).get("autonomy"),
         "loop_status": (result.get("control") or {}).get("loop_status"),
+        "control_request_parameters": (result.get("control") or {}).get("request_parameters"),
     }
     out = os.environ.get("ISE_QUALITY_PROBE_OUT")
     if out:
@@ -165,16 +161,20 @@ def test_autonomy_mode_reaches_the_loop(probe: Dict[str, Any]) -> None:
     assert probe["control_autonomy"] == {"mode": REQUESTED["autonomy"], "source": "request"}
 
 
-@pytest.mark.xfail(strict=True, reason=DEFECT_MAX_TOKENS)
 def test_max_tokens_reaches_loop_model_calls(probe: Dict[str, Any]) -> None:
     assert all(request["max_tokens"] == REQUESTED["max_tokens"] for request in probe["wire_requests"])
 
 
-@pytest.mark.xfail(strict=True, reason=DEFECT_MAX_TOKENS)
 def test_temperature_reaches_loop_model_calls(probe: Dict[str, Any]) -> None:
     assert all(request["temperature"] == REQUESTED["temperature"] for request in probe["wire_requests"])
 
 
-@pytest.mark.xfail(strict=True, reason=DEFECT_NUM_RESULTS)
 def test_num_search_results_reaches_web_search(probe: Dict[str, Any]) -> None:
     assert all(request["num_results"] == REQUESTED["num_search_results"] for request in probe["search_requests"])
+
+
+def test_control_echoes_effective_request_parameters(probe: Dict[str, Any]) -> None:
+    echoed = probe["control_request_parameters"] or {}
+    assert echoed.get("max_tokens") == REQUESTED["max_tokens"]
+    assert echoed.get("temperature") == REQUESTED["temperature"]
+    assert echoed.get("num_search_results") == REQUESTED["num_search_results"]

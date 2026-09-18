@@ -153,6 +153,14 @@ class ReactAgentOrchestrator:
             execution_trace=execution_trace,
             autonomy_policy=autonomy_policy,
             cancel_event=cancel_event,
+            request_parameters={
+                "max_tokens": int(max_tokens),
+                "temperature": float(temperature),
+                "num_search_results": max(1, int(num_search_results)),
+                "per_source_search_results": max(
+                    1, int(per_source_search_results or num_search_results)
+                ),
+            },
         )
 
     def _answer_with_langgraph(
@@ -167,8 +175,12 @@ class ReactAgentOrchestrator:
         execution_trace: Optional[Any] = None,
         autonomy_policy: Optional[Any] = None,
         cancel_event: Optional[Any] = None,
+        request_parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run the explicit LangGraph loop and build a compatible response."""
+        # Entry generation / retrieval parameters. ``None`` (direct callers)
+        # keeps the model object and tool defaults, i.e. pre-fix behaviour.
+        request_parameters = dict(request_parameters or {})
         from orchestrators.autonomy_policy import GUIDED_PRESET
         from orchestrators.react_loop_graph import ReactLoopGraphRunner
         from utils.workflow_trace import ensure_tracer
@@ -231,9 +243,21 @@ class ReactAgentOrchestrator:
                 bind_ledger = getattr(tool, "set_ledger", None)
                 if callable(bind_ledger):
                     bind_ledger(ledger)
+                # QD-20260909-02: provider request counts follow the entry
+                # ``num_search_results`` instead of the tools' fixed defaults.
+                bind_request = getattr(tool, "set_request_options", None)
+                if callable(bind_request):
+                    bind_request(
+                        num_search_results=request_parameters.get("num_search_results"),
+                        per_source_limit=request_parameters.get("per_source_search_results"),
+                    )
             runner = ReactLoopGraphRunner(
                 llm=self.llm,
                 tools=active_tools,
+                generation_params={
+                    "max_tokens": request_parameters.get("max_tokens"),
+                    "temperature": request_parameters.get("temperature"),
+                },
                 max_iterations=self.max_iterations,
                 termination_config=termination_config,
                 judge_llm=self.judge_llm,
@@ -463,6 +487,14 @@ class ReactAgentOrchestrator:
         }
         if loop_result.get("judge_error"):
             control["loop_judge_error"] = loop_result["judge_error"]
+        # Echo the values that actually governed this run so D0
+        # ``param_forwarding_pass`` can reconcile them against request bodies.
+        control["request_parameters"] = {
+            "max_tokens": request_parameters.get("max_tokens", getattr(self.llm, "max_tokens", None)),
+            "temperature": request_parameters.get("temperature", getattr(self.llm, "temperature", None)),
+            "num_search_results": request_parameters.get("num_search_results"),
+            "per_source_search_results": request_parameters.get("per_source_search_results"),
+        }
         response["control"] = control
 
         if timing_recorder.enabled:

@@ -98,6 +98,8 @@ class ReActSearchTool(BaseTool):
     _web_source: Optional[WebEvidenceSource] = PrivateAttr(default=None)
     _ledger: Any = PrivateAttr(default=None)
     _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
+    _request_num_results: Optional[int] = PrivateAttr(default=None)
+    _request_per_source_limit: Optional[int] = PrivateAttr(default=None)
 
     class Config:
         arbitrary_types_allowed = True
@@ -160,7 +162,8 @@ class ReActSearchTool(BaseTool):
             items = source.retrieve(
                 query,
                 RetrievalOptions(
-                    num_results=5,
+                    num_results=self._request_num_results or 5,
+                    per_source_limit=self._request_per_source_limit,
                     metadata={"source_tier_entities": entities},
                 ),
             )
@@ -192,6 +195,16 @@ class ReActSearchTool(BaseTool):
 
     def set_analysis(self, analysis: Optional[QueryAnalysis]) -> None:
         self._analysis = analysis
+
+    def set_request_options(
+        self,
+        *,
+        num_search_results: Optional[int] = None,
+        per_source_limit: Optional[int] = None,
+    ) -> None:
+        """Bind the entry retrieval counts for the current request (QD-20260909-02)."""
+        self._request_num_results = int(num_search_results) if num_search_results else None
+        self._request_per_source_limit = int(per_source_limit) if per_source_limit else None
 
     def set_ledger(self, ledger: Any) -> None:
         self._ledger = ledger
@@ -239,6 +252,8 @@ class ReActSearchRecoveryTool(BaseTool):
     max_calls_per_query: int = Field(default=2, exclude=True)
     _calls_in_run: int = PrivateAttr(default=0)
     _analysis: Optional[QueryAnalysis] = PrivateAttr(default=None)
+    _request_num_results: Optional[int] = PrivateAttr(default=None)
+    _request_per_source_limit: Optional[int] = PrivateAttr(default=None)
     _last_evidence_records: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
 
     class Config:
@@ -305,8 +320,8 @@ class ReActSearchRecoveryTool(BaseTool):
             result = self._get_chain().answer(
                 query,
                 search_query=query,
-                num_search_results=5,
-                per_source_limit=5,
+                num_search_results=self._request_num_results or 5,
+                per_source_limit=self._request_per_source_limit or self._request_num_results or 5,
                 num_retrieved_docs=3,
                 max_tokens=1200,
                 temperature=0.2,
@@ -333,6 +348,16 @@ class ReActSearchRecoveryTool(BaseTool):
 
     def set_analysis(self, analysis: Optional[QueryAnalysis]) -> None:
         self._analysis = analysis
+
+    def set_request_options(
+        self,
+        *,
+        num_search_results: Optional[int] = None,
+        per_source_limit: Optional[int] = None,
+    ) -> None:
+        """Bind the entry retrieval counts for the current request (QD-20260909-02)."""
+        self._request_num_results = int(num_search_results) if num_search_results else None
+        self._request_per_source_limit = int(per_source_limit) if per_source_limit else None
 
     def get_last_evidence_records(self) -> List[Dict[str, Any]]:
         return [dict(record) for record in self._last_evidence_records]

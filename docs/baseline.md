@@ -264,7 +264,7 @@ python -m tests.baseline_runner --compare runtime/baseline/autonomy/guided runti
 
 ## 7. 质量评测（[quality_evaluation_plan.md](quality_evaluation_plan.md)）
 
-本章是设计文档 D0–D11 指标的登记处。产物落 gitignored 的 `runtime/quality/<date>-<tag>/`，报告进 `docs/reports/quality_evaluation_<date>/`。2026-09-09 首轮**没有授权真实运行**，登记的全部是离线回归、历史真实产物重算与禁网探针的数字；详见 [首份报告](reports/quality_evaluation_20260909/report.md)。
+本章是设计文档 D0–D11 指标的登记处。产物落 gitignored 的 `runtime/quality/<date>-<tag>/`，报告进 `docs/reports/quality_evaluation_<date>/`。2026-09-09 首轮**没有授权真实运行**，登记的全部是离线回归、历史真实产物重算与禁网探针的数字；详见 [首份报告](reports/quality_evaluation_20260909/report.md)。2026-09-18 起按授权补跑真实运行，数字逐节以"2026-09-18"列登记。
 
 ### 7.1 运行入口
 
@@ -281,10 +281,17 @@ env1/bin/python -m tests.quality_report --compare <run_a> <run_b>       # 回归
 
 ### 7.2 质量评测 · D0
 
-| 指标 | 2026-09-09 | 说明 |
-|---|---|---|
-| `param_forwarding_pass` | **0/3 严格断言（xfail，QD-20260909-01/02）** | 禁网真实 builder 捕获线上请求体：入口 4000/0.2/3 → 实际 5000/0.7/5；`autonomy` 正确 |
-| `token_capture_rate` 等六项 | 未运行 | `python -m tests.quality.validity --max-queries 5` |
+| 指标 | 2026-09-09 | 2026-09-18 | 门槛 | 说明 |
+|---|---|---|---|---|
+| `param_forwarding_pass` | 0/3 严格断言（xfail，QD-20260909-01/02） | **1.0（6/6）** | == 1.0 | QD-01/02 于 2026-09-18 修复：线上请求体 4000/0.2、`web_search` 请求 3 条，`control.request_parameters` 回显 |
+| `token_capture_rate` | 未运行 | **1.0** | == 1.0 | 5/5 题应用记账 token 与 transport 旁观一致 |
+| `usage_reconciliation_gap` | 未运行 | **0.0** | ≤ 0.05 | |
+| `tool_call_capture_ratio` | 未运行 | **1.0** | ≥ 0.95 | 分母为 TransportObserver 观察到的全部非 LLM 请求 |
+| `search_call_capture_ratio` | 未运行 | **1.0** | ≥ 0.95 | |
+| `trace_completeness` | 未运行 | **1.0** | ≥ 0.95 | 0 题 trace 截断 |
+| `audit_truncation_rate` | 未运行 | **0.0** | ≤ 0.05 | 5 条 audit 记录，无截断字段 |
+
+2026-09-18 冒烟（`runtime/quality/20260918-validity-20260918`，final001–005，guided，deepseek-v4-flash，入口 4000/0.2/5）：退出门三项全部通过，`passed=true`。同批 5 题的循环终态为 succeeded 1、evidence_insufficient 2（各只发起 1 次搜索）、stagnated 2（未发起搜索），这是 D7/D8 的问题，不影响 D0 结论，在同日报告里跟进。
 
 ### 7.3 质量评测 · D1（`dataset/query_analysis_gold.csv`，65 题，确定性层）
 

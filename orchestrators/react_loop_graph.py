@@ -396,8 +396,18 @@ class ReactLoopGraphRunner:
         ledger: Optional[Any] = None,
         autonomy_policy: Optional[Any] = None,
         cancel_event: Optional[Any] = None,
+        generation_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.llm = llm
+        # Request-level generation parameters (entry ``max_tokens`` /
+        # ``temperature``) override the model object's defaults on every
+        # act / synthesis call. The judge and the compaction summary keep
+        # their own role configuration (QD-20260909-01).
+        self._generation_kwargs: Dict[str, Any] = {
+            key: value
+            for key, value in dict(generation_params or {}).items()
+            if key in ("max_tokens", "temperature") and value is not None
+        }
         self.tools = list(tools or [])
         self.tools_by_name = {getattr(t, "name", ""): t for t in self.tools}
         self.eval_cfg = normalize_termination_config(termination_config)
@@ -1310,7 +1320,9 @@ class ReactLoopGraphRunner:
         try:
             if self._use_native_tools:
                 messages = [SystemMessage(content=self._budgeted_system_prompt(state))] + list(state["messages"])
-                response = self._llm_with_tools.invoke(messages, reasoning=self._act_reasoning)
+                response = self._llm_with_tools.invoke(
+                    messages, reasoning=self._act_reasoning, **self._generation_kwargs
+                )
             else:
                 response = self._act_shim(list(state["messages"]), self._budget_self_report(state))
         except Exception as exc:  # noqa: BLE001 - surfaced as a safe workflow failure
@@ -1381,7 +1393,9 @@ class ReactLoopGraphRunner:
     def _act_shim(self, history: List[Any], budget_report: str = "") -> AIMessage:
         """Tool-calling via JSON prompt for chat models without bind_tools."""
         messages = [SystemMessage(content=self._shim_system_prompt() + budget_report)] + history
-        response = self.llm.invoke(messages, reasoning=self._act_reasoning)
+        response = self.llm.invoke(
+            messages, reasoning=self._act_reasoning, **self._generation_kwargs
+        )
         text = response.content if hasattr(response, "content") else str(response)
         if not isinstance(text, str):
             text = str(text)
@@ -3120,7 +3134,9 @@ class ReactLoopGraphRunner:
             messages = [
                 SystemMessage(content=self.system_prompt),
             ] + history + [HumanMessage(content=instruction)]
-            response = self.llm.invoke(messages, reasoning=self._act_reasoning)
+            response = self.llm.invoke(
+                messages, reasoning=self._act_reasoning, **self._generation_kwargs
+            )
             text = response.content if hasattr(response, "content") else str(response)
             if not isinstance(text, str):
                 text = str(text)

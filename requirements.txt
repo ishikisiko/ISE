@@ -24,6 +24,7 @@ langchain-huggingface>=1.0.0
 faiss-cpu>=1.7.4
 tiktoken>=0.7.0
 unstructured>=0.10.0
+markdown>=3.5
 pypdf>=4.0.0
 
 # Pydantic for data models
