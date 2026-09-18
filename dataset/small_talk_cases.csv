@@ -1,0 +1,41 @@
+qid,query,gold_small_talk,created_at,gold_verified_by
+st001,你好,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st002,hi,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st003,Hello!,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st004,嗨嗨,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st005,哈喽,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st006,早上好,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st007,晚安,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st008,谢谢,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st009,谢谢你，再见,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st010,感谢您的帮助,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st011,thx,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st012,ok thanks bye,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st013,你好吗,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st014,在吗,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st015,How are you?,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st016,"Hello, are you there?",1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st017,辛苦了,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st018,Good night!,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st019,嗯嗯好的,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st020,收到,1,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st021,谢谢，那再帮我查一下 GLM-5.2 的价格,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st022,你好，北京今天天气怎么样,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st023,Hi there! What is the capital of France?,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st024,感谢信怎么写,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st025,拜拜的英文怎么说,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st026,你好的日语怎么说,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st027,谢谢的英文是什么,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st028,嗨，帮我对比一下 Redis 和 Milvus,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st029,"Thanks! Also, is Kubernetes 1.31 still supported?",0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st030,早上好，请总结我上传的 PDF,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st031,晚安曲推荐几首,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st032,你好世界这个程序怎么写,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st033,再见了我的爱人是谁唱的,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st034,你是谁,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st035,给我讲个笑话,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st036,Tell me a joke,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st037,What is photosynthesis?,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st038,哈喽单词的来源,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st039,hi 这个词在英语里的用法,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator
+st040,感谢领导的话术有哪些,0,2026-09-18,claude-fable-5.1 (agent); unverified by a second annotator

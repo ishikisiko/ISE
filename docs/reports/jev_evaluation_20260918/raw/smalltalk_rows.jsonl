@@ -1,0 +1,40 @@
+{"query": "你好", "gold": 1, "p": 0.98}
+{"query": "hi", "gold": 1, "p": 0.99}
+{"query": "Hello!", "gold": 1, "p": 0.99}
+{"query": "嗨嗨", "gold": 1, "p": 0.98}
+{"query": "哈喽", "gold": 1, "p": 0.98}
+{"query": "早上好", "gold": 1, "p": 0.98}
+{"query": "晚安", "gold": 1, "p": 0.97}
+{"query": "谢谢", "gold": 1, "p": 0.98}
+{"query": "谢谢你，再见", "gold": 1, "p": 0.99}
+{"query": "感谢您的帮助", "gold": 1, "p": 0.98}
+{"query": "thx", "gold": 1, "p": 0.98}
+{"query": "ok thanks bye", "gold": 1, "p": 0.98}
+{"query": "你好吗", "gold": 1, "p": 0.95}
+{"query": "在吗", "gold": 1, "p": 0.92}
+{"query": "How are you?", "gold": 1, "p": 0.97}
+{"query": "Hello, are you there?", "gold": 1, "p": 0.9}
+{"query": "辛苦了", "gold": 1, "p": 0.97}
+{"query": "Good night!", "gold": 1, "p": 0.99}
+{"query": "嗯嗯好的", "gold": 1, "p": 0.96}
+{"query": "收到", "gold": 1, "p": 0.97}
+{"query": "谢谢，那再帮我查一下 GLM-5.2 的价格", "gold": 0, "p": 0.01}
+{"query": "你好，北京今天天气怎么样", "gold": 0, "p": 0.01}
+{"query": "Hi there! What is the capital of France?", "gold": 0, "p": 0.01}
+{"query": "感谢信怎么写", "gold": 0, "p": 0.01}
+{"query": "拜拜的英文怎么说", "gold": 0, "p": 0.07}
+{"query": "你好的日语怎么说", "gold": 0, "p": 0.13}
+{"query": "谢谢的英文是什么", "gold": 0, "p": 0.05}
+{"query": "嗨，帮我对比一下 Redis 和 Milvus", "gold": 0, "p": 0.01}
+{"query": "Thanks! Also, is Kubernetes 1.31 still supported?", "gold": 0, "p": 0.01}
+{"query": "早上好，请总结我上传的 PDF", "gold": 0, "p": 0.02}
+{"query": "晚安曲推荐几首", "gold": 0, "p": 0.02}
+{"query": "你好世界这个程序怎么写", "gold": 0, "p": 0.02}
+{"query": "再见了我的爱人是谁唱的", "gold": 0, "p": 0.02}
+{"query": "你是谁", "gold": 0, "p": 0.54}
+{"query": "给我讲个笑话", "gold": 0, "p": 0.04}
+{"query": "Tell me a joke", "gold": 0, "p": 0.04}
+{"query": "What is photosynthesis?", "gold": 0, "p": 0.01}
+{"query": "哈喽单词的来源", "gold": 0, "p": 0.04}
+{"query": "hi 这个词在英语里的用法", "gold": 0, "p": 0.02}
+{"query": "感谢领导的话术有哪些", "gold": 0, "p": 0.03}

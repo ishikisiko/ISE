@@ -1,0 +1,197 @@
+{"query": "What is the weather in Bend, Oregon today?", "pred": "weather", "conf": 1.0, "probs": {"none": 0.0, "transportation": 0.0, "finance": 0.0, "location": 0.0, "sports": 0.0, "weather": 1.0}}
+{"query": "Is it raining in New York?", "pred": "weather", "conf": 1.0, "probs": {"finance": 0.0, "none": 0.0, "weather": 1.0, "location": 0.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "Will it snow in Beijing tomorrow?", "pred": "weather", "conf": 1.0, "probs": {"finance": 0.0, "none": 0.0, "location": 0.0, "weather": 1.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "北京明天天气怎么样", "pred": "weather", "conf": 1.0, "probs": {"weather": 1.0, "finance": 0.0, "sports": 0.0, "none": 0.0, "transportation": 0.0, "location": 0.0}}
+{"query": "新加坡空气质量如何", "pred": "weather", "conf": 1.0, "probs": {"location": 0.0, "finance": 0.0, "weather": 1.0, "sports": 0.0, "transportation": 0.0, "none": 0.0}}
+{"query": "How humid is it in Singapore today?", "pred": "weather", "conf": 1.0, "probs": {"sports": 0.0, "weather": 1.0, "none": 0.0, "location": 0.0, "transportation": 0.0, "finance": 0.0}}
+{"query": "What is the temperature in London right now?", "pred": "weather", "conf": 1.0, "probs": {"location": 0.0, "none": 0.0, "finance": 0.0, "transportation": 0.0, "sports": 0.0, "weather": 1.0}}
+{"query": "上海后天会下雨吗", "pred": "weather", "conf": 1.0, "probs": {"sports": 0.0, "transportation": 0.0, "weather": 1.0, "finance": 0.0, "location": 0.0, "none": 0.0}}
+{"query": "Tokyo weather forecast for next week", "pred": "weather", "conf": 1.0, "probs": {"weather": 1.0, "none": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0, "finance": 0.0}}
+{"query": "深圳今天气温多少度", "pred": "weather", "conf": 1.0, "probs": {"weather": 1.0, "none": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0, "finance": 0.0}}
+{"query": "Is there smog in Delhi today?", "pred": "weather", "conf": 1.0, "probs": {"weather": 1.0, "finance": 0.0, "sports": 0.0, "none": 0.0, "transportation": 0.0, "location": 0.0}}
+{"query": "What is the AQI in Los Angeles right now?", "pred": "weather", "conf": 1.0, "probs": {"sports": 0.0, "weather": 1.0, "finance": 0.0, "none": 0.0, "transportation": 0.0, "location": 0.0}}
+{"query": "成都明天的空气质量怎么样", "pred": "weather", "conf": 1.0, "probs": {"finance": 0.0, "location": 0.0, "weather": 1.0, "sports": 0.0, "transportation": 0.0, "none": 0.0}}
+{"query": "What's the forecast for Paris tomorrow?", "pred": "weather", "conf": 1.0, "probs": {"sports": 0.0, "none": 0.0, "location": 0.0, "weather": 1.0, "finance": 0.0, "transportation": 0.0}}
+{"query": "杭州这周会下雪吗", "pred": "weather", "conf": 1.0, "probs": {"location": 0.0, "weather": 1.0, "sports": 0.0, "finance": 0.0, "transportation": 0.0, "none": 0.0}}
+{"query": "How hot is it in Sydney today?", "pred": "weather", "conf": 1.0, "probs": {"weather": 1.0, "finance": 0.0, "sports": 0.0, "none": 0.0, "transportation": 0.0, "location": 0.0}}
+{"query": "PM2.5 in Beijing today", "pred": "weather", "conf": 1.0, "probs": {"weather": 1.0, "sports": 0.0, "location": 0.0, "none": 0.0, "finance": 0.0, "transportation": 0.0}}
+{"query": "Will it rain tomorrow?", "pred": "weather", "conf": 0.77, "probs": {"location": 0.0, "sports": 0.0, "none": 0.19, "transportation": 0.0, "finance": 0.0, "weather": 0.81}}
+{"query": "明天会下雨吗", "pred": "weather", "conf": 0.88, "probs": {"location": 0.0, "finance": 0.0, "none": 0.1, "weather": 0.9, "sports": 0.0, "transportation": 0.0}}
+{"query": "天气怎么样", "pred": "weather", "conf": 0.68, "probs": {"weather": 0.74, "location": 0.0, "sports": 0.0, "finance": 0.0, "transportation": 0.0, "none": 0.26}}
+{"query": "Explain the water cycle", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "location": 0.0, "none": 1.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "Brainstorm product ideas", "pred": "none", "conf": 1.0, "probs": {"transportation": 0.0, "weather": 0.0, "finance": 0.0, "none": 1.0, "sports": 0.0, "location": 0.0}}
+{"query": "How does a rain sensor work?", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0, "none": 1.0, "location": 0.0}}
+{"query": "Snow White movie release date", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "sports": 0.0, "none": 1.0, "transportation": 0.0, "location": 0.0}}
+{"query": "Weather Underground stock price", "pred": "finance", "conf": 0.95, "probs": {"weather": 0.0, "none": 0.04, "finance": 0.96, "sports": 0.0, "transportation": 0.0, "location": 0.0}}
+{"query": "What is the boiling temperature of water?", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "transportation": 0.0, "finance": 0.0, "sports": 0.0, "location": 0.0, "weather": 0.0}}
+{"query": "Weather API pricing comparison", "pred": "none", "conf": 0.99, "probs": {"none": 0.99, "sports": 0.0, "weather": 0.01, "finance": 0.0, "location": 0.0, "transportation": 0.0}}
+{"query": "Climate change policy in the EU", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0, "finance": 0.0, "none": 1.0}}
+{"query": "Write a poem about rain", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "location": 0.0, "none": 1.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "How to install a humidity sensor on Raspberry Pi", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "finance": 0.0, "location": 0.0}}
+{"query": "Convert 98°F to Celsius", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "finance": 0.0, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0}}
+{"query": "Forecast quarterly revenue for my startup", "pred": "none", "conf": 0.98, "probs": {"none": 0.98, "transportation": 0.0, "location": 0.0, "weather": 0.0, "sports": 0.0, "finance": 0.02}}
+{"query": "温度传感器的工作原理", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "transportation": 0.0, "location": 0.0, "sports": 0.0, "finance": 0.0, "weather": 0.0}}
+{"query": "下雨天适合听的歌", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "location": 0.0, "sports": 0.0, "none": 1.0, "transportation": 0.0, "weather": 0.0}}
+{"query": "这家公司最新财报如何", "pred": "none", "conf": 0.68, "probs": {"none": 0.74, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "finance": 0.26, "location": 0.0}}
+{"query": "请查看 $AAPL", "pred": "finance", "conf": 1.0, "probs": {"location": 0.0, "finance": 1.0, "sports": 0.0, "none": 0.0, "weather": 0.0, "transportation": 0.0}}
+{"query": "苹果股价", "pred": "finance", "conf": 1.0, "probs": {"none": 0.0, "weather": 0.0, "sports": 0.0, "finance": 1.0, "transportation": 0.0, "location": 0.0}}
+{"query": "美元兑人民币汇率", "pred": "finance", "conf": 1.0, "probs": {"finance": 1.0, "none": 0.0, "weather": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "NVDA 行情", "pred": "finance", "conf": 1.0, "probs": {"none": 0.0, "transportation": 0.0, "weather": 0.0, "location": 0.0, "sports": 0.0, "finance": 1.0}}
+{"query": "What is the current price of Apple stock?", "pred": "finance", "conf": 1.0, "probs": {"weather": 0.0, "transportation": 0.0, "location": 0.0, "none": 0.0, "finance": 1.0, "sports": 0.0}}
+{"query": "What is the stock price of Microsoft?", "pred": "finance", "conf": 1.0, "probs": {"none": 0.0, "sports": 0.0, "weather": 0.0, "finance": 1.0, "location": 0.0, "transportation": 0.0}}
+{"query": "How is NVIDIA stock performing today?", "pred": "finance", "conf": 1.0, "probs": {"transportation": 0.0, "sports": 0.0, "weather": 0.0, "none": 0.0, "finance": 1.0, "location": 0.0}}
+{"query": "What is the market cap of Tesla?", "pred": "finance", "conf": 0.99, "probs": {"none": 0.01, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "finance": 0.99, "location": 0.0}}
+{"query": "恒生指数今天收盘多少", "pred": "finance", "conf": 1.0, "probs": {"finance": 1.0, "none": 0.0, "transportation": 0.0, "location": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "纳斯达克指数走势", "pred": "finance", "conf": 1.0, "probs": {"location": 0.0, "finance": 1.0, "weather": 0.0, "transportation": 0.0, "sports": 0.0, "none": 0.0}}
+{"query": "Bitcoin price now", "pred": "finance", "conf": 1.0, "probs": {"sports": 0.0, "finance": 1.0, "location": 0.0, "weather": 0.0, "none": 0.0, "transportation": 0.0}}
+{"query": "比特币现在多少钱", "pred": "finance", "conf": 1.0, "probs": {"transportation": 0.0, "location": 0.0, "sports": 0.0, "finance": 1.0, "none": 0.0, "weather": 0.0}}
+{"query": "S&P 500 today", "pred": "finance", "conf": 1.0, "probs": {"location": 0.0, "finance": 1.0, "weather": 0.0, "transportation": 0.0, "none": 0.0, "sports": 0.0}}
+{"query": "特斯拉市值", "pred": "finance", "conf": 0.98, "probs": {"weather": 0.0, "location": 0.0, "finance": 0.98, "sports": 0.0, "transportation": 0.0, "none": 0.02}}
+{"query": "600519 股价", "pred": "finance", "conf": 1.0, "probs": {"finance": 1.0, "location": 0.0, "weather": 0.0, "none": 0.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "TSLA share price history last month", "pred": "finance", "conf": 1.0, "probs": {"sports": 0.0, "transportation": 0.0, "none": 0.0, "location": 0.0, "weather": 0.0, "finance": 1.0}}
+{"query": "腾讯财报", "pred": "none", "conf": 0.78, "probs": {"sports": 0.0, "finance": 0.18, "location": 0.0, "weather": 0.0, "none": 0.82, "transportation": 0.0}}
+{"query": "claude pro 向 fable 赠送 100 美元额度", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "transportation": 0.0, "location": 0.0, "none": 1.0, "weather": 0.0, "finance": 0.0}}
+{"query": "OpenAI API 的定价是多少", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "none": 1.0, "location": 0.0, "weather": 0.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "某模型的免费配额政策", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "sports": 0.0, "transportation": 0.0, "location": 0.0, "none": 1.0}}
+{"query": "What is the current inflation rate in the United States?", "pred": "none", "conf": 0.98, "probs": {"none": 0.99, "transportation": 0.0, "finance": 0.01, "location": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "How much does a Tesla Model 3 cost?", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "transportation": 0.0, "finance": 0.0, "sports": 0.0, "weather": 0.0, "location": 0.0}}
+{"query": "Stock photo websites", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "finance": 0.0, "sports": 0.0, "none": 1.0, "transportation": 0.0, "weather": 0.0}}
+{"query": "Chicken stock recipe", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "finance": 0.0, "location": 0.0}}
+{"query": "Quote of the day", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0, "weather": 0.0, "finance": 0.0}}
+{"query": "Bank of America savings account interest rate", "pred": "none", "conf": 0.99, "probs": {"weather": 0.0, "finance": 0.01, "none": 0.99, "transportation": 0.0, "location": 0.0, "sports": 0.0}}
+{"query": "iPhone 17 price in China", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "weather": 0.0, "sports": 0.0, "finance": 0.0, "transportation": 0.0, "none": 1.0}}
+{"query": "GDP growth of Japan in 2025", "pred": "none", "conf": 0.99, "probs": {"location": 0.0, "weather": 0.0, "none": 0.99, "transportation": 0.0, "finance": 0.01, "sports": 0.0}}
+{"query": "How to read an earnings call transcript", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "sports": 0.0, "location": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0}}
+{"query": "证券从业资格考试报名", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "transportation": 0.0, "finance": 0.0, "none": 1.0, "location": 0.0, "sports": 0.0}}
+{"query": "指数函数的导数", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0, "weather": 0.0, "finance": 0.0}}
+{"query": "库存管理系统怎么选", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0, "none": 1.0, "location": 0.0}}
+{"query": "Share of renewable energy in Germany's grid", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "none": 1.0, "location": 0.0, "transportation": 0.0, "weather": 0.0, "finance": 0.0}}
+{"query": "When is the next NBA game for the Golden State Warriors?", "pred": "sports", "conf": 1.0, "probs": {"finance": 0.0, "weather": 0.0, "location": 0.0, "sports": 1.0, "transportation": 0.0, "none": 0.0}}
+{"query": "Tell me the latest score of the Lakers game.", "pred": "sports", "conf": 1.0, "probs": {"location": 0.0, "sports": 1.0, "transportation": 0.0, "none": 0.0, "weather": 0.0, "finance": 0.0}}
+{"query": "What was the score of the Lakers vs Celtics game?", "pred": "sports", "conf": 1.0, "probs": {"sports": 1.0, "none": 0.0, "location": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0}}
+{"query": "曼联最近比赛", "pred": "sports", "conf": 1.0, "probs": {"none": 0.0, "finance": 0.0, "transportation": 0.0, "location": 0.0, "sports": 1.0, "weather": 0.0}}
+{"query": "Who won the Wimbledon men's final?", "pred": "sports", "conf": 0.98, "probs": {"location": 0.0, "finance": 0.0, "weather": 0.0, "sports": 0.98, "transportation": 0.0, "none": 0.02}}
+{"query": "勇士下一场比赛是什么时候", "pred": "sports", "conf": 1.0, "probs": {"none": 0.0, "transportation": 0.0, "finance": 0.0, "location": 0.0, "sports": 1.0, "weather": 0.0}}
+{"query": "湖人今天比赛结果", "pred": "sports", "conf": 1.0, "probs": {"none": 0.0, "transportation": 0.0, "finance": 0.0, "location": 0.0, "sports": 1.0, "weather": 0.0}}
+{"query": "Manchester United next match", "pred": "sports", "conf": 1.0, "probs": {"location": 0.0, "sports": 1.0, "none": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0}}
+{"query": "英超今天有哪些比赛", "pred": "sports", "conf": 1.0, "probs": {"none": 0.0, "transportation": 0.0, "finance": 0.0, "weather": 0.0, "location": 0.0, "sports": 1.0}}
+{"query": "凯尔特人对湖人的比分", "pred": "sports", "conf": 1.0, "probs": {"finance": 0.0, "location": 0.0, "weather": 0.0, "sports": 1.0, "transportation": 0.0, "none": 0.0}}
+{"query": "NBA finals schedule", "pred": "sports", "conf": 1.0, "probs": {"none": 0.0, "sports": 1.0, "weather": 0.0, "finance": 0.0, "location": 0.0, "transportation": 0.0}}
+{"query": "世界杯决赛什么时候", "pred": "sports", "conf": 0.98, "probs": {"sports": 0.98, "transportation": 0.0, "none": 0.02, "location": 0.0, "weather": 0.0, "finance": 0.0}}
+{"query": "Premier League table this week", "pred": "sports", "conf": 0.98, "probs": {"weather": 0.0, "finance": 0.0, "sports": 0.99, "none": 0.01, "transportation": 0.0, "location": 0.0}}
+{"query": "奥运会乒乓球赛程", "pred": "sports", "conf": 1.0, "probs": {"none": 0.0, "transportation": 0.0, "finance": 0.0, "location": 0.0, "sports": 1.0, "weather": 0.0}}
+{"query": "Explain offside rules", "pred": "none", "conf": 0.99, "probs": {"finance": 0.0, "transportation": 0.0, "sports": 0.01, "weather": 0.0, "location": 0.0, "none": 0.99}}
+{"query": "Game theory and the Nash equilibrium", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "transportation": 0.0, "finance": 0.0, "sports": 0.0, "location": 0.0, "weather": 0.0}}
+{"query": "How do I score a resume?", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "sports": 0.0, "weather": 0.0, "transportation": 0.0, "finance": 0.0, "location": 0.0}}
+{"query": "Match the following words to their definitions", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "none": 1.0, "location": 0.0, "transportation": 0.0, "weather": 0.0, "finance": 0.0}}
+{"query": "Credit score requirements for a mortgage", "pred": "none", "conf": 0.99, "probs": {"sports": 0.0, "finance": 0.01, "location": 0.0, "weather": 0.0, "none": 0.99, "transportation": 0.0}}
+{"query": "The Imitation Game movie review", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "location": 0.0, "finance": 0.0, "transportation": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "Regex match in Python", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "none": 1.0, "location": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0}}
+{"query": "篮球的历史起源", "pred": "none", "conf": 1.0, "probs": {"transportation": 0.0, "finance": 0.0, "none": 1.0, "sports": 0.0, "weather": 0.0, "location": 0.0}}
+{"query": "足球场标准尺寸", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "sports": 0.0, "location": 0.0, "none": 1.0, "transportation": 0.0, "finance": 0.0}}
+{"query": "Sports nutrition for marathon runners", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "none": 1.0, "location": 0.0, "transportation": 0.0, "weather": 0.0, "finance": 0.0}}
+{"query": "NFL salary cap rules explained", "pred": "none", "conf": 0.99, "probs": {"none": 0.99, "finance": 0.0, "weather": 0.0, "transportation": 0.0, "sports": 0.01, "location": 0.0}}
+{"query": "Board game recommendations for families", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "none": 1.0, "sports": 0.0, "transportation": 0.0, "finance": 0.0, "location": 0.0}}
+{"query": "Chess opening theory", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "transportation": 0.0, "weather": 0.0, "finance": 0.0, "location": 0.0, "none": 1.0}}
+{"query": "Wimbledon ticket prices 2026", "pred": "none", "conf": 0.99, "probs": {"none": 0.99, "weather": 0.0, "sports": 0.01, "transportation": 0.0, "finance": 0.0, "location": 0.0}}
+{"query": "比赛规则怎么制定", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "transportation": 0.0, "sports": 0.0, "weather": 0.0, "location": 0.0, "none": 1.0}}
+{"query": "How to write a match-3 game in Unity", "pred": "none", "conf": 1.0, "probs": {"transportation": 0.0, "sports": 0.0, "finance": 0.0, "none": 1.0, "weather": 0.0, "location": 0.0}}
+{"query": "nearest KFC to HKUST", "pred": "location", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "none": 0.0, "location": 1.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "香港科技大学附近的医院在哪里", "pred": "location", "conf": 1.0, "probs": {"sports": 0.0, "finance": 0.0, "location": 1.0, "weather": 0.0, "none": 0.0, "transportation": 0.0}}
+{"query": "Find coffee shops near Central Park", "pred": "location", "conf": 1.0, "probs": {"none": 0.0, "sports": 0.0, "weather": 0.0, "finance": 0.0, "location": 1.0, "transportation": 0.0}}
+{"query": "closest pharmacy to Times Square", "pred": "location", "conf": 1.0, "probs": {"sports": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0, "none": 0.0, "location": 1.0}}
+{"query": "北京大学附近有什么好吃的", "pred": "location", "conf": 0.97, "probs": {"location": 0.97, "weather": 0.0, "sports": 0.0, "none": 0.03, "finance": 0.0, "transportation": 0.0}}
+{"query": "上海虹桥火车站周边的酒店", "pred": "location", "conf": 1.0, "probs": {"location": 1.0, "transportation": 0.0, "sports": 0.0, "none": 0.0, "finance": 0.0, "weather": 0.0}}
+{"query": "离故宫最近的地铁站是哪个", "pred": "location", "conf": 0.74, "probs": {"location": 0.78, "weather": 0.0, "none": 0.13, "finance": 0.0, "transportation": 0.09, "sports": 0.0}}
+{"query": "gas stations near Stanford University", "pred": "location", "conf": 1.0, "probs": {"sports": 0.0, "none": 0.0, "location": 1.0, "transportation": 0.0, "weather": 0.0, "finance": 0.0}}
+{"query": "restaurants near Eiffel Tower", "pred": "location", "conf": 1.0, "probs": {"none": 0.0, "transportation": 0.0, "weather": 0.0, "location": 1.0, "sports": 0.0, "finance": 0.0}}
+{"query": "closest subway station to Harvard Square", "pred": "location", "conf": 0.87, "probs": {"finance": 0.0, "transportation": 0.06, "sports": 0.0, "weather": 0.0, "location": 0.89, "none": 0.05}}
+{"query": "西湖附近的咖啡馆", "pred": "location", "conf": 1.0, "probs": {"finance": 0.0, "none": 0.0, "weather": 0.0, "location": 1.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "nearest hospital to Shibuya Station", "pred": "location", "conf": 1.0, "probs": {"none": 0.0, "sports": 0.0, "weather": 0.0, "finance": 0.0, "location": 1.0, "transportation": 0.0}}
+{"query": "Find a gas station near my current location.", "pred": "none", "conf": 0.6, "probs": {"finance": 0.0, "location": 0.33, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "none": 0.67}}
+{"query": "Find coffee shops near me.", "pred": "none", "conf": 0.79, "probs": {"sports": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0, "none": 0.83, "location": 0.17}}
+{"query": "Where is the nearest hospital?", "pred": "none", "conf": 0.7, "probs": {"none": 0.75, "transportation": 0.0, "location": 0.25, "weather": 0.0, "finance": 0.0, "sports": 0.0}}
+{"query": "附近有什么餐厅", "pred": "none", "conf": 0.77, "probs": {"finance": 0.0, "transportation": 0.0, "none": 0.81, "sports": 0.0, "location": 0.19, "weather": 0.0}}
+{"query": "nearest ATM to my current location", "pred": "none", "conf": 0.63, "probs": {"location": 0.3, "sports": 0.0, "weather": 0.0, "none": 0.7, "finance": 0.0, "transportation": 0.0}}
+{"query": "Population of Canada", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "transportation": 0.0, "none": 1.0, "sports": 0.0, "location": 0.0, "weather": 0.0}}
+{"query": "How far is the Moon from Earth?", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0, "none": 1.0}}
+{"query": "Where was Einstein born?", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0, "weather": 0.0, "finance": 0.0}}
+{"query": "Locate the bug in this code", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "location": 0.0, "finance": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0}}
+{"query": "Nearest neighbor algorithm explained", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "sports": 0.0, "weather": 0.0, "finance": 0.0, "location": 0.0, "transportation": 0.0}}
+{"query": "What is the closest planet to the Sun?", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "transportation": 0.0, "weather": 0.0, "finance": 0.0, "location": 0.0, "none": 1.0}}
+{"query": "近似最近邻搜索的原理", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "transportation": 0.0, "finance": 0.0, "none": 1.0, "sports": 0.0, "location": 0.0}}
+{"query": "Explain k-nearest neighbours", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0, "finance": 0.0, "none": 1.0}}
+{"query": "How do I get near-zero latency?", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "sports": 0.0, "none": 1.0, "transportation": 0.0, "location": 0.0}}
+{"query": "Where is the Mona Lisa displayed?", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "weather": 0.0, "location": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0}}
+{"query": "What is the capital of France?", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "weather": 0.0, "sports": 0.0, "finance": 0.0, "transportation": 0.0, "none": 1.0}}
+{"query": "离职后社保怎么办", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0, "location": 0.0}}
+{"query": "距离产生美是什么意思", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "none": 1.0, "transportation": 0.0, "sports": 0.0, "location": 0.0}}
+{"query": "Sort these points by proximity to the origin", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "transportation": 0.0, "sports": 0.0, "weather": 0.0, "location": 0.0, "finance": 0.0}}
+{"query": "周边产品有哪些", "pred": "none", "conf": 0.99, "probs": {"sports": 0.0, "weather": 0.0, "finance": 0.0, "none": 0.99, "transportation": 0.0, "location": 0.01}}
+{"query": "从上海到苏州怎么走", "pred": "transportation", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "none": 0.0, "sports": 0.0, "location": 0.0, "transportation": 1.0}}
+{"query": "drive from SFO to San Jose", "pred": "transportation", "conf": 1.0, "probs": {"location": 0.0, "none": 0.0, "transportation": 1.0, "finance": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "从北京南站到首都机场怎么走", "pred": "transportation", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "none": 0.0, "sports": 0.0, "transportation": 1.0, "location": 0.0}}
+{"query": "directions from Times Square to JFK", "pred": "transportation", "conf": 1.0, "probs": {"location": 0.0, "sports": 0.0, "finance": 0.0, "transportation": 1.0, "none": 0.0, "weather": 0.0}}
+{"query": "How do I get from Shibuya to Narita by train?", "pred": "transportation", "conf": 0.92, "probs": {"weather": 0.0, "finance": 0.0, "sports": 0.0, "transportation": 0.93, "none": 0.07, "location": 0.0}}
+{"query": "从杭州东站坐地铁到西湖", "pred": "transportation", "conf": 1.0, "probs": {"weather": 0.0, "transportation": 1.0, "location": 0.0, "none": 0.0, "finance": 0.0, "sports": 0.0}}
+{"query": "walk from Big Ben to Buckingham Palace", "pred": "transportation", "conf": 1.0, "probs": {"location": 0.0, "sports": 0.0, "none": 0.0, "finance": 0.0, "transportation": 1.0, "weather": 0.0}}
+{"query": "bike from Golden Gate Park to Fisherman's Wharf", "pred": "transportation", "conf": 1.0, "probs": {"none": 0.0, "transportation": 1.0, "finance": 0.0, "location": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "transit from Harvard Square to Logan Airport", "pred": "transportation", "conf": 1.0, "probs": {"finance": 0.0, "none": 0.0, "transportation": 1.0, "location": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "从广州塔到白云机场的公交路线", "pred": "transportation", "conf": 1.0, "probs": {"location": 0.0, "finance": 0.0, "none": 0.0, "transportation": 1.0, "weather": 0.0, "sports": 0.0}}
+{"query": "route from Louvre to Gare du Nord", "pred": "transportation", "conf": 1.0, "probs": {"finance": 0.0, "transportation": 1.0, "sports": 0.0, "weather": 0.0, "location": 0.0, "none": 0.0}}
+{"query": "从深圳北站到香港西九龙怎么走", "pred": "transportation", "conf": 0.98, "probs": {"sports": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.98, "none": 0.02, "location": 0.0}}
+{"query": "How do I get from the airport to downtown Tokyo?", "pred": "transportation", "conf": 0.83, "probs": {"none": 0.14, "finance": 0.0, "transportation": 0.86, "location": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "What time does the next train to Osaka leave?", "pred": "none", "conf": 0.91, "probs": {"none": 0.92, "finance": 0.0, "weather": 0.0, "transportation": 0.08, "sports": 0.0, "location": 0.0}}
+{"query": "从机场到市中心怎么走", "pred": "transportation", "conf": 0.9, "probs": {"location": 0.0, "finance": 0.0, "transportation": 0.92, "none": 0.08, "weather": 0.0, "sports": 0.0}}
+{"query": "Latest news on climate change", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "weather": 0.0, "location": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0}}
+{"query": "Convert 10 miles to kilometers", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "finance": 0.0, "weather": 0.0, "transportation": 0.0, "location": 0.0, "sports": 0.0}}
+{"query": "Train a neural network from scratch", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "weather": 0.0, "none": 1.0, "finance": 0.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "Flight of the Bumblebee composer", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "none": 1.0, "finance": 0.0, "transportation": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "What drives inflation?", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "transportation": 0.0, "location": 0.0, "none": 1.0, "sports": 0.0, "finance": 0.0}}
+{"query": "Route 53 DNS pricing", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "transportation": 0.0, "location": 0.0, "sports": 0.0, "weather": 0.0, "finance": 0.0}}
+{"query": "How to build a data pipeline from Kafka to Snowflake", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "none": 1.0, "location": 0.0, "transportation": 0.0, "sports": 0.0, "finance": 0.0}}
+{"query": "Google Transit API documentation", "pred": "none", "conf": 0.96, "probs": {"sports": 0.0, "weather": 0.0, "finance": 0.0, "none": 0.97, "transportation": 0.03, "location": 0.0}}
+{"query": "从零开始学 Python", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "transportation": 0.0, "sports": 0.0, "location": 0.0, "finance": 0.0, "weather": 0.0}}
+{"query": "Directions for baking bread", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "weather": 0.0, "location": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0}}
+{"query": "Driving license renewal fee in California", "pred": "none", "conf": 1.0, "probs": {"transportation": 0.0, "sports": 0.0, "finance": 0.0, "none": 1.0, "weather": 0.0, "location": 0.0}}
+{"query": "Train ticket refund policy", "pred": "none", "conf": 0.99, "probs": {"finance": 0.0, "none": 0.99, "location": 0.0, "transportation": 0.01, "sports": 0.0, "weather": 0.0}}
+{"query": "What is the fastest route to learn Rust?", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "location": 0.0, "none": 1.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "从哪年开始 Python 2 停止维护", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "finance": 0.0, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "location": 0.0}}
+{"query": "Explain public transit funding models", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0, "finance": 0.0, "none": 1.0}}
+{"query": "交通事故责任如何认定", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "location": 0.0, "none": 1.0, "finance": 0.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "What is the speed of light?", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "sports": 0.0, "finance": 0.0, "transportation": 0.0, "none": 1.0, "weather": 0.0}}
+{"query": "Convert 10 miles to kilometers.", "pred": "none", "conf": 1.0, "probs": {"transportation": 0.0, "location": 0.0, "sports": 0.0, "finance": 0.0, "none": 1.0, "weather": 0.0}}
+{"query": "What time is it in Tokyo right now?", "pred": "none", "conf": 0.99, "probs": {"weather": 0.0, "location": 0.01, "sports": 0.0, "finance": 0.0, "transportation": 0.0, "none": 0.99}}
+{"query": "How are you doing today?", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "none": 1.0, "weather": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "Summarize the cause of the French Revolution.", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "none": 1.0, "transportation": 0.0, "location": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "Latest news on climate change.", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "none": 1.0, "location": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0}}
+{"query": "Calculate 5 factorial.", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "location": 0.0, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0}}
+{"query": "Translate “good morning” to Spanish.", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "finance": 0.0, "none": 1.0, "weather": 0.0, "transportation": 0.0, "location": 0.0}}
+{"query": "Who is the current CEO of Tesla?", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "sports": 0.0, "none": 1.0, "location": 0.0, "finance": 0.0, "transportation": 0.0}}
+{"query": "Tell me a joke.", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "none": 1.0, "sports": 0.0, "finance": 0.0, "weather": 0.0, "transportation": 0.0}}
+{"query": "Write a Python function to reverse a string.", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "location": 0.0, "none": 1.0, "finance": 0.0, "transportation": 0.0, "weather": 0.0}}
+{"query": "Population of Canada.", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "transportation": 0.0, "none": 1.0, "sports": 0.0, "location": 0.0, "finance": 0.0}}
+{"query": "When did World War II end?", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "none": 1.0, "transportation": 0.0, "location": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "What are the benefits of vitamin D?", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "sports": 0.0, "none": 1.0, "transportation": 0.0, "location": 0.0}}
+{"query": "How to cook spaghetti carbonara?", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "sports": 0.0, "weather": 0.0, "finance": 0.0, "location": 0.0, "transportation": 0.0}}
+{"query": "What is photosynthesis?", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "location": 0.0, "weather": 0.0, "sports": 0.0, "transportation": 0.0, "none": 1.0}}
+{"query": "When is Thanksgiving in 2026?", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "transportation": 0.0, "none": 1.0, "sports": 0.0, "finance": 0.0, "weather": 0.0}}
+{"query": "Convert 98°F to Celsius.", "pred": "none", "conf": 1.0, "probs": {"transportation": 0.0, "finance": 0.0, "none": 1.0, "weather": 0.0, "sports": 0.0, "location": 0.0}}
+{"query": "Explain the concept of blockchain.", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "finance": 0.0, "none": 1.0, "transportation": 0.0, "weather": 0.0, "sports": 0.0}}
+{"query": "What is 50 USD in EUR?", "pred": "finance", "conf": 0.99, "probs": {"none": 0.01, "finance": 0.99, "weather": 0.0, "sports": 0.0, "location": 0.0, "transportation": 0.0}}
+{"query": "Who won the Oscar for Best Picture in 2025?", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "none": 1.0, "location": 0.0, "transportation": 0.0, "sports": 0.0, "finance": 0.0}}
+{"query": "Describe photosynthesis in simple terms.", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "weather": 0.0, "finance": 0.0, "transportation": 0.0, "none": 1.0, "location": 0.0}}
+{"query": "What is the square root of 256?", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "transportation": 0.0, "sports": 0.0, "none": 1.0, "location": 0.0, "weather": 0.0}}
+{"query": "Who founded Microsoft?", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "transportation": 0.0, "location": 0.0, "none": 1.0, "finance": 0.0, "sports": 0.0}}
+{"query": "When is the next Manchester United match?", "pred": "sports", "conf": 1.0, "probs": {"none": 0.0, "finance": 0.0, "transportation": 0.0, "location": 0.0, "weather": 0.0, "sports": 1.0}}
+{"query": "What time is it in London right now?", "pred": "none", "conf": 0.99, "probs": {"sports": 0.0, "transportation": 0.0, "none": 0.99, "location": 0.01, "weather": 0.0, "finance": 0.0}}
+{"query": "Convert 100 Celsius to Fahrenheit.", "pred": "none", "conf": 1.0, "probs": {"none": 1.0, "transportation": 0.0, "finance": 0.0, "sports": 0.0, "location": 0.0, "weather": 0.0}}
+{"query": "What is 25 percent of 800?", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "transportation": 0.0, "sports": 0.0, "weather": 0.0, "location": 0.0, "none": 1.0}}
+{"query": "How many kilometers are in a marathon?", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "none": 1.0, "weather": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0}}
+{"query": "Translate \"thank you\" into French.", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "weather": 0.0, "finance": 0.0, "none": 1.0, "transportation": 0.0, "location": 0.0}}
+{"query": "How do you say \"good evening\" in Japanese?", "pred": "none", "conf": 1.0, "probs": {"sports": 0.0, "weather": 0.0, "none": 1.0, "finance": 0.0, "transportation": 0.0, "location": 0.0}}
+{"query": "Write a function in Python to check if a number is prime.", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "none": 1.0, "finance": 0.0, "transportation": 0.0, "sports": 0.0, "weather": 0.0}}
+{"query": "How are you?", "pred": "none", "conf": 1.0, "probs": {"weather": 0.0, "finance": 0.0, "location": 0.0, "transportation": 0.0, "sports": 0.0, "none": 1.0}}
+{"query": "What is the tallest mountain in the world?", "pred": "none", "conf": 1.0, "probs": {"finance": 0.0, "transportation": 0.0, "sports": 0.0, "none": 1.0, "location": 0.0, "weather": 0.0}}
+{"query": "Who painted the Mona Lisa?", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "transportation": 0.0, "sports": 0.0, "finance": 0.0, "none": 1.0, "weather": 0.0}}
+{"query": "What causes the northern lights?", "pred": "none", "conf": 1.0, "probs": {"location": 0.0, "finance": 0.0, "sports": 0.0, "none": 1.0, "transportation": 0.0, "weather": 0.0}}

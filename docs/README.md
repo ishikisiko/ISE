@@ -45,6 +45,7 @@
 
 | 文件 | 内容 |
 |---|---|
+| [reports/jev_evaluation_20260918/report.md](reports/jev_evaluation_20260918/report.md) | TypeSafe Jev 离线评测（2026-09-18）：requires_evidence、skill 路由、闲聊短路、查询理解各字段与现有规则同 gold 对比；原始输出在 `raw/`，脚本 `tests/quality/jev_*_eval.py` |
 | [reports/quality_evaluation_20260909/report.md](reports/quality_evaluation_20260909/report.md) | 质量评测首份报告（2026-09-09）：离线回归 + 历史产物重算 + 禁网探针；真实运行未授权 |
 | [reports/quality_evaluation_20260909/historical_r2_scorecard.md](reports/quality_evaluation_20260909/historical_r2_scorecard.md) | 由 `tests/quality_report.py` 生成的历史 r2 记分卡（含逐题附表） |
 | [reports/quality_evaluation_20260909/offline_scorecard.md](reports/quality_evaluation_20260909/offline_scorecard.md) | 离线 run 的自动记分卡 |

@@ -1,0 +1,31 @@
+qid,query,gold_requires_evidence,gold_intent_shape,subgroup,notes
+h01,OpenAI 现在的 CTO 是谁,1,information_request,role_holder,职位在任者会变
+h02,Who is the current CEO of Intel?,1,information_request,role_holder,职位在任者会变
+h03,Python 3.13 移除了哪些标准库模块,1,information_request,exact_list,需精确名单
+h04,东京的人口是多少,1,information_request,exact_figure,精确且变化的数字
+h05,What is the tallest building in the world?,1,information_request,looks_common,看似常识但会变
+h06,Redis 最新版本的许可证是什么,1,information_request,changed_fact,2024 年后多次变更
+h07,How many employees does Anthropic have?,1,information_request,exact_figure,精确且变化
+h08,Vercel 的 Hobby 计划有什么限制,1,information_request,plan_pricing,套餐条款随时变
+h09,What does the company Cognition Labs build?,1,information_request,long_tail,长尾新公司
+h10,Who won the most recent Ballon d'Or?,1,information_request,recent,最近事件
+h11,llama.cpp 目前支持哪些量化格式,1,information_request,changing_list,持续变化的清单
+h12,Is Docker Desktop free for companies?,1,information_request,changed_fact,许可条款变更过
+h13,深圳到广州坐高铁最快要多久,1,information_request,schedule,时刻表会变
+h14,Kubernetes 默认的 pod 驱逐宽限期是多少秒,1,information_request,exact_obscure,冷门精确参数
+h15,What is the market cap of Nvidia?,1,information_request,exact_figure,实时变化
+h16,光速是多少,0,information_request,stable_constant,常识常数
+h17,What is the capital of Australia?,0,information_request,stable_common,稳定常识
+h18,第二次世界大战是哪一年结束的,0,information_request,historical_stable,历史稳定事实；注意 gold qa027 把成立年份标为 1
+h19,Explain the CAP theorem,0,information_request,concept,概念解释
+h20,Python 的 GIL 是什么,0,information_request,concept,概念解释
+h21,水的化学式是什么,0,information_request,stable_common,稳定常识
+h22,Who wrote Pride and Prejudice?,0,information_request,historical_stable,稳定事实
+h23,什么是布隆过滤器，简单解释一下,0,information_request,concept,概念解释
+h24,How does the TCP three-way handshake work?,0,information_request,concept,概念解释
+h25,1 GB 等于多少 MB,0,information_request,computation,换算
+h26,What is the difference between a process and a thread?,0,comparison,concept_comparison,对比但不需证据
+h27,Python 里列表和元组有什么区别,0,comparison,concept_comparison,对比但不需证据
+h28,圆周率前五位是多少,0,information_request,stable_constant,常识常数
+h29,Java 8 是哪一年发布的,0,information_request,historical_stable,稳定历史日期；与 qa027 口径可能冲突
+h30,What is the boiling point of tungsten?,1,information_request,exact_obscure,冷门精确数字；可争议
