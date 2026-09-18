@@ -106,3 +106,5 @@
 - [x] 9.4 `openspec validate --strict` 通过；`python -m pytest -q` 全绿；`git diff --check` 干净
 
 **退出判据**：9.4 三项全部通过；路线图中能查到本开关长期存在的理由。
+
+2026-09-18 归档记录：按本节退出判据"若开放式子集未显示优势，停在此处并记录量化结论是合法结局"归档。8.4 / 8.5 / 8.6 保持未勾选，量化结论见 `docs/reports/autonomy_evaluation_20260908/report.md`；`autonomous` 未成为默认模式，预算默认值未回填。九份 delta spec 已于同日同步进 `openspec/specs/`（新建 autonomy-policy、loop-cancellation、model-initiated-clarification 三个能力）。
