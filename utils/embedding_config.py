@@ -59,10 +59,17 @@ def resolve_embedding_settings(
     except (TypeError, ValueError):
         resolved_timeout = None
 
+    # HuggingFace-only knobs (sentence-transformers ``encode`` kwargs, e.g. a
+    # ``prompt`` prefix for E5-style models or ``normalize_embeddings``).
+    encode_kwargs = embeddings_cfg.get("encode_kwargs")
+    query_encode_kwargs = embeddings_cfg.get("query_encode_kwargs")
+
     return {
         "provider": provider,
         "model": resolved_model,
         "base_url": base_url or None,
         "api_key": api_key or None,
         "timeout": resolved_timeout,
+        "encode_kwargs": dict(encode_kwargs) if isinstance(encode_kwargs, dict) else None,
+        "query_encode_kwargs": dict(query_encode_kwargs) if isinstance(query_encode_kwargs, dict) else None,
     }

@@ -95,7 +95,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-review", action="store_true", help="Answer suite: do not run the v4 judge.")
     parser.add_argument("--judge-model", default="glm-5.2")
     parser.add_argument("--judge-provider", default="opencode-go")
-    parser.add_argument("--data-path", default="tests/fixtures/local_corpus")
+    parser.add_argument("--data-path", default="tests/fixtures/local_corpus", help="Local suite corpus directory (comma-separated for several).")
+    parser.add_argument("--local-dataset-file", default="dataset/local_chunk_gold.csv", help="Local suite gold CSV (comma-separated for several).")
+    parser.add_argument("--embedding-models", default=None, help="Local suite: comma-separated '[provider:]model' specs; default = the configured embedding model.")
+    parser.add_argument("--rerank-model", default=None, help="Local suite: rerank retrieved chunks with this model before scoring.")
+    parser.add_argument("--rerank-candidates", type=int, default=10, help="Local suite: chunks retrieved before reranking.")
+    parser.add_argument("--local-chunk-sizes", default=None, help="Local suite grid override, e.g. '500,800,1000,1500'.")
+    parser.add_argument("--local-chunk-overlaps", default=None, help="Local suite grid override, e.g. '0,100,200'.")
     parser.add_argument("--dry-run", action="store_true", help="Print the commands without executing anything.")
     apply_config_defaults(parser, quality_defaults(quality_config, "runner"), source=str(quality_config_path(pre.parse_known_args()[0].quality_config)))
     return parser.parse_args()
@@ -231,9 +237,17 @@ def suite_local(run_dir: Path, args: argparse.Namespace) -> None:
     if output.is_file():
         print("[quality_runner] local_rag_eval.json exists; skipping (resume)")
         return
-    command = [PY, "tests/local_chunk_grid_search.py", "--data-path", args.data_path, "--dataset-file", "dataset/local_chunk_gold.csv", "--top-k", "3,5", "--output-file", str(output)]
+    command = [PY, "tests/local_chunk_grid_search.py", "--data-path", args.data_path, "--dataset-file", args.local_dataset_file, "--top-k", "3,5", "--output-file", str(output)]
     if args.config:
         command += ["--config", args.config]
+    if args.embedding_models:
+        command += ["--embedding-models", args.embedding_models]
+    if args.rerank_model:
+        command += ["--rerank-model", args.rerank_model, "--rerank-candidates", str(args.rerank_candidates)]
+    if args.local_chunk_sizes:
+        command += ["--chunk-sizes", args.local_chunk_sizes]
+    if args.local_chunk_overlaps:
+        command += ["--chunk-overlaps", args.local_chunk_overlaps]
     run_command(command, dry_run=args.dry_run, log=run_dir / "local.log")
 
 

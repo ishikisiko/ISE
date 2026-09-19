@@ -113,3 +113,157 @@ def test_load_queries_reads_gold_csv_and_legacy_layout(tmp_path):
     legacy_rows = load_queries(str(legacy), category="local_rag")
     assert [row["id"] for row in legacy_rows] == ["Q1"]
     assert legacy_rows[0]["gold_spans"] == []
+
+
+# ---------------------------------------------------------------------------
+# Multi-model / absent separation / rerank (2026-09-19)
+# ---------------------------------------------------------------------------
+
+from tests.local_chunk_grid_search import (  # noqa: E402
+    absent_separation,
+    build_model_summary,
+    load_query_files,
+    parse_model_spec,
+    rerank_ranked,
+    run_model,
+)
+
+
+def test_parse_model_spec_keeps_configured_provider_and_builds_hf_presets():
+    base = {"embeddings": {"provider": "openai_compatible", "model": "qwen3.7-text-embedding", "base_url": "https://x", "api_key": "k"}}
+    bare = parse_model_spec("qwen3.7-text-embedding-flash", base)
+    assert bare["provider"] == "openai_compatible" and bare["model"] == "qwen3.7-text-embedding-flash"
+    assert bare["model_name"] == "qwen3.7-text-embedding-flash"
+    assert bare["config"]["embeddings"]["api_key"] == "k"  # credentials untouched
+    assert base["embeddings"]["model"] == "qwen3.7-text-embedding"  # base config not mutated
+
+    hf = parse_model_spec("huggingface:intfloat/multilingual-e5-small", base)
+    assert hf["provider"] == "huggingface"
+    assert hf["config"]["embeddings"] == {
+        "provider": "huggingface", "model": "intfloat/multilingual-e5-small",
+        "encode_kwargs": {"normalize_embeddings": True, "prompt": "passage: "},
+        "query_encode_kwargs": {"normalize_embeddings": True, "prompt": "query: "},
+    }
+    plain = parse_model_spec("huggingface:sentence-transformers/all-MiniLM-L6-v2", base)
+    assert plain["config"]["embeddings"]["encode_kwargs"] == {"normalize_embeddings": True}
+
+    default = parse_model_spec("", base)
+    assert default["model"] == "qwen3.7-text-embedding" and default["model_name"] is None
+
+
+def test_absent_separation_auroc_and_reject_rate():
+    # answerable distances mostly small, absent mostly large; one absent overlaps
+    answerable = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+    absent = [1.3, 1.4, 0.55]
+    result = absent_separation(answerable, absent)
+    # pairs: 1.3 and 1.4 beat all 10; 0.55 beats 0.3,0.4,0.5 -> (10+10+3)/30
+    assert result["auroc"] == pytest.approx(23 / 30, abs=1e-4)
+    # keep 95% of 10 answerable -> ceil(9.5)=10 -> threshold is the max answerable (1.2)
+    assert result["threshold"] == 1.2
+    assert result["reject_at_answerable_recall"] == pytest.approx(2 / 3, abs=1e-4)
+    assert absent_separation([], absent)["auroc"] is None
+    assert absent_separation([0.5], [0.5])["auroc"] == 0.5
+
+
+class _StubReranker:
+    def __init__(self, order):
+        self.order = order  # list of (index, relevance)
+        self.calls = []
+
+    def rerank_texts(self, query, texts):
+        self.calls.append((query, list(texts)))
+        return [{"id": str(index), "score": score} for index, score in self.order]
+
+
+def test_rerank_ranked_reorders_and_flips_score_direction():
+    ranked = [
+        {"rank": 1, "source": "a", "content": "x", "score": 0.2, "gold_spans": []},
+        {"rank": 2, "source": "b", "content": "y", "score": 0.3, "gold_spans": [0]},
+        {"rank": 3, "source": "c", "content": "z", "score": 0.4, "gold_spans": []},
+    ]
+    reranker = _StubReranker([(1, 0.9), (2, 0.4)])  # API omits index 0
+    out, applied = rerank_ranked(reranker, "q", ranked, keep=2)
+    assert applied and reranker.calls[0][1] == ["x", "y", "z"]
+    assert [item["source"] for item in out] == ["b", "c"]
+    assert out[0]["rank"] == 1 and out[0]["score"] == pytest.approx(0.1) and out[0]["rerank_score"] == 0.9
+    empty, applied = rerank_ranked(_StubReranker([]), "q", ranked, keep=2)
+    assert not applied and [item["source"] for item in empty] == ["a", "b"]
+
+
+def test_evaluate_setting_with_reranker_uses_candidates_and_reports_absent_metrics():
+    class _Store(_StubStore):
+        seen_k = []
+
+        def search_with_scores(self, query, *, k):
+            self.seen_k.append(k)
+            return super().search_with_scores(query, k=k)
+
+    reranker = _StubReranker([(0, 0.5), (1, 0.6), (2, 0.7)])  # unsorted on purpose: rerank_ranked sorts by score
+    result = evaluate_setting(
+        data_path="unused", queries=_queries(), config={}, embedding_model=None,
+        chunk_size=800, chunk_overlap=0, top_ks=[3], store_factory=_Store, reranker=reranker, rerank_candidates=10,
+    )
+    assert _Store.seen_k and set(_Store.seen_k) == {10}
+    assert result["rerank"] == {"candidates": 10, "applied_queries": 5}
+    k3 = result["by_k"]["3"]
+    # q-miss gold (index 2) is now first: chunk_rank 1
+    per_query = {row["id"]: row for row in result["queries"]}
+    assert per_query["3"]["by_k"]["3"]["chunk_rank"] == 1
+    assert per_query["3"]["retrieved"][0]["rerank_score"] == 0.7
+    assert k3["absent_queries"] == 1 and k3["answerable_queries"] == 4
+    assert k3["absent_auroc"] is not None and k3["absent_reject_at_answerable_recall_95"] is not None
+    assert per_query["1"]["by_k"]["3"]["min_distance"] == pytest.approx(0.3)
+
+
+def test_evaluate_setting_indexes_several_directories_with_one_index_call(monkeypatch):
+    calls = []
+
+    class _MultiStore(_StubStore):
+        def index(self, documents):
+            calls.append(("index", len(documents)))
+            return 7
+
+        def index_from_directory(self, path):
+            calls.append(("dir", path))
+            return 42
+
+    class _Reader:
+        def __init__(self, path, recursive=True):
+            self.path = path
+
+        def load(self):
+            return [object(), object()]
+
+    import langchain.langchain_support as support
+
+    monkeypatch.setattr(support, "LangChainFileReader", _Reader)
+    single = evaluate_setting(data_path="one", queries=_queries(), config={}, embedding_model=None, chunk_size=800, chunk_overlap=0, top_ks=[3], store_factory=_MultiStore)
+    multi = evaluate_setting(data_path=["one", "two"], queries=_queries(), config={}, embedding_model=None, chunk_size=800, chunk_overlap=0, top_ks=[3], store_factory=_MultiStore)
+    assert single["chunk_count"] == 42 and multi["chunk_count"] == 7
+    assert calls == [("dir", "one"), ("index", 4)]
+
+
+def test_load_query_files_concatenates_and_caps(tmp_path):
+    a = tmp_path / "a.csv"
+    b = tmp_path / "b.csv"
+    a.write_text("qid,query,gold_doc_id,gold_span,is_absent,language\na1,q,doc.md,s,0,en\na2,q2,doc.md,s,0,en\n", encoding="utf-8")
+    b.write_text("qid,query,gold_doc_id,gold_span,is_absent,language\nb1,q,,,1,zh\n", encoding="utf-8")
+    assert [row["id"] for row in load_query_files([str(a), str(b)])] == ["a1", "a2", "b1"]
+    assert [row["id"] for row in load_query_files([str(a), str(b)], limit=2)] == ["a1", "a2"]
+
+
+def test_run_model_and_summary_expose_matrix_and_fixed_slice():
+    spec = {"spec": "huggingface:stub", "model": "stub", "provider": "huggingface", "config": {}, "model_name": "stub"}
+    entry = run_model(
+        model_spec=spec, data_paths=["unused"], queries=_queries(), chunk_sizes=[800, 1000], chunk_overlaps=[0, 200],
+        top_ks=[3], reranker=None, rerank_candidates=10, store_factory=_StubStore,
+    )
+    assert [(r["chunk_size"], r["chunk_overlap"]) for r in entry["results"]].count((1000, 200)) == 1
+    assert entry["default_setting_rank"] in {1, 2, 3, 4}
+    assert entry["embedding_calls"] == {"chunks_embedded": 42 * 4, "queries_embedded": 5 * 4}
+    summary = build_model_summary([entry], 3)
+    row = summary["matrix"][0]
+    assert row["model"] == "huggingface:stub" and row["settings_evaluated"] == 4
+    assert row["at_800_0"]["chunk_hit_at_k"] == 1.0 and row["at_1000_200"]["chunk_hit_at_k"] == 1.0
+    assert set(summary["fixed_slice"]) == {"800/0", "1000/200"}
+    assert summary["fixed_slice"]["800/0"]["huggingface:stub"]["absent_auroc"] is not None

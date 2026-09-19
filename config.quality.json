@@ -17,7 +17,13 @@
         "skip_review": false,
         "judge_provider": "opencode-go",
         "judge_model": "glm-5.2",
-        "data_path": "tests/fixtures/local_corpus"
+        "data_path": "tests/fixtures/local_corpus",
+        "local_dataset_file": "dataset/local_chunk_gold.csv",
+        "embedding_models": null,
+        "rerank_model": null,
+        "rerank_candidates": 10,
+        "local_chunk_sizes": null,
+        "local_chunk_overlaps": null
     },
     "judge": {
         "_comment": "Defaults for `python -m tests.quality_review` (rubric v4). The resolved values plus this file's digest are frozen into review-manifest-v4.json on the first scored answer; editing them afterwards makes the reviewer refuse to run against that batch.",

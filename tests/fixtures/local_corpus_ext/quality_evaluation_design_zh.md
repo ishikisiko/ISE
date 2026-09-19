@@ -397,8 +397,6 @@ flowchart LR
 
 沿用 `local_chunk_grid_search.py`：chunk_size ∈ {300, 500, 800, 1000, 1500} × overlap ∈ {0, 50, 100, 150, 200, 300}，输出 `chunk_hit_at_k` / `mrr_chunk` / `index_ms` / `query_ms`，选择时以 `chunk_hit_at_3` 为主、`index_ms` 为约束。加入 embedding 模型维度（当前 `qwen3.7-text-embedding`；备选至少一个本地模型）与 `k` 维度。结果登记到 baseline.md 新小节，作为 `localRag.chunk_size=1000 / overlap=200` 默认值的依据。
 
-2026-09-19 起脚本支持 `--embedding-models '[provider:]model,...'`（同一网格跑多个模型，输出 `models[]`、`matrix`（每模型最优与 800/0、1000/200 固定切片）与 `fixed_slice`）、`--data-path a,b` / `--dataset-file a,b`（合并语料 1 与 `tests/fixtures/local_corpus_ext/`）、`--rerank-model qwen3-rerank --rerank-candidates 10`（先召回 10 再 rerank 取 k，分数记为 1 − relevance），并新增 absent 分离指标：`absent_auroc`（absent 题 top-1 距离大于可答题的概率）与 `absent_reject_at_answerable_recall_95`（保住 95% 可答题时距离阈值能拒掉的 absent 比例）。quality_runner 对应参数：`--embedding-models` / `--rerank-model` / `--local-chunk-sizes` / `--local-chunk-overlaps` / `--local-dataset-file`。
-
 **评分方案**：检索段全自动（gold chunk 标一次）；生成段用与 D7 同一裁判但 rubric 换成本地版（证据只给 chunk，不给网页）；每季度抽 20 条人工复核 faithfulness，kappa ≥ 0.6 才采用裁判分。
 
 **数据需求**

@@ -170,7 +170,12 @@ class LangChainVectorStore:
         elif self.embedding_provider == "huggingface":
             from langchain_huggingface import HuggingFaceEmbeddings
 
-            self._embedder = HuggingFaceEmbeddings(model_name=self.model_name)
+            hf_kwargs: dict[str, Any] = {"model_name": self.model_name}
+            if settings.get("encode_kwargs"):
+                hf_kwargs["encode_kwargs"] = settings["encode_kwargs"]
+            if settings.get("query_encode_kwargs"):
+                hf_kwargs["query_encode_kwargs"] = settings["query_encode_kwargs"]
+            self._embedder = HuggingFaceEmbeddings(**hf_kwargs)
         else:
             raise ValueError(
                 f"Unsupported embedding provider '{self.embedding_provider}'. "

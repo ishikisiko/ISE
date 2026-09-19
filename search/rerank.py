@@ -66,40 +66,7 @@ class Qwen3Reranker(BaseReranker):
                 text = hit.url or f"Result {idx + 1}"
             doc_texts.append(text)
 
-        payload = {
-            "model": self.model,
-            "input": {
-                "query": query,
-                "documents": doc_texts,
-            },
-            "parameters": {
-                "return_documents": True,
-                "top_n": len(doc_texts),
-            }
-        }
-
-        try:
-            response = requests.post(
-                self._endpoint,
-                headers=self._headers,
-                json=payload,
-                timeout=self.request_timeout,
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            # 添加响应内容用于调试
-            error_detail = str(exc)
-            if hasattr(exc, 'response') and exc.response is not None:
-                try:
-                    error_body = exc.response.json()
-                    error_detail = f"{exc} | Response: {error_body}"
-                except:
-                    error_detail = f"{exc} | Response text: {exc.response.text[:500]}"
-            raise RuntimeError(f"Qwen3 rerank request failed: {error_detail}") from exc
-
-        data = response.json()
-
-        ranking = self._extract_ranking(data)
+        ranking = self.rerank_texts(query, doc_texts)
         if not ranking:
             # Empty or unexpected payload: fall back to original order
             return [RerankedHit(hit=hit, score=None) for hit in hits]
@@ -128,6 +95,48 @@ class Qwen3Reranker(BaseReranker):
             reranked.extend(RerankedHit(hit=hit, score=None) for hit in remaining)
 
         return reranked
+
+    def rerank_texts(self, query: str, doc_texts: List[str]) -> List[dict]:
+        """Rerank raw passages; returns ``[{"id": "<input index>", "score": float|None}, ...]``
+        in relevance order (empty on an unexpected payload). Used by both
+        :meth:`rerank` and the local-RAG evaluation, which has chunks, not hits.
+        """
+        if not doc_texts:
+            return []
+
+        payload = {
+            "model": self.model,
+            "input": {
+                "query": query,
+                "documents": list(doc_texts),
+            },
+            "parameters": {
+                "return_documents": False,
+                "top_n": len(doc_texts),
+            }
+        }
+
+        try:
+            response = requests.post(
+                self._endpoint,
+                headers=self._headers,
+                json=payload,
+                timeout=self.request_timeout,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            # 添加响应内容用于调试
+            error_detail = str(exc)
+            if hasattr(exc, 'response') and exc.response is not None:
+                try:
+                    error_body = exc.response.json()
+                    error_detail = f"{exc} | Response: {error_body}"
+                except:
+                    error_detail = f"{exc} | Response text: {exc.response.text[:500]}"
+            raise RuntimeError(f"Qwen3 rerank request failed: {error_detail}") from exc
+
+        data = response.json()
+        return self._extract_ranking(data)
 
     @staticmethod
     def _extract_ranking(payload: dict) -> List[dict]:
