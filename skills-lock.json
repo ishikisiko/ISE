@@ -31,6 +31,12 @@
       "skillPath": "skills/in-progress/loop-me/SKILL.md",
       "computedHash": "1001228c475a89d565d0059ebd64b3e922f93a87aad29becb8e358c0399880a7"
     },
+    "typesafe-ai": {
+      "source": "typesafe-ai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/typesafe-ai/SKILL.md",
+      "computedHash": "9cd84c5e535dec8dec59917c110f9c00b4a61faadb86b432ec7e41051170af12"
+    },
     "writing-for-agents": {
       "source": "mattpocock/skills",
       "sourceType": "github",
