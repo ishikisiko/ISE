@@ -75,7 +75,7 @@ TBD - created by archiving change langgraph-react-loop. Update Purpose after arc
 - **AND** verdict SHALL 标明 judge 未参与本次评估
 
 ### Requirement: 停滞检测
-系统 SHALL 检测两类停滞信号并在持续超阈值时判定循环停滞：工具调用指纹重复（相同工具名与归一化参数）、连续无新证据。阈值 SHALL 可配置（`repeat_threshold`、`no_progress_threshold`）。
+系统 SHALL 检测三类停滞信号并在持续超阈值时判定循环停滞：工具调用指纹重复（相同工具名与归一化参数）、发起了工具调用却连续无新证据、连续不发起任何工具调用且候选答案未被接受。阈值 SHALL 可配置（`repeat_threshold`、`no_progress_threshold`、`tool_free_threshold`）。不调工具的轮次 SHALL NOT 计入"连续无新证据"计数。
 
 #### Scenario: 重复工具调用
 - **WHEN** 连续 `repeat_threshold` 轮迭代产生相同的工具调用指纹
@@ -83,12 +83,24 @@ TBD - created by archiving change langgraph-react-loop. Update Purpose after arc
 - **AND** 终止原因 SHALL 标记为 `stagnated`
 
 #### Scenario: 连续无新证据
-- **WHEN** 连续 `no_progress_threshold` 轮迭代的 LoopVerdict 均为 `new_evidence=false`
+- **WHEN** 连续 `no_progress_threshold` 轮发起了工具调用的迭代其 LoopVerdict 均为 `new_evidence=false`
 - **THEN** 系统 SHALL 判定循环停滞并终止循环
 - **AND** 终止原因 SHALL 标记为 `stagnated`
 
+#### Scenario: 连续不调工具
+- **WHEN** 连续 `tool_free_threshold` 轮迭代模型既未调用工具、其输出又未被接受为最终答案（直答被拒、过程叙述或无效工具请求）
+- **THEN** 系统 SHALL 判定循环停滞并终止循环
+- **AND** 终止原因 SHALL 标记为 `stagnated`
+- **AND** 最终答案 SHALL 采用消息历史中最后一条非空候选答案并标注证据不足，而非仅返回终态模板
+
+#### Scenario: 直答被拒后仍有检索机会
+- **WHEN** 模型在没有任何已保留证据时直接给出答案且 critic 拒收
+- **THEN** 拒收反馈 SHALL 明确要求调用搜索工具获取证据后再作答
+- **AND** 该轮 SHALL NOT 增加"连续无新证据"计数
+- **AND** 模型在下一轮调用工具后 SHALL 按正常路径继续评估
+
 ### Requirement: 循环终止语义
-系统 SHALL 通过元数据暴露 `succeeded`、`exhausted`、`stagnated`、`unrecoverable`、`evidence_insufficient`、`clarification_required` 与 `cancelled` 终止原因。当 `critic_verdict=advisory` 时，模型提议终答 SHALL 直接被接受为终止条件，确定性缺口 SHALL NOT 触发返工。
+系统 SHALL 通过元数据暴露 `succeeded`、`exhausted`、`stagnated`、`unrecoverable`、`evidence_insufficient`、`clarification_required` 与 `cancelled` 终止原因。当 `critic_verdict=advisory` 时，模型提议终答 SHALL 直接被接受为终止条件，确定性缺口 SHALL NOT 触发返工。任何非成功终止的最终答案 SHALL 优先返回模型已产出的候选答案并恰好附加一次限定前缀；终态模板 SHALL 只在没有任何候选答案时出现，且 SHALL NOT 被 critic 接受为 `succeeded`。
 
 #### Scenario: 成功终止
 - **WHEN** 模型提议输出最终答案且 evaluate 判定约束清单为空、规则抽查通过
@@ -114,6 +126,16 @@ TBD - created by archiving change langgraph-react-loop. Update Purpose after arc
 - **THEN** 循环 SHALL 终止并返回该答案
 - **AND** 终止原因 SHALL 标明由模型自主收尾
 - **AND** 未满足的确定性缺口 SHALL 记录在 `advisory_gaps` 中
+
+#### Scenario: 限定前缀只出现一次
+- **WHEN** 综合阶段产出的候选答案已带限定前缀，随后循环以非成功原因终止
+- **THEN** 最终答案 SHALL 只包含一次限定前缀
+- **AND** 前缀之后 SHALL 是候选答案正文
+
+#### Scenario: 终态模板不被接受为成功
+- **WHEN** 当前草稿等于某条终态模板（如"迭代次数用尽，未能获得完整答案。"）
+- **THEN** critic SHALL 将其视为空答案
+- **AND** 循环 SHALL NOT 以 `succeeded` 终止
 
 ### Requirement: 显式成功标准注入
 循环 SHALL 从共享 `QueryAnalysis` 构建初始成功标准，evaluate 节点 SHALL 在每轮对照同一标准检查进展。标准是否作为终止条件 SHALL 由 `AutonomyPolicy.checklist_injection` 决定。
@@ -171,7 +193,7 @@ verdicts for continuation.
   graph
 
 ### Requirement: 强制合成旁路受策略约束
-当 `AutonomyPolicy.forced_synthesis` 为 off 时，系统 SHALL NOT 因接近迭代上界、终态降级或确定性工作流需要而替模型生成最终答案。此时最终答案 SHALL 只来自模型自身的输出或预算耗尽后的收口说明。
+当 `AutonomyPolicy.forced_synthesis` 为 off 时，系统 SHALL NOT 因接近迭代上界、终态降级或确定性工作流需要而替模型生成最终答案。此时最终答案 SHALL 只来自模型自身的输出或预算耗尽后的收口说明。当 `forced_synthesis` 为 on 且账本存在已保留证据时，任何进入综合节点的路径 SHALL 基于已保留证据生成接地答案，SHALL NOT 以终态模板替代。
 
 #### Scenario: 关闭强制合成
 - **WHEN** `forced_synthesis=off` 且循环接近迭代上界但模型仍在调用工具
@@ -186,6 +208,11 @@ verdicts for continuation.
 - **WHEN** `forced_synthesis=off` 且循环因预算耗尽终止且账本存在已保留证据
 - **THEN** 响应 SHALL 返回模型最后的草稿并明确标注执行预算不足
 - **AND** SHALL NOT 丢弃已保留证据
+
+#### Scenario: 接近上界的强制合成有证据时接地
+- **WHEN** `forced_synthesis=on`、约束已满足且循环接近迭代上界而模型仍在调用工具，账本存在已保留证据
+- **THEN** 综合节点 SHALL 基于已保留证据生成带 `[En]` 标注的答案
+- **AND** 综合失败时 SHALL 退回消息历史中的候选答案，而非空草稿
 
 ### Requirement: advisory 缺口的注入去重
 系统 SHALL 保证同一条 advisory 缺口在单次执行中最多被注入一次模型上下文，并 SHALL 在循环状态中记录已注入集合以支持跨轮去重。
@@ -204,3 +231,27 @@ verdicts for continuation.
 - **WHEN** 会话续跑同一条 loop 轨迹
 - **THEN** 已注入集合 SHALL 从 checkpoint 保留
 - **AND** 上一轮已注入的缺口 SHALL NOT 在新一轮被重复注入
+
+### Requirement: 请求级强制搜索由 critic 裁决
+当请求携带 `force_search=true` 且搜索被允许、工具面包含搜索工具时，系统 SHALL 在模型尚未发起任何搜索工具调用（`web_search` / `search_recovery`）之前拒收其最终答案，缺口记为 `search_required`。该规则 SHALL 由确定性 critic 执行，SHALL 受 `tool_free_threshold` 与迭代预算约束，SHALL NOT 替模型发起工具调用。
+
+#### Scenario: 强制搜索下模型直答
+- **WHEN** `force_search=true` 且模型在零次搜索调用后提议最终答案
+- **THEN** critic SHALL 判 `final_answer_rejected`，`rule_hits` 含 `search_required`
+- **AND** 拒收反馈 SHALL 明确要求调用 `web_search`
+- **AND** 系统提示 SHALL 包含"先检索再作答"的成功标准
+
+#### Scenario: 模型随后搜索
+- **WHEN** 模型在被拒后调用了搜索工具
+- **THEN** `search_required` 缺口 SHALL 消失
+- **AND** 后续评估 SHALL 按正常规则进行
+
+#### Scenario: 强制搜索不越过预算
+- **WHEN** `force_search=true` 且模型连续 `tool_free_threshold` 轮不调用工具
+- **THEN** 循环 SHALL 以 `stagnated` 终止
+- **AND** SHALL NOT 无限拒收
+
+#### Scenario: 搜索被禁用
+- **WHEN** `allow_search=false` 或工具面不含搜索工具
+- **THEN** `force_search` SHALL 不生效
+- **AND** `control.request_parameters.force_search` SHALL 回显 false

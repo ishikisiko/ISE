@@ -105,7 +105,9 @@ class ReactAgentOrchestrator:
             temperature: Sampling temperature
             allow_search: Whether to allow search
             reference_limit: Limit on reference sources in response
-            force_search: Force search even if agent decides not to
+            force_search: Require at least one search tool call before the
+                model's final answer is accepted (enforced by the loop critic;
+                ignored when ``allow_search`` is False).
             images: Optional image data (not currently used in ReAct mode)
             analysis: Optional shared ``QueryAnalysis`` (from ``analyze_query``).
                 When supplied (M1 loop main path) the loop derives its success
@@ -146,6 +148,7 @@ class ReactAgentOrchestrator:
         return self._answer_with_langgraph(
             query,
             allow_search=allow_search,
+            force_search=bool(force_search and allow_search),
             conversation_id=conversation_id,
             tracer=tracer,
             timing_recorder=timing_recorder,
@@ -170,6 +173,7 @@ class ReactAgentOrchestrator:
         allow_search: bool,
         tracer: Optional[Any],
         timing_recorder: TimingRecorder,
+        force_search: bool = False,
         conversation_id: Optional[str] = None,
         analysis: Optional[Any] = None,
         execution_trace: Optional[Any] = None,
@@ -275,6 +279,7 @@ class ReactAgentOrchestrator:
                 ledger=ledger,
                 autonomy_policy=autonomy_policy,
                 cancel_event=cancel_event,
+                force_search=bool(force_search and allow_search),
             )
             loop_result = runner.run(user_input, conversation_id=conversation_id)
             resumed = resumed or bool(loop_result.get("conversation_resumed"))
@@ -436,6 +441,7 @@ class ReactAgentOrchestrator:
                 loop_result.get("synthesis_attempts") or 0
             ),
             "loop_forced_synthesis": bool(loop_result.get("forced_synthesis")),
+            "loop_search_calls": int(loop_result.get("search_calls") or 0),
             "compactions": int(loop_result.get("compactions") or 0),
             "peak_context_ratio": float(loop_result.get("peak_context_ratio") or 0),
             "react_trace": list(loop_result.get("trace_events") or []),
@@ -494,6 +500,8 @@ class ReactAgentOrchestrator:
             "temperature": request_parameters.get("temperature", getattr(self.llm, "temperature", None)),
             "num_search_results": request_parameters.get("num_search_results"),
             "per_source_search_results": request_parameters.get("per_source_search_results"),
+            # QD-20260918-01: the value the loop critic actually enforced.
+            "force_search": bool(loop_result.get("force_search")),
         }
         response["control"] = control
 

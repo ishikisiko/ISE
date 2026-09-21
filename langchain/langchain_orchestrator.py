@@ -200,12 +200,37 @@ Always answer in the same language as the user's question."""
         analysis = self._current_analysis
         ambiguities = list(analysis.ambiguities) if analysis is not None else []
         is_chinese = any("\u4e00" <= char <= "\u9fff" for char in query)
-        details = "、".join(ambiguities) if ambiguities else "关键实体或约束"
-        answer = (
-            f"需要先澄清 {details}，才能开始检索并比较。请补充要比较的准确对象或范围。"
-            if is_chinese
-            else "I need the exact entities or constraints before searching, so I do not guess the comparison target."
-        )
+        # Word the request by ambiguity type: a bare pronoun is not a
+        # comparison question and must not be asked for "comparison targets"
+        # (QD-20260918-05).
+        if "comparison_members_unresolved" in ambiguities:
+            answer = (
+                "需要先明确要比较的对象：请补充要对比的两个（或多个）具体名称或范围，我再开始检索。"
+                if is_chinese
+                else (
+                    "I need the exact items to compare before searching, so I do not "
+                    "guess the comparison targets. Please name them."
+                )
+            )
+        elif "unresolved_entity_reference" in ambiguities:
+            answer = (
+                "问题里的指代（如“它”“这个”）没有明确对象：请说明具体指的是哪个实体或产品，我再开始检索。"
+                if is_chinese
+                else (
+                    "The question refers to something (\"it\", \"this\", \"that\") that is "
+                    "not named. Please say which entity or product you mean before I search."
+                )
+            )
+        else:
+            details = "、".join(ambiguities) if ambiguities else "关键实体或约束"
+            answer = (
+                f"需要先澄清 {details}，才能开始检索。请补充准确的对象或范围。"
+                if is_chinese
+                else (
+                    "I need the exact entities or constraints before searching, so I do "
+                    f"not guess: {', '.join(ambiguities) or 'key entity or constraint'}."
+                )
+            )
         result = {
             "query": query,
             "answer": answer,

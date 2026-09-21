@@ -409,7 +409,11 @@ def test_blocked_compaction_returns_through_act_before_synthesis() -> None:
     graph_state["force_synthesis"] = True
     completed = runner.build_graph().invoke(graph_state, config={"recursion_limit": 20})
     assert completed["forced_synthesis"] is True
-    assert completed["termination_reason"] == "succeeded"
+    # No evidence and no candidate: synthesis can only emit the exhausted
+    # stub, and a stub is never accepted as a successful answer
+    # (QD-20260918-03), so the loop closes as evidence_insufficient.
+    assert completed["termination_reason"] == "evidence_insufficient"
+    assert completed["final_answer"] == "现有证据不足，无法可靠完成回答。"
 
     state = _state(
         [HumanMessage(content="question")],

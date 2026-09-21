@@ -173,6 +173,7 @@ _RETRIEVAL_FIXABLE_FAILURES = frozenset(
         "missing_time_constraint",
         "needs_multi_hop_reasoning",
         "no_evidence",
+        "search_required",
         "search_unavailable",
         "target_official_coverage_missing",
         "target_official_pricing_coverage_missing",
@@ -180,6 +181,55 @@ _RETRIEVAL_FIXABLE_FAILURES = frozenset(
     }
 )
 _TRACE_EVENT_LIMIT = 40
+_SEARCH_TOOL_NAMES = frozenset({"web_search", "search_recovery"})
+# Qualification prefixes prepended to a non-successful terminal answer and the
+# stub texts used when no candidate exists at all. Module-level so the
+# best-effort wrapper can strip / recognise them idempotently (QD-20260918-04).
+_INSUFFICIENT_PREFIXES = (
+    "现有证据或执行预算不足，以下仅为当前候选信息，可能不完整或不准确：\n",
+    (
+        "Available evidence or execution budget was insufficient; the "
+        "following is only a provisional result and may be incomplete "
+        "or inaccurate:\n"
+    ),
+)
+_AUTHORITY_PREFIXES = (
+    "已获取与目标实体相关的页面，但其官方归属未通过权威策略验证；以下内容仅供参考：\n",
+    (
+        "A page related to the target entity was retrieved, but its "
+        "official ownership could not be verified under the authority "
+        "policy; the following is provisional:\n"
+    ),
+)
+_QUALIFICATION_PREFIXES = _INSUFFICIENT_PREFIXES + _AUTHORITY_PREFIXES
+_STUB_ANSWERS = {
+    "exhausted": "迭代次数用尽，未能获得完整答案。",
+    "stagnated": "检索陷入停滞，未能获得新的有效信息。",
+    "unrecoverable": "工具连续失败，无法完成检索。",
+    "evidence_insufficient": "现有证据不足，无法可靠完成回答。",
+    "authority_unverified": "已获取相关页面，但无法验证其官方归属，不能可靠完成回答。",
+    "clarification_required": "需要补充关键实体或约束后才能继续。",
+}
+_STUB_FALLBACK = "未能获得完整答案。"
+_STUB_TEXTS = frozenset(_STUB_ANSWERS.values()) | {_STUB_FALLBACK}
+
+
+def _strip_qualification(text: str) -> str:
+    """Remove every leading qualification prefix so it can be re-added once."""
+    stripped = str(text or "")
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _QUALIFICATION_PREFIXES:
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix):]
+                changed = True
+    return stripped
+
+
+def _is_stub_answer(text: str) -> bool:
+    """True when ``text`` is only a terminal stub (optionally prefixed)."""
+    return _strip_qualification(str(text or "")).strip() in _STUB_TEXTS
 _FINAL_ANSWER_PREFIX_RE = re.compile(
     r'^\s*\{\s*"action"\s*:\s*"final"\s*,\s*"answer"\s*:\s*"',
     re.IGNORECASE,
@@ -335,6 +385,7 @@ class _EvaluationFacts:
     constraints_missing: List[str]
     no_progress_streak: int
     citation_failures: List[Dict[str, str]]
+    tool_free_streak: int = 0
 
 
 @dataclass
@@ -397,6 +448,7 @@ class ReactLoopGraphRunner:
         autonomy_policy: Optional[Any] = None,
         cancel_event: Optional[Any] = None,
         generation_params: Optional[Dict[str, Any]] = None,
+        force_search: bool = False,
     ) -> None:
         self.llm = llm
         # Request-level generation parameters (entry ``max_tokens`` /
@@ -410,6 +462,13 @@ class ReactLoopGraphRunner:
         }
         self.tools = list(tools or [])
         self.tools_by_name = {getattr(t, "name", ""): t for t in self.tools}
+        # Request-level ``force_search`` (QD-20260918-01): only meaningful when
+        # a search tool is actually on the tool surface. It is enforced by the
+        # deterministic critic (``search_required`` gap), never by calling a
+        # tool on the model's behalf.
+        self.force_search = bool(force_search) and any(
+            name in self.tools_by_name for name in _SEARCH_TOOL_NAMES
+        )
         self.eval_cfg = normalize_termination_config(termination_config)
         # The loop is policy-driven. When a policy is supplied (the server/CLI
         # path resolves it from config), it is the single source of truth for
@@ -598,6 +657,11 @@ class ReactLoopGraphRunner:
 
     def _format_success_criteria(self) -> str:
         parts: List[str] = []
+        if self.force_search:
+            parts.append(
+                "本次请求要求先检索再作答：在至少调用一次 web_search 获取证据之前，"
+                "不要给出最终答案"
+            )
         if self.initial_checklist:
             if self.autonomy_policy.checklist_injection == "hint":
                 # Hint mode: the checklist is reference information only and is
@@ -1204,6 +1268,8 @@ class ReactLoopGraphRunner:
                 "seen_fingerprints": List[str],
                 "fingerprint_streak": int,
                 "no_progress_streak": int,
+                "tool_free_streak": int,
+                "search_calls": int,
                 "tool_error_streak": int,
                 "had_successful_observation": bool,
                 "last_round_new_evidence": bool,
@@ -1623,6 +1689,9 @@ class ReactLoopGraphRunner:
             tool_messages.append(self._tool_result_message(call, content))
 
         combined_fingerprint = " | ".join(sorted(fingerprints))
+        search_calls = int(state.get("search_calls") or 0) + sum(
+            1 for call in tool_calls if str(call.get("name") or "") in _SEARCH_TOOL_NAMES
+        )
 
         prior_pool = list(state.get("evidence_pool") or [])
         pool_text = "\n".join(prior_pool)
@@ -1645,6 +1714,8 @@ class ReactLoopGraphRunner:
             "last_fingerprint": combined_fingerprint or state["last_fingerprint"],
             "seen_fingerprints": sorted(seen_fingerprints),
             "fingerprint_streak": duplicate_fingerprint_count,
+            "tool_free_streak": 0,
+            "search_calls": search_calls,
             "last_round_new_evidence": new_evidence,
             "last_round_observations": new_observations,
             "pending_model_clarification": pending_model_clarification,
@@ -2010,14 +2081,21 @@ class ReactLoopGraphRunner:
         elif self._pricing_requirements():
             answer = self._pricing_insufficient_answer(state)
             detail = "已生成证据不足说明"
-        elif state.get("degraded_synthesis") and self._has_retained_evidence(state):
-            # Degraded path: the loop exhausted with real evidence but no
-            # usable draft. Generate a fresh cited answer from the retained
-            # evidence pool instead of echoing an empty best-effort stub.
+        elif self._has_retained_evidence(state):
+            # Any synthesis entry with real retained evidence (late-loop force,
+            # blocked compaction, or the degraded terminal path) generates a
+            # fresh cited answer from the evidence pool. The last AI text is
+            # usually a tool call with empty content, so echoing it only ever
+            # produced the "迭代次数用尽" stub (QD-20260918-03). The degraded
+            # flag now only decides whether coverage caveats are attached.
             answer = self._generate_grounded_synthesis(state)
-            detail = "已基于已核证据生成降级综合答案"
+            detail = (
+                "已基于已核证据生成降级综合答案"
+                if state.get("degraded_synthesis")
+                else "已基于已核证据生成综合答案"
+            )
         else:
-            draft = self._last_ai_text(list(state.get("messages") or []))
+            draft = self._last_candidate_text(list(state.get("messages") or []))
             answer = self._best_effort_answer(draft, "exhausted")
             detail = "上下文预算触发收口"
         self.tracer.end(
@@ -2042,6 +2120,7 @@ class ReactLoopGraphRunner:
             "last_round_observations": [],
             "fingerprint_streak": 0,
             "no_progress_streak": 0,
+            "tool_free_streak": 0,
         }
 
     def _tool_result_message(self, call: Dict[str, Any], content: str) -> Any:
@@ -2148,6 +2227,10 @@ class ReactLoopGraphRunner:
         invalid_tool_request = bool(state.get("invalid_tool_request"))
         invalid_final_response = bool(state.get("invalid_final_response"))
         draft = self._last_ai_text(state["messages"])
+        # A terminal stub is not a candidate answer: treating it as one let a
+        # failed judge accept "迭代次数用尽" as constraints_satisfied.
+        if _is_stub_answer(draft):
+            draft = ""
         pool_text = "\n".join(state["evidence_pool"])
 
         met, missing = check_constraint_coverage(
@@ -2159,10 +2242,20 @@ class ReactLoopGraphRunner:
         met = [value for value in met if value in self.initial_checklist]
         missing = [value for value in missing if value in self.initial_checklist]
 
-        no_progress_streak = (
-            0
-            if state["last_round_new_evidence"]
-            else int(state["no_progress_streak"]) + 1
+        # Retrieval no-progress counts only rounds that actually called a
+        # tool; a tool-free round (rejected direct answer, narration, invalid
+        # tool request) goes on its own bounded counter (QD-20260918-02).
+        phase = str(state.get("phase") or "loop")
+        if state["last_round_new_evidence"]:
+            no_progress_streak = 0
+        elif final_proposed:
+            no_progress_streak = int(state["no_progress_streak"])
+        else:
+            no_progress_streak = int(state["no_progress_streak"]) + 1
+        tool_free_streak = (
+            int(state.get("tool_free_streak") or 0) + 1
+            if final_proposed and phase == "loop"
+            else 0
         )
 
         citation_failures: List[Dict[str, str]] = []
@@ -2177,6 +2270,7 @@ class ReactLoopGraphRunner:
             constraints_met=met,
             constraints_missing=missing,
             no_progress_streak=no_progress_streak,
+            tool_free_streak=tool_free_streak,
             citation_failures=citation_failures,
         )
 
@@ -2200,6 +2294,7 @@ class ReactLoopGraphRunner:
             constraints_missing=facts.constraints_missing,
             citation_failures=context_citation_failures,
             no_progress_streak=facts.no_progress_streak,
+            tool_free_streak=facts.tool_free_streak,
         )
         preliminary = evaluate_termination(context)
 
@@ -2611,6 +2706,7 @@ class ReactLoopGraphRunner:
             "constraints_met": list(decision.constraints_met),
             "constraints_missing": list(decision.missing_constraints),
             "no_progress_streak": facts.no_progress_streak,
+            "tool_free_streak": facts.tool_free_streak,
             "judge_error": critic.judge_error,
             "context_budget": action.context_amount,
             "context_ratio": action.context_ratio,
@@ -2653,7 +2749,13 @@ class ReactLoopGraphRunner:
                 if decision.reason == "authority_unverified"
                 else termination_reason
             )
-            final_answer = self._best_effort_answer(facts.draft, answer_reason)
+            # Prefer the model's own candidate over a bare stub: a narration
+            # round empties the latest AI message, but the earlier direct
+            # answer is still in the history (QD-20260918-02).
+            final_answer = self._best_effort_answer(
+                facts.draft or self._last_candidate_text(list(state.get("messages") or [])),
+                answer_reason,
+            )
         elif facts.invalid_tool_request:
             detail = str(state.get("invalid_tool_request") or "").strip()
             tool_names = "、".join(sorted(self.tools_by_name))
@@ -2724,6 +2826,23 @@ class ReactLoopGraphRunner:
             or value.startswith("constraint_missing:")
             for value in failure_types
         )
+        has_evidence = self._has_retained_evidence(state)
+        search_tool = next(
+            (name for name in ("web_search", "search_recovery") if name in self.tools_by_name),
+            None,
+        )
+        if search_tool and (
+            not has_evidence or "search_required" in failure_types
+        ):
+            # No evidence at all: "edit the answer" is impossible (there is
+            # nothing to cite) and "keep using tools" was too vague. Name the
+            # tool and the query so the model retrieves before answering.
+            closing = (
+                "目前还没有任何检索证据，无法为答案标注来源。"
+                f"请立即调用 {search_tool}（例如查询：{self._safe_trace_text(self.query, limit=120)}）"
+                "获取证据，然后仅基于证据重新作答并标注 [En]；不要直接重复上一轮答案。"
+            )
+            return "你的回答尚未通过校验：" + "；".join(details[:6]) + "。" + closing
         closing = (
             self._official_fetch_instruction(state)
             if needs_retrieval
@@ -2841,6 +2960,7 @@ class ReactLoopGraphRunner:
         constraints_missing: List[str],
         citation_failures: List[Dict[str, str]],
         no_progress_streak: int,
+        tool_free_streak: int = 0,
     ) -> TerminationContext:
         records = [
             record
@@ -2949,12 +3069,19 @@ class ReactLoopGraphRunner:
             new_evidence=bool(state.get("last_round_new_evidence")),
             fingerprint_streak=int(state.get("fingerprint_streak") or 0),
             no_progress_streak=no_progress_streak,
+            tool_free_streak=tool_free_streak,
             tool_error_streak=int(state.get("tool_error_streak") or 0),
             had_successful_observation=bool(
                 state.get("had_successful_observation")
             ),
+            search_required=bool(
+                self.force_search
+                and phase == "loop"
+                and int(state.get("search_calls") or 0) <= 0
+            ),
             repeat_threshold=self.eval_cfg["repeat_threshold"],
             no_progress_threshold=self.eval_cfg["no_progress_threshold"],
+            tool_free_threshold=self.eval_cfg["tool_free_threshold"],
             tool_error_threshold=self.eval_cfg["tool_error_threshold"],
             coverage_mode=self.eval_cfg.get("coverage_mode", "blocking"),
             can_continue=(
@@ -3161,50 +3288,62 @@ class ReactLoopGraphRunner:
                     model=getattr(self.llm, "model_name", None),
                     extra=extract_token_usage(response),
                 )
-        draft = self._last_ai_text(history)
+        draft = self._last_candidate_text(history)
         return self._best_effort_answer(draft, "exhausted")
+
+    @classmethod
+    def _last_candidate_text(cls, messages: List[Any]) -> str:
+        """Return the latest model-authored candidate answer in ``messages``.
+
+        Skips tool-call messages, empty content (a narration round is blanked
+        by ``_act``), tool-protocol text and terminal stubs, and strips any
+        qualification prefix so the caller can add exactly one.
+        """
+        for message in reversed(messages):
+            if not isinstance(message, AIMessage):
+                continue
+            if getattr(message, "tool_calls", None):
+                continue
+            text = cls._message_text(message).strip()
+            if not text:
+                continue
+            text = _strip_qualification(_unwrap_final_answer(text) or text).strip()
+            if not text or text in _STUB_TEXTS or _has_tool_protocol(text):
+                continue
+            payload = extract_json_object(text)
+            if isinstance(payload, dict) and any(
+                key in payload for key in ("action", "tool", "name")
+            ):
+                continue
+            return text
+        return ""
 
     @staticmethod
     def _best_effort_answer(draft: str, reason: str) -> str:
+        """Qualify ``draft`` for a non-successful terminal, or return a stub.
+
+        Idempotent: an already-qualified draft is stripped first so the prefix
+        appears exactly once (QD-20260918-04); a bare stub is returned as-is.
+        """
         draft = _unwrap_final_answer(draft) or draft
+        draft = _strip_qualification(str(draft or ""))
         payload = extract_json_object(draft)
         if (
             isinstance(payload, dict)
             and any(key in payload for key in ("action", "tool", "name"))
         ) or _has_tool_protocol(draft):
             draft = ""
+        if draft.strip() in _STUB_TEXTS:
+            draft = ""
         if draft:
             is_chinese = any("\u4e00" <= char <= "\u9fff" for char in draft)
-            if reason == "authority_unverified":
-                qualification = (
-                    "已获取与目标实体相关的页面，但其官方归属未通过权威策略验证；以下内容仅供参考：\n"
-                    if is_chinese
-                    else (
-                        "A page related to the target entity was retrieved, but its "
-                        "official ownership could not be verified under the authority "
-                        "policy; the following is provisional:\n"
-                    )
-                )
-            else:
-                qualification = (
-                    "现有证据或执行预算不足，以下仅为当前候选信息，可能不完整或不准确：\n"
-                    if is_chinese
-                    else (
-                        "Available evidence or execution budget was insufficient; the "
-                        "following is only a provisional result and may be incomplete "
-                        "or inaccurate:\n"
-                    )
-                )
-            return qualification + draft
-        reasons = {
-            "exhausted": "迭代次数用尽，未能获得完整答案。",
-            "stagnated": "检索陷入停滞，未能获得新的有效信息。",
-            "unrecoverable": "工具连续失败，无法完成检索。",
-            "evidence_insufficient": "现有证据不足，无法可靠完成回答。",
-            "authority_unverified": "已获取相关页面，但无法验证其官方归属，不能可靠完成回答。",
-            "clarification_required": "需要补充关键实体或约束后才能继续。",
-        }
-        return reasons.get(reason, "未能获得完整答案。")
+            prefixes = (
+                _AUTHORITY_PREFIXES
+                if reason == "authority_unverified"
+                else _INSUFFICIENT_PREFIXES
+            )
+            return prefixes[0 if is_chinese else 1] + draft
+        return _STUB_ANSWERS.get(reason, _STUB_FALLBACK)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -3226,6 +3365,8 @@ class ReactLoopGraphRunner:
             "seen_fingerprints": [],
             "fingerprint_streak": 0,
             "no_progress_streak": 0,
+            "tool_free_streak": 0,
+            "search_calls": 0,
             "tool_error_streak": 0,
             "had_successful_observation": False,
             "last_round_new_evidence": False,
@@ -3287,6 +3428,8 @@ class ReactLoopGraphRunner:
             "seen_fingerprints": [],
             "fingerprint_streak": 0,
             "no_progress_streak": 0,
+            "tool_free_streak": 0,
+            "search_calls": 0,
             "tool_error_streak": 0,
             "had_successful_observation": False,
             "last_round_new_evidence": False,
@@ -3536,6 +3679,8 @@ class ReactLoopGraphRunner:
             "fetch_outcomes": list(final_state.get("fetch_outcomes") or []),
             "synthesis_attempts": int(final_state.get("synthesis_attempts") or 0),
             "forced_synthesis": bool(final_state.get("forced_synthesis")),
+            "search_calls": int(final_state.get("search_calls") or 0),
+            "force_search": bool(self.force_search),
             "compactions": int(final_state.get("compactions") or 0),
             "peak_context_ratio": float(final_state.get("peak_context_ratio") or 0),
             "conversation_resumed": resume,

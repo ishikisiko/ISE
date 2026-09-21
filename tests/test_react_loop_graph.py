@@ -1238,6 +1238,9 @@ class TestShimMode:
             llm=ScriptedChatModel(replies=replies),
             tools=[FakeTools.make("web_search", ["x"])],
             max_iterations=2,
+            # Tool-free rounds are bounded by their own counter
+            # (QD-20260918-02); keep the pre-fix budget for this scenario.
+            termination_config={"tool_free_threshold": 2},
             query="苹果和微软的区别",
         )
         result = runner.run("苹果和微软的区别")
@@ -1295,8 +1298,10 @@ class TestShimMode:
 
         result = runner.run("苹果和微软的区别")
 
+        # Three consecutive tool-free rounds (default ``tool_free_threshold``)
+        # close the loop as stagnated (QD-20260918-02).
         assert result["loop_status"] == "stagnated"
-        assert result["iterations"] == 2
+        assert result["iterations"] == 3
         assert raw not in result["answer"]
 
     def test_structured_action_draft_is_never_returned_by_best_effort(self):

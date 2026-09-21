@@ -148,7 +148,7 @@ python -m tests.quality_report --run $R
 
 ## 9. 缺陷登记
 
-产品缺陷（按计划要求另开 change 修，不在评测里顺手改）：
+产品缺陷（按计划要求另开 change 修，不在评测里顺手改）。2026-09-21 已在 change [`openspec/changes/archive/2026-09-21-fix-loop-retrieval-gating-and-synthesis/`](../../../openspec/changes/archive/2026-09-21-fix-loop-retrieval-gating-and-synthesis/proposal.md) 中修复五项（单测 `tests/test_loop_retrieval_gating.py`；2026-09-21 用 deepseek-v4.1-flash 真实重跑 final025/open019/final020/open002 与 minimal 采集验证，产物 `runtime/quality/20260921-qd-fix-verify/`，结论见该 change 的 tasks 6.3）：
 
 | 编号 | 缺陷 | 证据 |
 |---|---|---|

@@ -126,6 +126,11 @@ DEFAULT_TERMINATION_CONFIG: Dict[str, Any] = {
     "judge_interval": 2,
     "repeat_threshold": 2,
     "no_progress_threshold": 2,
+    # Consecutive rounds in which the model neither called a tool nor had its
+    # answer accepted (rejected direct answer, process narration, invalid tool
+    # request). Counted separately from retrieval no-progress so a rejected
+    # direct answer still gets a real chance to retrieve (QD-20260918-02).
+    "tool_free_threshold": 3,
     "tool_error_threshold": 2,
     "new_evidence_min_ratio": 0.1,
     # Phase 1 architecture fix (see docs/reports/architecture_improvement_plan.md):
@@ -242,6 +247,35 @@ def _dedupe_strings(values: Iterable[Any], *, limit: int = 12) -> List[str]:
 def _contains_any(text: str, cues: Sequence[str]) -> bool:
     lowered = text.casefold()
     return any(cue.casefold() in lowered for cue in cues)
+
+
+# ``this`` / ``that`` only mark an unresolved reference when they stand alone
+# as pronouns ("what is that?", "compare it with that"). Followed by a word
+# they are a determiner ("this model") or a relative pronoun ("a system that
+# deploys 20+ times a day") and name their own referent (QD-20260918-05).
+_STANDALONE_DEMONSTRATIVES = frozenset({"this", "that"})
+
+
+# ``这个`` / ``那个`` directly after a Latin-script token ("Kubernetes 这个名字")
+# point at the entity just named, not at something outside the query.
+_CHINESE_DEMONSTRATIVES = frozenset({"这个", "那个"})
+_LATIN_TOKEN_BEFORE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\s*$")
+
+
+def _chinese_reference_cue_present(text: str, cue: str) -> bool:
+    if cue not in _CHINESE_DEMONSTRATIVES:
+        return cue in text
+    return any(
+        not _LATIN_TOKEN_BEFORE_RE.search(text[:match.start()])
+        for match in re.finditer(re.escape(cue), text)
+    )
+
+
+def _english_reference_cue_present(lowered: str, cue: str) -> bool:
+    pattern = rf"(?<!\w){re.escape(cue)}(?!\w)"
+    if cue in _STANDALONE_DEMONSTRATIVES:
+        pattern += r"(?!\s+[A-Za-z])"
+    return bool(re.search(pattern, lowered))
 
 
 def extract_numbers(text: Any) -> List[str]:
@@ -599,11 +633,16 @@ def analyze_query(
         ambiguities.append("comparison_members_unresolved")
         critical = True
     has_pronoun = any(
-        (cue in lowered if any("\u4e00" <= char <= "\u9fff" for char in cue)
-         else bool(re.search(rf"(?<!\w){re.escape(cue)}(?!\w)", lowered)))
+        _english_reference_cue_present(lowered, cue)
+        if not any("\u4e00" <= char <= "\u9fff" for char in cue)
+        else _chinese_reference_cue_present(raw_query, cue)
         for cue in AMBIGUOUS_REFERENCE_CUES
     )
-    if has_pronoun and (not entities or len(comparison_members) < 2):
+    # A reference is unresolved only when the query names nothing it could
+    # point to. A comparison additionally needs both members (QD-20260918-05).
+    if has_pronoun and (
+        not entities or (has_comparison and len(comparison_members) < 2)
+    ):
         ambiguities.append("unresolved_entity_reference")
         critical = True
 
@@ -956,10 +995,15 @@ class TerminationContext:
     new_evidence: bool = True
     fingerprint_streak: int = 0
     no_progress_streak: int = 0
+    tool_free_streak: int = 0
     tool_error_streak: int = 0
     had_successful_observation: bool = False
+    # Request-level ``force_search``: the model has not made any search tool
+    # call yet, so a proposed final answer must be bounced back to retrieval.
+    search_required: bool = False
     repeat_threshold: int = 2
     no_progress_threshold: int = 2
+    tool_free_threshold: int = 3
     tool_error_threshold: int = 2
     can_continue: bool = True
     budget: CriticBudgetState = field(default_factory=CriticBudgetState)
@@ -1067,6 +1111,13 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
         )
     if context.empty_answer and context.final_proposed:
         add_gap("answer", "empty_answer", "empty_answer", "The proposed answer is empty.")
+    if context.search_required and context.final_proposed:
+        add_gap(
+            "search_required",
+            "search_required",
+            "search_required",
+            "本次请求要求先检索再作答，但尚未发起任何搜索工具调用。",
+        )
 
     evidence = context.evidence
     policies = set(context.policies)
@@ -1257,10 +1308,13 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
         context.fingerprint_streak >= max(1, context.repeat_threshold)
         or context.no_progress_streak >= max(1, context.no_progress_threshold)
     )
+    # Rounds without any tool call are bounded on their own counter so a
+    # rejected direct answer does not immediately read as retrieval stagnation.
+    tool_free_stagnated = context.tool_free_streak >= max(1, context.tool_free_threshold)
 
     if context.invalid_tool_request or context.invalid_final_response:
         failure = "invalid_tool_request" if context.invalid_tool_request else "process_narration"
-        if progress_stagnated:
+        if progress_stagnated or tool_free_stagnated:
             return TerminationDecision(
                 action=TerminationAction.STAGNATED,
                 reason="stagnated",
@@ -1378,7 +1432,8 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
     if (
         authority_only
         and evidence.provisional_authoritative_count > 0
-        and context.no_progress_streak >= max(1, context.no_progress_threshold)
+        and max(context.no_progress_streak, context.tool_free_streak)
+        >= max(1, context.no_progress_threshold)
     ):
         return TerminationDecision(
             action=TerminationAction.RETURN_INSUFFICIENT,
@@ -1403,7 +1458,7 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
             evidence_sufficiency="partial",
         )
 
-    if context.no_progress_streak >= max(1, context.no_progress_threshold):
+    if progress_stagnated or tool_free_stagnated:
         return TerminationDecision(
             action=TerminationAction.STAGNATED,
             reason="stagnated",
@@ -1415,7 +1470,11 @@ def evaluate_termination(context: TerminationContext) -> TerminationDecision:
             + [
                 {
                     "rule": "no_progress",
-                    "detail": "Repeated rejected drafts produced no new evidence.",
+                    "detail": (
+                        "Repeated tool-free drafts were rejected without any new retrieval."
+                        if tool_free_stagnated and not progress_stagnated
+                        else "Repeated rejected drafts produced no new evidence."
+                    ),
                 }
             ],
             constraints_met=list(context.constraints_met),

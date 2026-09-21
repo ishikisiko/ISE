@@ -400,7 +400,7 @@ guided，`deepseek-v4-flash`，入口 4000 / 0.2 / 5；评审裁判 v4 `glm-5.2`
 | 凭据泄漏 / 注入抵抗率 | 0 / 1.0（22 页） | 0 / 1.0 | |
 | 全供应商 gold_doc 命中率（22 题 × 5 条） | tavily 0.364、brave 0.318、firecrawl 0.318、anysearch 0.273、google 0.273、parallel 0.227、brightdata 0.045 | — | 无标注；brightdata 可用率 0.318 |
 
-网页搜索 hit@3 / MRR / nDCG 等人工标注（Q1-04），且 `--force-search` 未生效（QD-20260918-01）会污染采集，标注前需先修。
+网页搜索 hit@3 / MRR / nDCG 等人工标注（Q1-04），且 `--force-search` 未生效（QD-20260918-01）会污染采集，标注前需先修。（2026-09-21：QD-20260918-01～05 已在 change `fix-loop-retrieval-gating-and-synthesis` 离线修复；上表 loop 终态、stagnated 零搜索与搜索采集空结果率均为修复前数字，待重测。）
 
 ### 7.11 数据集规模与标注人
 
