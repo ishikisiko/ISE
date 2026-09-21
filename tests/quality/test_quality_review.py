@@ -82,3 +82,19 @@ def test_review_input_keeps_all_retained_evidence_and_applies_errata():
     empty = deterministic_empty(item)
     assert parse_review(json.dumps(empty), dimensions=[], must_include=2, should_abstain=False)["answer_complete"] is False
     assert REVIEW_VERSION == "v4"
+
+
+def test_jsonl_answer_rows_bind_reviews_by_pre_attachment_digest(tmp_path):
+    from tests.quality.common import load_answer_records, record_digest
+
+    (tmp_path / "answer_details.jsonl").write_text(json.dumps({"qid": "q1", "answer": "A", "control": {}}) + "\n", encoding="utf-8")
+    [row] = load_answer_records(tmp_path)
+    assert row.get("review") is None
+    reviews = tmp_path / f"reviews-{REVIEW_VERSION}"
+    reviews.mkdir()
+    (reviews / "b.json").write_text(json.dumps({"result_digest": row["result_digest"], "judgment": {"core_correct": 2}}), encoding="utf-8")
+    [again] = load_answer_records(tmp_path)
+    assert again["result_digest"] == row["result_digest"]
+    assert again["review"]["judgment"]["core_correct"] == 2
+    unbound = {key: value for key, value in again.items() if key not in {"result_digest", "review"}}
+    assert record_digest(unbound) == row["result_digest"]

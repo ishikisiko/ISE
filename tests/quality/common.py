@@ -427,20 +427,45 @@ def normalize_answer_record(record: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
-def load_study_reviews(round_dir: Path | str, *, version: str = "v3-evidence") -> Dict[str, Dict[str, Any]]:
-    """``result_digest -> review`` for the blinded model-assisted reviews of a study round."""
+REVIEW_VERSIONS = ("v3-evidence", "v4")  # later versions win when both judged the same result
+
+
+def load_study_reviews(round_dir: Path | str, *, version: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """``result_digest -> review`` for the blinded model-assisted reviews of a run or study round.
+
+    Without ``version`` every known rubric directory is read, newest last.
+    """
     reviews: Dict[str, Dict[str, Any]] = {}
-    directory = Path(round_dir) / f"reviews-{version}"
-    if not directory.is_dir():
-        return reviews
-    for path in directory.glob("*.json"):
-        review = read_json(path)
-        if isinstance(review, dict) and review.get("result_digest") and review.get("judgment"):
-            reviews[str(review["result_digest"])] = review
+    for name in ([version] if version else REVIEW_VERSIONS):
+        directory = Path(round_dir) / f"reviews-{name}"
+        if not directory.is_dir():
+            continue
+        for path in directory.glob("*.json"):
+            review = read_json(path)
+            if isinstance(review, dict) and review.get("result_digest") and review.get("judgment"):
+                reviews[str(review["result_digest"])] = review
     return reviews
 
 
-def iter_study_results(round_dir: Path | str, *, review_version: str = "v3-evidence") -> Iterator[Dict[str, Any]]:
+def record_digest(row: Dict[str, Any]) -> str:
+    """Digest of a normalized jsonl answer row, as ``tests.quality_review`` binds reviews to it."""
+    return sha256_bytes(json.dumps(row, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+def attach_reviews(rows: List[Dict[str, Any]], review_dir: Path) -> List[Dict[str, Any]]:
+    """Bind ``reviews-*`` found next to jsonl answer rows; digests are taken before any key is added."""
+    reviews = load_study_reviews(review_dir)
+    for row in rows:
+        if row.get("result_digest") is None:
+            row["result_digest"] = record_digest(row)
+        if reviews and row.get("review") is None:
+            review = reviews.get(row["result_digest"])
+            if review is not None:
+                row["review"] = review
+    return rows
+
+
+def iter_study_results(round_dir: Path | str, *, review_version: Optional[str] = None) -> Iterator[Dict[str, Any]]:
     """Yield normalized rows from ``<round>/runs/*/result.json`` (autonomy study layout).
 
     Reviews bound to the result digest are attached as ``row["review"]`` so
@@ -509,9 +534,9 @@ def load_answer_records(source: Path | str) -> List[Dict[str, Any]]:
     """Load answer rows from a run directory, a jsonl file or a study round."""
     source = Path(source)
     if source.is_file():
-        return [normalize_answer_record(row) for row in read_jsonl(source)]
+        return attach_reviews([normalize_answer_record(row) for row in read_jsonl(source)], source.parent)
     if (source / "answer_details.jsonl").is_file():
-        return [normalize_answer_record(row) for row in read_jsonl(source / "answer_details.jsonl")]
+        return attach_reviews([normalize_answer_record(row) for row in read_jsonl(source / "answer_details.jsonl")], source)
     if (source / "runs").is_dir():
         return list(iter_study_results(source))
     rows: List[Dict[str, Any]] = []
@@ -520,7 +545,7 @@ def load_answer_records(source: Path | str) -> List[Dict[str, Any]]:
             row = normalize_answer_record(row)
             row.setdefault("dataset", name.replace("_details.jsonl", ""))
             rows.append(row)
-    return rows
+    return attach_reviews(rows, source)
 
 
 def dataset_of(row: Dict[str, Any]) -> str:

@@ -60,3 +60,13 @@ def test_compare_rows_applies_regression_gate():
     assert gate["cost_ratio_ok"] is False and gate["accepted"] is False
     accepted_cost = compare_rows(left, worse, pair_key=lambda row: row["qid"], accept_cost="user accepted 2x tokens on 2026-09-09")
     assert accepted_cost["gate"]["cost_ratio_ok"] is True and accepted_cost["gate"]["accepted"] is False
+
+
+def test_abstention_questions_are_scored_by_abstention_not_core(tmp_path):
+    record = _record("abs1", "guided", 0, dataset="abstention")
+    record["review"]["judgment"]["abstention"] = 2
+    rows = per_question_rows([record, _record("q1", "guided", 2)])
+    scorecard = build_scorecard(tmp_path, load_inputs(tmp_path), rows)
+    assert rows[0]["core_correct"] is None and rows[0]["abstention"] == 2
+    assert scorecard["hard_gates"]["core_correct_zero_count"] == 0
+    assert scorecard["judged_questions"] == 2

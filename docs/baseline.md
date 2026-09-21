@@ -379,6 +379,29 @@ token 均值 18,963（P50 5,239 / P95 76,892；75/80 取 transport 旁观）；�
 - gold 口径问题：lc001 / lc002 四模型全丢，答案在语料内另一份近重复文档（project_report_zh / ise_technical_documentation_zh）里，单 `gold_doc_id` 过严；lc004 在合并语料上被 design/plan 的同类描述干扰。本轮不改 gold。
 - 成本：云端 embedding 约 4.1 万次（两模型合计，含网格全部索引）、rerank 1,952 次，无 LLM 调用；四进程并发共用 4 核，本地模型 `index_ms` 偏高，仅作量级参考。默认值未改。
 
+### 7.12 质量评测 · 2026-09-18 真实运行汇总（`runtime/quality/20260918-quality-20260918`）
+
+guided，`deepseek-v4-flash`，入口 4000 / 0.2 / 5；评审裁判 v4 `glm-5.2`（模型辅助，**非人工**）。详细报告：[quality_evaluation_20260918/report.md](reports/quality_evaluation_20260918/report.md)。拒答题只算 `abstention_quality`，不计入 core_correct。
+
+| 指标 | 2026-09-18 | 门槛 | 说明 |
+|---|---:|---|---|
+| D0 冒烟 | 通过 | 退出门三项 | 见 §7.2 |
+| 可答题 core_correct=0 题数 | **16 / 79** | 0 | 降级只剩模板 7、零搜索停滞 2、时效 gold 冲突待核 4、澄清误触发 1、LLM 传输失败 2 |
+| 幻觉引用 | **6 处 / 5 题** | 0 | |
+| 未交付 | 2 | 0 | 均为 LLM 传输失败 |
+| core_correct / 2 | 0.797（CI [0.709, 0.886]） | — | n=79 |
+| request_completeness / grounding / open_task_aux | 0.805 / 0.632 / 0.731 | — | |
+| abstention_quality | 0.938 | ≥ 0.85（=2 的比例） | n=16 |
+| citation_recall / authority_compliance | 0.700 / 0.408 | ≥ 0.9 / — | |
+| loop 终态 | evidence_insufficient 47、succeeded 30、stagnated 16、cancelled 2 | — | stagnated 16 题全部零搜索（QD-20260918-02） |
+| false_exhaustion / premature_success | 0 / 0 | 0 | succeeded 中 core 非满分 5/29 |
+| consistency@3 / pass@1 / pass@3 | 0.80 / 0.80 / 0.90 | — | final001–020 × 3；不一致 final005/010/014/019 |
+| token 均值 / p95；时延 p50 / p95 | 20,848 / 54,198；118 s / 732 s | — | 每正确答案 27,341 token |
+| 凭据泄漏 / 注入抵抗率 | 0 / 1.0（22 页） | 0 / 1.0 | |
+| 全供应商 gold_doc 命中率（22 题 × 5 条） | tavily 0.364、brave 0.318、firecrawl 0.318、anysearch 0.273、google 0.273、parallel 0.227、brightdata 0.045 | — | 无标注；brightdata 可用率 0.318 |
+
+网页搜索 hit@3 / MRR / nDCG 等人工标注（Q1-04），且 `--force-search` 未生效（QD-20260918-01）会污染采集，标注前需先修。
+
 ### 7.11 数据集规模与标注人
 
 见首份报告 §6；全部由 agent 单人构建（`gold_verified_by` 注明），时效类 gold 除 final037/039/041/059 外未对照官方页核实。

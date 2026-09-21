@@ -125,7 +125,8 @@ def per_question_rows(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "loop_status": loop["loop_status"],
                 "outcome": record.get("outcome"),
                 "delivered": loop["delivered"],
-                "core_correct": core_correct_of(record),
+                # Abstention questions carry no must-include facts; they are scored by ``abstention`` only.
+                "core_correct": None if dims.get("abstention") is not None else core_correct_of(record),
                 "request_completeness": dims.get("request_completeness"),
                 "evidence_support": dims.get("evidence_support"),
                 "abstention": dims.get("abstention"),
@@ -289,7 +290,7 @@ def build_scorecard(run_dir: Path, inputs: Dict[str, Any], rows: List[Dict[str, 
         "run_meta": read_json(run_dir / "run_meta.json") if (run_dir / "run_meta.json").is_file() else None,
         "inputs_present": {key: value is not None for key, value in inputs.items()},
         "questions": len(rows),
-        "judged_questions": len(judged),
+        "judged_questions": sum(1 for row in rows if row["core_correct"] is not None or row["abstention"] is not None),
         "validity": validity_block,
         "hard_gates": hard,
         "indices": {"retrieval": retrieval, "evidence": evidence_index, "answer": answer_index, "process": process_index, "cost": cost_block, "reliability": reliability_index},
@@ -319,7 +320,7 @@ def render_report(scorecard: Dict[str, Any], inputs: Dict[str, Any], *, answers_
               f"生成时间 {scorecard['created_at']}。产物目录 `{run_dir}`；答案记录来源 `{answers_source or run_dir}`。本报告由 `python -m tests.quality_report` 从运行产物生成，缺失的维度标为 **{NOT_RUN}**，不会写成 0。", ""]
     lines += ["## 1. 范围与证据等级", "",
               f"- 题数 {scorecard['questions']}；有裁判/人工判定的题数 {scorecard['judged_questions']}。",
-              f"- 冻结信息：commit `{meta.get('commit') or '未知'}`，工作树{'有未提交改动' if meta.get('working_tree_dirty') else '干净'}；配置摘要 `{(meta.get('config') or {}).get('digest', '未知')}`；模型 `{(meta.get('config') or {}).get('model', '未知')}`；裁判 `{(meta.get('judge') or {}).get('model') if isinstance(meta.get('judge'), dict) else ((meta.get('config') or {}).get('judge') or {}).get('model', '未知')}`；rubric `{meta.get('rubric_version', '见 reviews 目录')}`。",
+              f"- 冻结信息：commit `{meta.get('commit') or '未知'}`，工作树{'有未提交改动' if meta.get('working_tree_dirty') else '干净'}；配置摘要 `{(meta.get('config') or {}).get('digest', '未知')}`；模型 `{(meta.get('config') or {}).get('model', '未知')}`；评审裁判 `{(meta.get('review_model') or {}).get('model', '未知')}`；循环内终止判定 `{(meta.get('termination_judge') or ((meta.get('config') or {}).get('judge')) or {}).get('model', '未知')}`；rubric `{meta.get('rubric_version', '见 reviews 目录')}`。",
               "- 证据等级：真实运行产物（answer_details / result.json）→ 确定性离线重算（citation / evidence / loop / cost / fetch）→ 模型辅助评审（reviews）→ 人工标注（dataset/annotations）。裁判分不是人工分；核心正确性单列且拥有一票否决。", ""]
     validity = scorecard["validity"]
     lines += ["## 2. D0 度量有效性", ""]
